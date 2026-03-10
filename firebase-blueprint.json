@@ -1,0 +1,66 @@
+{
+  "entities": {
+    "Song": {
+      "title": "Song",
+      "description": "Metadata and note data for a rhythm game song",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Song title" },
+        "artist": { "type": "string", "description": "Artist name" },
+        "audioUrl": { "type": "string", "description": "URL to the audio file in Firebase Storage" },
+        "difficulty": { "type": "number", "description": "Base complexity (0-1)" },
+        "density": { "type": "number", "description": "Note frequency (0-1)" },
+        "laneVariety": { "type": "number", "description": "Lane variety (0-1)" },
+        "sliderProbability": { "type": "number", "description": "Slider probability (0-1)" },
+        "stamina": { "type": "number", "description": "Stamina/Burst capacity (0-1)" },
+        "notes": { "type": "string", "description": "JSON stringified array of Note objects" },
+        "topScore": { "type": "number", "description": "Highest score achieved on this song" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "artist", "audioUrl", "difficulty", "notes"]
+    },
+    "GlobalScore": {
+      "title": "Global Score",
+      "description": "A high score entry",
+      "type": "object",
+      "properties": {
+        "songId": { "type": "string" },
+        "songName": { "type": "string" },
+        "username": { "type": "string" },
+        "score": { "type": "number" },
+        "accuracy": { "type": "number" },
+        "date": { "type": "string" }
+      },
+      "required": ["songId", "username", "score", "accuracy"]
+    },
+    "Replay": {
+      "title": "Replay",
+      "description": "A saved game replay",
+      "type": "object",
+      "properties": {
+        "songId": { "type": "string" },
+        "songName": { "type": "string" },
+        "artist": { "type": "string" },
+        "difficulty": { "type": "number" },
+        "score": { "type": "number" },
+        "accuracy": { "type": "number" },
+        "events": { "type": "array", "items": { "type": "object" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "firestore": {
+    "/songs/{songId}": {
+      "schema": "Song",
+      "description": "Collection of community-shared songs"
+    },
+    "/globalScores/{scoreId}": {
+      "schema": "GlobalScore",
+      "description": "High scores for all songs"
+    },
+    "/replays/{replayId}": {
+      "schema": "Replay",
+      "description": "Saved game replays"
+    }
+  }
+}

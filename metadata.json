@@ -1,0 +1,5 @@
+{
+  "name": "BeatPulse Rhythm",
+  "description": "A high-energy HTML5 rhythm game where you can play along to your own MP3 files with auto-generated beat maps.",
+  "requestFramePermissions": []
+}

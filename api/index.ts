@@ -21,6 +21,10 @@ interface AdminState {
   updatedAt: string;
 }
 
+interface PersistedAdminState extends AdminState {
+  rowRef: string | null;
+}
+
 interface ScoreRecord {
   score: number;
   accuracy: number;
@@ -431,26 +435,45 @@ function fail(res: Response, status: number, error: string) {
   res.status(status).json({ success: false, error });
 }
 
-async function getAdminState(): Promise<AdminState> {
-  const { rows } = await sql`SELECT id, password_hash, token_secret, updated_at FROM admin_state WHERE id = 'default' LIMIT 1`;
+async function getAdminState(): Promise<PersistedAdminState> {
+  const { rows } = await sql`
+    SELECT ctid::text AS row_ref, password_hash, token_secret, updated_at
+    FROM admin_state
+    ORDER BY updated_at DESC NULLS LAST
+    LIMIT 1
+  `;
   if (rows.length === 0) {
     const initialState: AdminState = {
       passwordHash: createPasswordHash(ADMIN_DEFAULT_PASSWORD),
       tokenSecret: crypto.randomBytes(32).toString("hex"),
       updatedAt: new Date().toISOString(),
     };
-    await sql`
-      INSERT INTO admin_state (id, password_hash, token_secret, updated_at)
-      VALUES ('default', ${initialState.passwordHash}, ${initialState.tokenSecret}, ${initialState.updatedAt})
-    `;
-    return initialState;
+    try {
+      await sql`
+        INSERT INTO admin_state (id, password_hash, token_secret, updated_at)
+        VALUES ('default', ${initialState.passwordHash}, ${initialState.tokenSecret}, ${initialState.updatedAt})
+      `;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (!message.includes("invalid input syntax for type integer")) {
+        throw error;
+      }
+
+      await sql`
+        INSERT INTO admin_state (id, password_hash, token_secret, updated_at)
+        VALUES (1, ${initialState.passwordHash}, ${initialState.tokenSecret}, ${initialState.updatedAt})
+      `;
+    }
+
+    return getAdminState();
   }
 
-  const state = rows[0] as { password_hash: string; token_secret: string; updated_at: Date };
-  const resolvedState: AdminState = {
+  const state = rows[0] as { row_ref: string; password_hash: string; token_secret: string; updated_at: Date };
+  const resolvedState: PersistedAdminState = {
     passwordHash: state.password_hash,
     tokenSecret: state.token_secret,
     updatedAt: new Date(state.updated_at).toISOString(),
+    rowRef: state.row_ref,
   };
 
   if (process.env.ADMIN_PASSWORD && !verifyPassword(process.env.ADMIN_PASSWORD, resolvedState.passwordHash)) {
@@ -459,18 +482,18 @@ async function getAdminState(): Promise<AdminState> {
     await sql`
       UPDATE admin_state
       SET password_hash = ${resolvedState.passwordHash}, updated_at = ${resolvedState.updatedAt}
-      WHERE id = 'default'
+      WHERE ctid::text = ${resolvedState.rowRef}
     `;
   }
 
   return resolvedState;
 }
 
-async function writeAdminState(state: AdminState) {
+async function writeAdminState(state: PersistedAdminState) {
   await sql`
     UPDATE admin_state
     SET password_hash = ${state.passwordHash}, token_secret = ${state.tokenSecret}, updated_at = ${state.updatedAt}
-    WHERE id = 'default'
+    WHERE ctid::text = ${state.rowRef}
   `;
 }
 
@@ -707,7 +730,7 @@ app.post("/api/admin/password", requireAdmin, async (req, res) => {
       return fail(res, 400, "Password must be at least 4 characters.");
     }
 
-    const adminState: AdminState = {
+    const adminState: PersistedAdminState = {
       ...(await getAdminState()),
       passwordHash: createPasswordHash(newPassword),
       tokenSecret: crypto.randomBytes(32).toString("hex"),

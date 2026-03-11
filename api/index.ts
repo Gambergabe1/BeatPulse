@@ -84,6 +84,12 @@ interface LeaderboardModerationResult {
   affectedSongs: number;
 }
 
+interface StorageNormalizedRows {
+  songs: number;
+  globalScores: number;
+  replays: number;
+}
+
 function ensureEnvironment() {
   if (!process.env.POSTGRES_URL && !process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL/POSTGRES_URL is not configured.");
@@ -499,6 +505,20 @@ async function setStoredSchemaVersion(details: Record<string, number>) {
   `;
 }
 
+async function getStorageCollectionCounts(): Promise<StorageNormalizedRows> {
+  const [{ rows: songRows }, { rows: globalScoreRows }, { rows: replayRows }] = await Promise.all([
+    sql`SELECT COUNT(*) AS c FROM songs`,
+    sql`SELECT COUNT(*) AS c FROM global_scores`,
+    sql`SELECT COUNT(*) AS c FROM replays`,
+  ]);
+
+  return {
+    songs: clampNumber(songRows[0]?.c, 0),
+    globalScores: clampNumber(globalScoreRows[0]?.c, 0),
+    replays: clampNumber(replayRows[0]?.c, 0),
+  };
+}
+
 async function migrateSongRows() {
   const { rows } = await sql`SELECT ctid::text AS ctid, * FROM songs`;
   let migrated = 0;
@@ -589,10 +609,16 @@ async function migrateReplayRows() {
   return migrated;
 }
 
-async function migratePersistedStorage() {
+async function migratePersistedStorage(force = false) {
   const currentVersion = await getStoredSchemaVersion();
-  if (currentVersion >= STORAGE_SCHEMA_VERSION) {
-    return;
+  const checkedCollections = ["songs", "global-scores", "replays"];
+
+  if (!force && currentVersion >= STORAGE_SCHEMA_VERSION) {
+    return {
+      schemaVersion: STORAGE_SCHEMA_VERSION,
+      checkedCollections,
+      normalizedRows: await getStorageCollectionCounts(),
+    };
   }
 
   const [songsMigrated, globalScoresMigrated, replaysMigrated] = await Promise.all([
@@ -606,6 +632,16 @@ async function migratePersistedStorage() {
     globalScoresMigrated,
     replaysMigrated,
   });
+
+  return {
+    schemaVersion: STORAGE_SCHEMA_VERSION,
+    checkedCollections,
+    normalizedRows: {
+      songs: songsMigrated,
+      globalScores: globalScoresMigrated,
+      replays: replaysMigrated,
+    },
+  };
 }
 
 function toTopScoreFromScores(scores: ScoreRecord[]) {
@@ -681,6 +717,24 @@ app.post("/api/admin/password", requireAdmin, async (req, res) => {
     return ok(res, { message: "Password updated." });
   } catch {
     return fail(res, 500, "Failed to update password.");
+  }
+});
+
+app.post("/api/admin/storage/force-update", requireAdmin, async (_req, res) => {
+  try {
+    await prepareStorageSchema();
+    const migration = await migratePersistedStorage(true);
+    const counts = await getStorageCollectionCounts();
+
+    return ok(res, {
+      ...migration,
+      songsCount: counts.songs,
+      globalScoresCount: counts.globalScores,
+      replaysCount: counts.replays,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to force storage update.";
+    return fail(res, 500, message);
   }
 });
 

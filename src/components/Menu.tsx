@@ -1,11 +1,12 @@
 ﻿import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search, ArrowLeft } from 'lucide-react';
+import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search, ArrowLeft, RefreshCw } from 'lucide-react';
 import { loadAudioFile, generateNotesFromAudio } from '../utils/audio';
 import { SongData, Settings } from '../types';
 import {
   changeAdminPassword,
   deleteCommunitySong,
+  forceStorageUpdate,
   getCommunitySongs,
   getGlobalScores,
   GlobalScoreRecord,
@@ -72,6 +73,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [integrityResults, setIntegrityResults] = useState<any[] | null>(null);
   const [isCheckingIntegrity, setIsCheckingIntegrity] = useState(false);
   const [isAdminLoading, setIsAdminLoading] = useState(false);
+  const [isForcingStorageUpdate, setIsForcingStorageUpdate] = useState(false);
   const [isModeratingLeaderboard, setIsModeratingLeaderboard] = useState(false);
   const [loadingSongId, setLoadingSongId] = useState<string | null>(null);
   const [leaderboardRemovalTarget, setLeaderboardRemovalTarget] = useState<GlobalScoreRecord | null>(null);
@@ -123,40 +125,42 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     onSaveSettings(updatedSettings);
   }, [complexity, density, laneVariety, sliderProbability, stamina]);
 
-  useEffect(() => {
-    const fetchCommunitySongs = async () => {
-      try {
-        const songs = await getCommunitySongs();
-        setCommunitySongs(songs);
-      } catch (err) {
-        console.error('Failed to fetch songs:', err);
-      }
-    };
-      
-    const fetchGlobalScores = async () => {
-      try {
-        const { scores, nextOffset } = await getGlobalScores({ limit: 100, offset: 0 });
-        setGlobalScores(scores);
-        setGlobalScoresOffset(nextOffset || 0);
-        setHasMoreScores(nextOffset !== null);
-      } catch (err) {
-        console.error('Failed to fetch global scores:', err);
-      }
-    };
-    fetchGlobalScores();
-      
-    const fetchReplays = async () => {
-      try {
-        const replays = await getReplays();
-        setSavedReplays(replays);
-      } catch (err) {
-        console.error('Failed to fetch replays:', err);
-      }
-    };
-
-    fetchCommunitySongs();
-    fetchReplays();
+  const loadCommunitySongs = useCallback(async () => {
+    try {
+      const songs = await getCommunitySongs();
+      setCommunitySongs(songs);
+    } catch (err) {
+      console.error('Failed to fetch songs:', err);
+    }
   }, []);
+
+  const loadGlobalScores = useCallback(async () => {
+    try {
+      const { scores, nextOffset } = await getGlobalScores({ limit: 100, offset: 0 });
+      setGlobalScores(scores);
+      setGlobalScoresOffset(nextOffset || 0);
+      setHasMoreScores(nextOffset !== null);
+    } catch (err) {
+      console.error('Failed to fetch global scores:', err);
+    }
+  }, []);
+
+  const loadReplays = useCallback(async () => {
+    try {
+      const replays = await getReplays();
+      setSavedReplays(replays);
+    } catch (err) {
+      console.error('Failed to fetch replays:', err);
+    }
+  }, []);
+
+  const refreshStoredCollections = useCallback(async () => {
+    await Promise.all([loadCommunitySongs(), loadGlobalScores(), loadReplays()]);
+  }, [loadCommunitySongs, loadGlobalScores, loadReplays]);
+
+  useEffect(() => {
+    refreshStoredCollections();
+  }, [refreshStoredCollections]);
 
   // Dynamic note scaling when complexity changes
   useEffect(() => {
@@ -628,6 +632,36 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       setIntegrityResults([{ name: 'Integrity Check', status: 'ERROR', details: err.message || 'Unknown error' }]);
     } finally {
       setIsCheckingIntegrity(false);
+    }
+  };
+
+  const handleForceStorageUpdate = async () => {
+    if (!adminToken) {
+      setError('Admin login required.');
+      return;
+    }
+
+    setIsForcingStorageUpdate(true);
+    setError(null);
+
+    try {
+      const result = await forceStorageUpdate(adminToken);
+      await refreshStoredCollections();
+      await runIntegrityCheck();
+
+      const rewrittenMessage =
+        result.rewrittenCollections && result.rewrittenCollections.length > 0
+          ? ` Rewrote: ${result.rewrittenCollections.join(', ')}.`
+          : '';
+
+      alert(
+        `Forced update complete. Normalized ${result.normalizedRows.songs} songs, ${result.normalizedRows.globalScores} leaderboard entries, and ${result.normalizedRows.replays} replays.${rewrittenMessage}`
+      );
+    } catch (err: any) {
+      console.error('Forced storage update failed:', err);
+      setError(err.message || 'Failed to force storage update');
+    } finally {
+      setIsForcingStorageUpdate(false);
     }
   };
 
@@ -1163,11 +1197,23 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                       </button>
                       <button 
                         onClick={runIntegrityCheck}
-                        disabled={isCheckingIntegrity}
-                        className={`text-xs uppercase tracking-widest flex items-center gap-1 ${isCheckingIntegrity ? 'text-white/20' : 'text-neon-green hover:text-white'}`}
+                        disabled={isCheckingIntegrity || isForcingStorageUpdate}
+                        className={`text-xs uppercase tracking-widest flex items-center gap-1 ${
+                          isCheckingIntegrity || isForcingStorageUpdate ? 'text-white/20' : 'text-neon-green hover:text-white'
+                        }`}
                       >
                         <Check className={`w-3 h-3 ${isCheckingIntegrity ? 'animate-spin' : ''}`} />
                         Integrity Check
+                      </button>
+                      <button
+                        onClick={handleForceStorageUpdate}
+                        disabled={isForcingStorageUpdate || isCheckingIntegrity}
+                        className={`text-xs uppercase tracking-widest flex items-center gap-1 ${
+                          isForcingStorageUpdate || isCheckingIntegrity ? 'text-white/20' : 'text-neon-blue hover:text-white'
+                        }`}
+                      >
+                        <RefreshCw className={`w-3 h-3 ${isForcingStorageUpdate ? 'animate-spin' : ''}`} />
+                        Force Update
                       </button>
                       <button 
                         onClick={handleAdminLogout}

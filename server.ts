@@ -100,11 +100,19 @@ interface LeaderboardModerationResult {
   affectedSongs: number;
 }
 
+interface StorageNormalizedRows {
+  songs: number;
+  globalScores: number;
+  replays: number;
+}
+
 interface StorageMetaRecord {
   schemaVersion: number;
   updatedAt: string;
   migratedCollections: string[];
   backups: string[];
+  checkedCollections: string[];
+  normalizedRows: StorageNormalizedRows;
 }
 
 function ensureDirectories() {
@@ -361,10 +369,16 @@ function writeReplays(replays: ReplayRecord[]) {
 function migrateLocalStorage(): StorageMetaRecord {
   const migratedCollections: string[] = [];
   const backups: string[] = [];
+  const checkedCollections = ["songs", "global-scores", "replays"];
 
   const normalizedSongs = readSongs();
   const normalizedGlobalScores = readGlobalScores();
   const normalizedReplays = readReplays();
+  const normalizedRows: StorageNormalizedRows = {
+    songs: normalizedSongs.length,
+    globalScores: normalizedGlobalScores.length,
+    replays: normalizedReplays.length,
+  };
 
   const rawSongs = readCollection<unknown>(SONGS_FILE, []);
   if (JSON.stringify(rawSongs) !== JSON.stringify(normalizedSongs)) {
@@ -395,6 +409,8 @@ function migrateLocalStorage(): StorageMetaRecord {
     updatedAt: new Date().toISOString(),
     migratedCollections,
     backups,
+    checkedCollections,
+    normalizedRows,
   };
 
   writeCollection(STORAGE_META_FILE, meta);
@@ -600,6 +616,30 @@ async function startServer() {
     };
     saveAdminState(adminState);
     return ok(res, { message: "Password updated." });
+  });
+
+  app.post("/api/admin/storage/force-update", requireAdmin, (_req, res) => {
+    try {
+      ensureDirectories();
+      const meta = migrateLocalStorage();
+      const songs = readSongs();
+      const globalScores = readGlobalScores();
+      const replays = readReplays();
+
+      return ok(res, {
+        schemaVersion: meta.schemaVersion,
+        checkedCollections: meta.checkedCollections,
+        normalizedRows: meta.normalizedRows,
+        rewrittenCollections: meta.migratedCollections,
+        backups: meta.backups,
+        songsCount: songs.length,
+        globalScoresCount: globalScores.length,
+        replaysCount: replays.length,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to force storage update.";
+      return fail(res, 500, message);
+    }
   });
 
   app.post("/api/admin/leaderboard/remove-player", requireAdmin, (req, res) => {

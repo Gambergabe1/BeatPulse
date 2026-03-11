@@ -69,6 +69,21 @@ export interface SongStorageIssue {
   missingNotes: boolean;
 }
 
+export interface ForcedStorageUpdateResult {
+  schemaVersion: number;
+  checkedCollections: string[];
+  normalizedRows: {
+    songs: number;
+    globalScores: number;
+    replays: number;
+  };
+  songsCount: number;
+  globalScoresCount: number;
+  replaysCount: number;
+  rewrittenCollections?: string[];
+  backups?: string[];
+}
+
 interface ApiErrorResponse {
   success: false;
   error: string;
@@ -270,6 +285,17 @@ export const removeLeaderboardPlayer = async (
     body: JSON.stringify({ username, reason }),
   });
   return parseApiResponse<LeaderboardModerationResult>(res);
+};
+
+export const forceStorageUpdate = async (token: string): Promise<ForcedStorageUpdateResult> => {
+  const res = await fetch('/api/admin/storage/force-update', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+  });
+  return parseApiResponse<ForcedStorageUpdateResult>(res);
 };
 
 export const getIntegrityReport = async (): Promise<{

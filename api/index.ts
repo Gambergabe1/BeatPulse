@@ -5,8 +5,24 @@ import path from "node:path";
 import { del, put } from "@vercel/blob";
 import { createPool } from "@vercel/postgres";
 
+function readEnv(name: string): string | undefined {
+  const raw = process.env[name];
+  if (typeof raw !== "string") return undefined;
+
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+
+  const wrappedInDoubleQuotes = trimmed.startsWith('"') && trimmed.endsWith('"');
+  const wrappedInSingleQuotes = trimmed.startsWith("'") && trimmed.endsWith("'");
+  if (wrappedInDoubleQuotes || wrappedInSingleQuotes) {
+    return trimmed.slice(1, -1).trim() || undefined;
+  }
+
+  return trimmed;
+}
+
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7;
-const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
+const ADMIN_DEFAULT_PASSWORD = readEnv("ADMIN_PASSWORD") || "admin1234";
 const UPLOAD_SIZE_BYTES = 1024 * 1024 * 150;
 
 interface ScoreRecord {
@@ -81,9 +97,9 @@ interface SongStorageIssue {
 let schemaPromise: Promise<void> | null = null;
 let isSchemaReady = false;
 const databaseConnectionString =
-  process.env.POSTGRES_URL ||
-  process.env.DATABASE_URL ||
-  process.env.POSTGRES_URL_NON_POOLING ||
+  readEnv("POSTGRES_URL") ||
+  readEnv("DATABASE_URL") ||
+  readEnv("POSTGRES_URL_NON_POOLING") ||
   "";
 const db = databaseConnectionString
   ? createPool({ connectionString: databaseConnectionString })
@@ -181,7 +197,7 @@ function getDb() {
 }
 
 function getBlobToken() {
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  const token = readEnv("BLOB_READ_WRITE_TOKEN");
   if (!token) {
     throw new Error("Blob storage is not configured. Set BLOB_READ_WRITE_TOKEN in Vercel.");
   }
@@ -389,8 +405,9 @@ async function getAdminState(): Promise<AdminState> {
   let tokenSecret = String(existing.token_secret);
   let updatedAt = String(existing.updated_at);
 
-  if (process.env.ADMIN_PASSWORD && !verifyPassword(process.env.ADMIN_PASSWORD, passwordHash)) {
-    passwordHash = createPasswordHash(process.env.ADMIN_PASSWORD);
+  const configuredAdminPassword = readEnv("ADMIN_PASSWORD");
+  if (configuredAdminPassword && !verifyPassword(configuredAdminPassword, passwordHash)) {
+    passwordHash = createPasswordHash(configuredAdminPassword);
     tokenSecret = crypto.randomBytes(32).toString("hex");
     updatedAt = new Date().toISOString();
     await database.sql`

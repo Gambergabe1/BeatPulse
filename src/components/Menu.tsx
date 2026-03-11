@@ -153,7 +153,11 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         setReadySong(prev => prev ? {
           ...prev,
           notes: newNotes,
-          difficulty: complexity
+          difficulty: complexity,
+          density,
+          laneVariety,
+          sliderProbability,
+          stamina
         } : null);
       } catch (err) {
         console.error("Failed to regenerate notes:", err);
@@ -205,7 +209,11 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         artist,
         audioBuffer,
         notes,
-        difficulty: complexity
+        difficulty: complexity,
+        density,
+        laneVariety,
+        sliderProbability,
+        stamina
       });
       setMetadata({ name, artist });
     } catch (err) {

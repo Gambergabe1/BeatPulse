@@ -71,11 +71,11 @@ const CHART_DIFFICULTY_PRESETS: Record<
     label: 'Expert',
     caption: 'Ranked-map flow',
     description: 'More stream-heavy pacing with stronger hand flow and fewer random burst walls.',
-    complexity: 0.72,
-    density: 0.58,
-    laneVariety: 0.66,
-    sliderProbability: 0.14,
-    stamina: 0.58
+    complexity: 0.76,
+    density: 0.56,
+    laneVariety: 0.58,
+    sliderProbability: 0.08,
+    stamina: 0.56
   },
   MASTER: {
     label: 'Master',

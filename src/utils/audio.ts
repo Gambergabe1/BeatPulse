@@ -406,9 +406,13 @@ export async function generateNotesFromAudio(
   let currentQuickRunStart = -Infinity;
   let recentBurstStarts: number[] = [];
 
-  const baseSpacing = Math.max(minNoteSpacing, 0.24 - density * 0.11 - complexity * 0.025);
-  const streamSpacingFloor = Math.max(minNoteSpacing, baseSpacing * 0.82);
-  const streamSpacingCeiling = Math.max(streamSpacingFloor + 0.06, 0.3 - density * 0.04 - complexity * 0.015);
+  const highDifficultySpeedBonus = Math.max(0, complexity - 0.66);
+  const baseSpacing = Math.max(minNoteSpacing, 0.32 - density * 0.075 - complexity * 0.015 - highDifficultySpeedBonus * 0.05);
+  const streamSpacingFloor = Math.max(minNoteSpacing, baseSpacing * Math.max(0.96, 1.04 - highDifficultySpeedBonus * 0.3));
+  const streamSpacingCeiling = Math.max(
+    streamSpacingFloor + 0.04,
+    0.36 - density * 0.025 - complexity * 0.008 - highDifficultySpeedBonus * 0.03
+  );
   const quickBurstSpacing = Math.max(streamSpacingFloor, 0.145 - density * 0.025 - stamina * 0.015);
   const burstSpacingFloor = Math.max(minNoteSpacing, quickBurstSpacing * 0.78);
   const burstWindowSeconds = 15;
@@ -436,7 +440,7 @@ export async function generateNotesFromAudio(
       timeSinceLast <= streamSpacingCeiling &&
       (frame.lowRatio > 1.01 || frame.midRatio > 1.03 || frame.onsetRatio > 1.02);
     const requiredScore = isStreamContinuation
-      ? threshold - (0.08 + density * 0.04 + complexity * 0.03)
+      ? threshold - (0.015 + density * 0.012 + complexity * 0.012 + highDifficultySpeedBonus * 0.035)
       : threshold;
     const isLocalPeak =
       frame.combinedScore >= frames[i - 1].combinedScore &&

@@ -3,7 +3,7 @@ import multer from "multer";
 import crypto from "node:crypto";
 import path from "node:path";
 import { del, put } from "@vercel/blob";
-import { sql } from "@vercel/postgres";
+import { createPool } from "@vercel/postgres";
 
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
@@ -80,6 +80,14 @@ interface SongStorageIssue {
 
 let schemaPromise: Promise<void> | null = null;
 let isSchemaReady = false;
+const databaseConnectionString =
+  process.env.POSTGRES_URL ||
+  process.env.DATABASE_URL ||
+  process.env.POSTGRES_URL_NON_POOLING ||
+  "";
+const db = databaseConnectionString
+  ? createPool({ connectionString: databaseConnectionString })
+  : null;
 
 const uploader = multer({
   storage: multer.memoryStorage(),
@@ -165,6 +173,44 @@ function fail(res: Response, status: number, error: string) {
   res.status(status).json({ success: false, error });
 }
 
+function getDb() {
+  if (!db) {
+    throw new Error("Database is not configured. Set POSTGRES_URL or DATABASE_URL in Vercel.");
+  }
+  return db;
+}
+
+function getBlobToken() {
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  if (!token) {
+    throw new Error("Blob storage is not configured. Set BLOB_READ_WRITE_TOKEN in Vercel.");
+  }
+  return token;
+}
+
+function getPublicErrorMessage(error: unknown): string {
+  if (error instanceof multer.MulterError) {
+    if (error.code === "LIMIT_FILE_SIZE") {
+      return "Audio file is too large for this upload.";
+    }
+    return error.message;
+  }
+
+  if (error instanceof Error) {
+    if (
+      error.message.includes("POSTGRES_URL") ||
+      error.message.includes("DATABASE_URL") ||
+      error.message.includes("BLOB_READ_WRITE_TOKEN") ||
+      error.message.includes("Blob storage is not configured") ||
+      error.message.includes("Database is not configured")
+    ) {
+      return error.message;
+    }
+  }
+
+  return "Internal Server Error";
+}
+
 function toSongRecord(row: any, scores: ScoreRecord[]): CommunitySongRecord {
   return {
     id: row.id,
@@ -220,14 +266,16 @@ async function ensureStorageReady() {
   if (schemaPromise) return schemaPromise;
 
   schemaPromise = (async () => {
-    await sql`CREATE TABLE IF NOT EXISTS admin_state (
+    const database = getDb();
+
+    await database.sql`CREATE TABLE IF NOT EXISTS admin_state (
       id INTEGER PRIMARY KEY CHECK (id = 1),
       password_hash TEXT NOT NULL,
       token_secret TEXT NOT NULL,
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );`;
 
-    await sql`CREATE TABLE IF NOT EXISTS songs (
+    await database.sql`CREATE TABLE IF NOT EXISTS songs (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       artist TEXT NOT NULL,
@@ -246,7 +294,7 @@ async function ensureStorageReady() {
       status TEXT NOT NULL DEFAULT 'ready'
     );`;
 
-    await sql`CREATE TABLE IF NOT EXISTS song_scores (
+    await database.sql`CREATE TABLE IF NOT EXISTS song_scores (
       id BIGSERIAL PRIMARY KEY,
       song_id TEXT NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
       score INTEGER NOT NULL,
@@ -255,7 +303,7 @@ async function ensureStorageReady() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );`;
 
-    await sql`CREATE TABLE IF NOT EXISTS global_scores (
+    await database.sql`CREATE TABLE IF NOT EXISTS global_scores (
       id BIGSERIAL PRIMARY KEY,
       score INTEGER NOT NULL,
       accuracy DOUBLE PRECISION NOT NULL,
@@ -266,7 +314,7 @@ async function ensureStorageReady() {
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );`;
 
-    await sql`CREATE TABLE IF NOT EXISTS replays (
+    await database.sql`CREATE TABLE IF NOT EXISTS replays (
       id BIGSERIAL PRIMARY KEY,
       song_id TEXT NOT NULL,
       song_name TEXT NOT NULL,
@@ -283,13 +331,13 @@ async function ensureStorageReady() {
       events JSONB NOT NULL DEFAULT '[]'::jsonb
     );`;
 
-    await sql`CREATE INDEX IF NOT EXISTS song_scores_song_idx ON song_scores(song_id);`;
-    await sql`CREATE INDEX IF NOT EXISTS global_scores_created_idx ON global_scores(created_at DESC);`;
-    await sql`CREATE INDEX IF NOT EXISTS replays_created_idx ON replays(created_at DESC);`;
+    await database.sql`CREATE INDEX IF NOT EXISTS song_scores_song_idx ON song_scores(song_id);`;
+    await database.sql`CREATE INDEX IF NOT EXISTS global_scores_created_idx ON global_scores(created_at DESC);`;
+    await database.sql`CREATE INDEX IF NOT EXISTS replays_created_idx ON replays(created_at DESC);`;
 
     const defaultPassword = createPasswordHash(ADMIN_DEFAULT_PASSWORD);
     const defaultSecret = crypto.randomBytes(32).toString("hex");
-    await sql`
+    await database.sql`
       INSERT INTO admin_state (id, password_hash, token_secret)
       VALUES (1, ${defaultPassword}, ${defaultSecret})
       ON CONFLICT (id) DO NOTHING;
@@ -307,7 +355,8 @@ async function ensureStorageReady() {
 
 async function getAdminState(): Promise<AdminState> {
   await ensureStorageReady();
-  const { rows } = await sql`
+  const database = getDb();
+  const { rows } = await database.sql`
     SELECT password_hash, token_secret, updated_at
     FROM admin_state
     WHERE id = 1
@@ -317,7 +366,7 @@ async function getAdminState(): Promise<AdminState> {
   if (!existing) {
     const passwordHash = createPasswordHash(ADMIN_DEFAULT_PASSWORD);
     const tokenSecret = crypto.randomBytes(32).toString("hex");
-    await sql`
+    await database.sql`
       INSERT INTO admin_state (id, password_hash, token_secret)
       VALUES (1, ${passwordHash}, ${tokenSecret});
     `;
@@ -336,7 +385,7 @@ async function getAdminState(): Promise<AdminState> {
     passwordHash = createPasswordHash(process.env.ADMIN_PASSWORD);
     tokenSecret = crypto.randomBytes(32).toString("hex");
     updatedAt = new Date().toISOString();
-    await sql`
+    await database.sql`
       UPDATE admin_state
       SET password_hash = ${passwordHash}, token_secret = ${tokenSecret}, updated_at = ${updatedAt}
       WHERE id = 1
@@ -347,7 +396,8 @@ async function getAdminState(): Promise<AdminState> {
 }
 
 async function getAllSongs() {
-  const { rows } = await sql`
+  const database = getDb();
+  const { rows } = await database.sql`
     SELECT id, name, artist, audio_url, audio_blob_key, notes_url, notes_blob_key,
       difficulty, density, lane_variety, slider_probability, stamina,
       top_score, author_name, created_at, status
@@ -358,7 +408,7 @@ async function getAllSongs() {
   const songs: CommunitySongRecord[] = [];
 
   for (const row of rows) {
-    const { rows: scoreRows } = await sql`
+    const { rows: scoreRows } = await database.sql`
       SELECT score, accuracy, username, created_at
       FROM song_scores
       WHERE song_id = ${row.id}
@@ -379,7 +429,8 @@ async function getAllSongs() {
 }
 
 async function getSongById(id: string) {
-  const { rows } = await sql`
+  const database = getDb();
+  const { rows } = await database.sql`
     SELECT id, name, artist, audio_url, audio_blob_key, notes_url, notes_blob_key,
       difficulty, density, lane_variety, slider_probability, stamina,
       top_score, author_name, created_at, status
@@ -391,7 +442,7 @@ async function getSongById(id: string) {
   const row = rows[0];
   if (!row) return null;
 
-  const { rows: scoreRows } = await sql`
+  const { rows: scoreRows } = await database.sql`
     SELECT score, accuracy, username, created_at
     FROM song_scores
     WHERE song_id = ${id}
@@ -409,7 +460,8 @@ async function getSongById(id: string) {
 }
 
 async function getSongByIdRaw(id: string) {
-  const { rows } = await sql`
+  const database = getDb();
+  const { rows } = await database.sql`
     SELECT id, name, artist, audio_url, audio_blob_key, notes_url, notes_blob_key,
       difficulty, density, lane_variety, slider_probability, stamina,
       top_score, author_name, created_at, status
@@ -423,8 +475,12 @@ async function getSongByIdRaw(id: string) {
 async function deleteBlobSafe(...urls: Array<string | undefined>) {
   const target = urls.filter(Boolean) as string[];
   if (target.length === 0) return;
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!token) return;
+  let token: string;
+  try {
+    token = getBlobToken();
+  } catch {
+    return;
+  }
   try {
     await del(target, { token });
   } catch {

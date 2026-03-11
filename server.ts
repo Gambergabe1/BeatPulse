@@ -5,9 +5,12 @@ import fs from "fs";
 import crypto from "crypto";
 import { fileURLToPath } from "url";
 import multer from "multer";
+import { config as loadEnv } from "dotenv";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+loadEnv({ path: path.join(__dirname, ".env.local") });
+loadEnv();
 const APP_ROOT = __dirname;
 const ADMIN_STATE_FILE = path.join(APP_ROOT, ".admin-state.json");
 const DATA_DIR = path.resolve(process.env.BEATPULSE_DATA_DIR || path.join(APP_ROOT, ".server-data"));
@@ -122,9 +125,31 @@ function writeFileAtomic(filePath: string, payload: string | Buffer | Uint8Array
 
 function hasSongAssets(song: CommunitySongRecord) {
   return {
-    missingAudio: !fs.existsSync(path.join(UPLOAD_DIR, song.audioPath)),
-    missingNotes: !fs.existsSync(path.join(UPLOAD_DIR, song.notesPath)),
+    missingAudio: !hasSongAsset(song.audioPath),
+    missingNotes: !hasSongAsset(song.notesPath),
   };
+}
+
+function isExistingFile(filePath: string) {
+  try {
+    return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function hasSongAsset(relativePath: string) {
+  const normalized = relativePath.replace(/\\/g, "/");
+  const primary = path.join(UPLOAD_DIR, normalized);
+  if (isExistingFile(primary)) return true;
+
+  if (normalized.startsWith("songs/")) {
+    const legacyRelative = normalized.substring("songs/".length);
+    const legacy = path.join(UPLOAD_DIR, legacyRelative);
+    if (isExistingFile(legacy)) return true;
+  }
+
+  return false;
 }
 
 function readSongs(): CommunitySongRecord[] {
@@ -231,11 +256,20 @@ function loadAdminState(): AdminState {
     if (!parsed.passwordHash || !parsed.tokenSecret) {
       throw new Error("Admin state file is missing required fields.");
     }
-    return {
+
+    const resolvedState: AdminState = {
       passwordHash: parsed.passwordHash,
       tokenSecret: parsed.tokenSecret,
       updatedAt: parsed.updatedAt || new Date().toISOString(),
     };
+
+    if (process.env.ADMIN_PASSWORD && !verifyPassword(process.env.ADMIN_PASSWORD, resolvedState.passwordHash)) {
+      resolvedState.passwordHash = createPasswordHash(process.env.ADMIN_PASSWORD);
+      resolvedState.updatedAt = new Date().toISOString();
+      saveAdminState(resolvedState);
+    }
+
+    return resolvedState;
   } catch {
     const fallbackState: AdminState = {
       passwordHash: createPasswordHash(ADMIN_DEFAULT_PASSWORD),
@@ -276,6 +310,17 @@ async function startServer() {
 
   ensureDirectories();
   app.use(express.json({ limit: "2mb" }));
+  app.use("/api/uploads", (req, res, next) => {
+    if (!req.path.startsWith("/songs/")) return next();
+
+    const legacyPath = req.path.replace(/^\/songs\//, "");
+    const legacyFullPath = path.join(UPLOAD_DIR, legacyPath);
+    if (isExistingFile(legacyFullPath)) {
+      return res.sendFile(legacyFullPath);
+    }
+
+    return next();
+  });
   app.use("/api/uploads", express.static(UPLOAD_DIR));
 
   app.get("/api/health", (_req, res) => {
@@ -355,7 +400,7 @@ async function startServer() {
     const fileExt = path.extname(req.file.originalname || ".mp3");
     const safeAudioName = sanitizeFileName(req.file.originalname ? path.parse(req.file.originalname).name : "audio");
     const safeFileName = `${safeAudioName}${fileExt || ".mp3"}`;
-    const songDir = path.join(UPLOAD_DIR, id);
+    const songDir = path.join(UPLOAD_DIR, "songs", id);
     const notesFile = "notes.json";
     const audioAbsolute = path.join(songDir, safeFileName);
     const notesAbsolute = path.join(songDir, notesFile);
@@ -378,8 +423,8 @@ async function startServer() {
         scores: [],
         authorName,
         createdAt: new Date().toISOString(),
-        audioPath: `songs/${id}/${safeFileName}`,
-        notesPath: `songs/${id}/${notesFile}`,
+      audioPath: `songs/${id}/${safeFileName}`,
+      notesPath: `songs/${id}/${notesFile}`,
         audioUrl: `/api/uploads/songs/${id}/${safeFileName}`,
         notesUrl: `/api/uploads/songs/${id}/${notesFile}`,
         status: "ready",
@@ -449,9 +494,13 @@ async function startServer() {
     const nextSongs = songs.filter((entry) => entry.id !== req.params.id);
     writeSongs(nextSongs);
 
-    const songDir = path.join(UPLOAD_DIR, req.params.id);
+    const songDir = path.join(UPLOAD_DIR, "songs", req.params.id);
+    const legacySongDir = path.join(UPLOAD_DIR, req.params.id);
     if (fs.existsSync(songDir)) {
       fs.rmSync(songDir, { recursive: true, force: true });
+    }
+    if (fs.existsSync(legacySongDir)) {
+      fs.rmSync(legacySongDir, { recursive: true, force: true });
     }
 
     return ok(res, { message: "Song deleted." });

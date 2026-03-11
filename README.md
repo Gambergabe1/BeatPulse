@@ -30,6 +30,8 @@ The project now ships with working admin endpoints in `server.ts`. On first serv
 This project now uses the built-in local backend in `server.ts` for songs, scores, replays, and admin actions.
 No external managed backend service is required for save/load or admin login flows.
 
+Admin sign-in uses `ADMIN_PASSWORD` from `.env.local` or `.env` (falls back to `admin1234` if not set).
+
 ### Persistence guarantees
 
 Song audio files are stored under `uploads/<songId>/...` and metadata is stored in `.server-data/songs.json` by default.

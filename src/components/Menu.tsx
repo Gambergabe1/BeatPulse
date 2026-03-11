@@ -393,7 +393,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       setAdminPassword('');
       setError(null);
     } catch (err) {
-      setError('Login failed');
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Login failed: ${message}`);
     } finally {
       setIsAdminLoading(false);
     }

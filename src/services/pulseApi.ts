@@ -1,5 +1,3 @@
-import { upload } from '@vercel/blob/client';
-
 export interface ScoreRecord {
   score: number;
   accuracy: number;
@@ -44,6 +42,25 @@ export interface ReplayRecord {
   events: any[];
 }
 
+export interface GlobalScoreRecord {
+  id: string;
+  score: number;
+  accuracy: number;
+  date: string;
+  username: string;
+  createdAt: string;
+  songName: string;
+  artist: string;
+}
+
+export interface LeaderboardModerationResult {
+  username: string;
+  reason: string;
+  removedGlobalScores: number;
+  removedSongScores: number;
+  affectedSongs: number;
+}
+
 export interface SongStorageIssue {
   id: string;
   name: string;
@@ -63,23 +80,6 @@ interface ApiSuccessResponse<T> {
 }
 
 type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
-
-function createSongId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
-    return crypto.randomUUID();
-  }
-
-  return `song-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function sanitizeFileName(input: string): string {
-  return input.replace(/[^\w.-]/g, '_').replace(/_+/g, '_').slice(0, 120) || 'upload';
-}
-
-function getFileExtension(fileName: string): string {
-  const match = /\.[^./\\]+$/.exec(fileName);
-  return match ? match[0] : '.mp3';
-}
 
 async function parseApiResponse<T>(res: Response): Promise<T> {
   const payload = (await res.json().catch(() => ({}))) as ApiResponse<T>;
@@ -112,50 +112,21 @@ export const saveCommunitySong = async (payload: {
   authorName: string;
   notes: unknown[];
 }): Promise<CommunitySongRecord> => {
-  const songId = createSongId();
-  const fileExtension = getFileExtension(payload.audioFile.name);
-  const baseName = sanitizeFileName(payload.audioFile.name.replace(/\.[^./\\]+$/, ''));
-  const audioPath = `songs/${songId}/${baseName}${fileExtension || '.mp3'}`;
-  const notesPath = `songs/${songId}/notes.json`;
+  const formData = new FormData();
+  formData.append('audio', payload.audioFile);
+  formData.append('name', payload.name);
+  formData.append('artist', payload.artist);
+  formData.append('difficulty', String(payload.difficulty));
+  formData.append('density', String(payload.density));
+  formData.append('laneVariety', String(payload.laneVariety));
+  formData.append('sliderProbability', String(payload.sliderProbability));
+  formData.append('stamina', String(payload.stamina));
+  formData.append('authorName', payload.authorName);
+  formData.append('notes', JSON.stringify(payload.notes));
 
-  const [audioBlob, notesBlob] = await Promise.all([
-    upload(audioPath, payload.audioFile, {
-      access: 'public',
-      contentType: payload.audioFile.type || 'audio/mpeg',
-      handleUploadUrl: '/api/blob-upload',
-      clientPayload: JSON.stringify({ songId, kind: 'audio' }),
-      multipart: true,
-    }),
-    upload(
-      notesPath,
-      new Blob([JSON.stringify(payload.notes)], { type: 'application/json' }),
-      {
-        access: 'public',
-        contentType: 'application/json',
-        handleUploadUrl: '/api/blob-upload',
-        clientPayload: JSON.stringify({ songId, kind: 'notes' }),
-      }
-    ),
-  ]);
-
-  const res = await fetch('/api/songs/register', {
+  const res = await fetch('/api/songs', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      id: songId,
-      name: payload.name,
-      artist: payload.artist,
-      difficulty: payload.difficulty,
-      density: payload.density,
-      laneVariety: payload.laneVariety,
-      sliderProbability: payload.sliderProbability,
-      stamina: payload.stamina,
-      authorName: payload.authorName,
-      audioUrl: audioBlob.url,
-      audioPath,
-      notesUrl: notesBlob.url,
-      notesPath,
-    }),
+    body: formData,
   });
   return parseApiResponse<CommunitySongRecord>(res);
 };
@@ -201,7 +172,7 @@ export const postSongScore = async (
 };
 
 export const getGlobalScores = async (options?: { limit?: number; offset?: number }): Promise<{
-  scores: any[];
+  scores: GlobalScoreRecord[];
   nextOffset: number | null;
 }> => {
   const search = new URLSearchParams();
@@ -209,7 +180,7 @@ export const getGlobalScores = async (options?: { limit?: number; offset?: numbe
   if (options?.offset !== undefined) search.set('offset', String(options.offset));
 
   const res = await fetch(`/api/global-scores${search.toString() ? `?${search}` : ''}`);
-  return parseApiResponse<{ scores: any[]; nextOffset: number | null }>(res);
+  return parseApiResponse<{ scores: GlobalScoreRecord[]; nextOffset: number | null }>(res);
 };
 
 export const saveGlobalScore = async (payload: {
@@ -261,6 +232,22 @@ export const changeAdminPassword = async (token: string, newPassword: string): P
     body: JSON.stringify({ newPassword }),
   });
   await parseApiResponse<{ successMessage: string }>(res);
+};
+
+export const removeLeaderboardPlayer = async (
+  token: string,
+  username: string,
+  reason: string
+): Promise<LeaderboardModerationResult> => {
+  const res = await fetch('/api/admin/leaderboard/remove-player', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ username, reason }),
+  });
+  return parseApiResponse<LeaderboardModerationResult>(res);
 };
 
 export const getIntegrityReport = async (): Promise<{

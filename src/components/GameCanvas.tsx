@@ -721,9 +721,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   };
 
   return (
-    <div className="relative w-full min-h-screen md:h-full flex flex-col items-center justify-center bg-black overflow-hidden px-3 md:px-0 pt-16 md:pt-0 pb-32 md:pb-0">
-      {/* Desktop HUD */}
-      <div className="absolute top-8 left-8 hidden md:flex flex-col gap-2 z-10">
+    <div className="relative w-full h-full flex flex-col items-center justify-center bg-black overflow-hidden">
+      {/* HUD */}
+      <div className="absolute top-4 md:top-8 left-4 md:left-8 flex flex-col gap-1 md:gap-2 z-10">
         <div className="text-2xl md:text-4xl font-display font-black text-neon-blue tracking-tighter">
           {gameState.score.toLocaleString()}
         </div>
@@ -732,7 +732,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         </div>
       </div>
 
-      <div className="absolute top-8 right-8 hidden md:block text-right z-10">
+      <div className="absolute top-4 md:top-8 right-4 md:right-8 text-right z-10">
         <div className="text-4xl md:text-6xl font-display font-black text-neon-pink italic">
           {gameState.combo}
         </div>
@@ -746,28 +746,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         </div>
       </div>
 
-      {/* Mobile HUD */}
-      <div className="absolute top-3 left-3 right-3 md:hidden z-20">
-        <div className="rounded-2xl border border-white/10 bg-black/70 backdrop-blur-md px-4 py-3 flex items-center justify-between">
-          <div>
-            <div className="text-lg font-display font-black text-neon-blue tracking-tight">
-              {gameState.score.toLocaleString()}
-            </div>
-            <div className="text-[10px] font-bold uppercase tracking-widest text-white/45">
-              Acc {gameState.accuracy.toFixed(1)}%
-            </div>
-          </div>
-          <div className="text-right">
-            <div className="text-2xl font-display font-black italic text-neon-pink leading-none">
-              {gameState.combo}
-            </div>
-            <div className="text-[10px] font-bold uppercase tracking-widest text-white/45">
-              Combo
-            </div>
-          </div>
-        </div>
-      </div>
-
       {/* Progress Bar */}
       <div className="absolute bottom-0 left-0 w-full h-1 bg-white/10 z-10">
         <div 
@@ -776,16 +754,37 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         />
       </div>
 
-      <div className="relative w-full max-w-[600px] aspect-[3/4]">
-        <canvas 
-          ref={canvasRef}
-          width={600}
-          height={800}
-          className="w-full h-full shadow-2xl shadow-neon-purple/20 border-x border-white/5 touch-none"
-        />
+      <canvas 
+        ref={canvasRef}
+        width={600}
+        height={800}
+        className="w-full max-w-[600px] aspect-[3/4] shadow-2xl shadow-neon-purple/20 border-x border-white/5 touch-none"
+      />
 
-        {/* Hit Effects Overlay */}
-        <div className="absolute inset-0 pointer-events-none">
+      {/* Mobile Touch Controls */}
+      <div className="absolute bottom-4 left-0 w-full flex justify-between px-4 md:hidden z-20">
+        {laneKeys.map((key, index) => (
+          <button
+            key={key}
+            className="w-[20%] h-24 rounded-2xl bg-white/10 border border-white/20 active:bg-neon-blue/40 transition-colors"
+            onTouchStart={(e) => {
+              if (isReplay) return;
+              e.preventDefault();
+              keysPressed.current.add(key);
+              checkHit(index);
+            }}
+            onTouchEnd={(e) => {
+              if (isReplay) return;
+              e.preventDefault();
+              keysPressed.current.delete(key);
+            }}
+          />
+        ))}
+      </div>
+
+      {/* Hit Effects Overlay */}
+      <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+        <div className="relative w-[600px] h-[800px] max-h-full aspect-[3/4]">
           <AnimatePresence>
             {hitEffects.map((effect) => (
               <motion.div
@@ -795,8 +794,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                 exit={{ opacity: 0, y: -20, scale: 0.5 }}
                 className="absolute flex flex-col items-center justify-center"
                 style={{
-                  left: `${effect.lane * 25 + 12.5}%`,
-                  top: '81.25%',
+                  left: `${effect.lane * 150 + 75}px`,
+                  top: '650px',
                   transform: 'translateX(-50%)',
                 }}
               >
@@ -828,37 +827,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                 initial={{ opacity: 0.6, height: 0 }}
                 animate={{ opacity: 0, height: 300 }}
                 exit={{ opacity: 0 }}
-                className="absolute bottom-[12.5%] w-[25%]"
+                className="absolute bottom-[100px] w-[150px]"
                 style={{
-                  left: `${effect.lane * 25}%`,
+                  left: `${effect.lane * 150}px`,
                   background: `linear-gradient(to top, ${laneColors[effect.lane]}, transparent)`,
                 }}
               />
             ))}
           </AnimatePresence>
-        </div>
-      </div>
-
-      {/* Mobile Touch Controls */}
-      <div className="absolute bottom-4 left-1/2 -translate-x-1/2 w-full max-w-[600px] px-4 md:hidden z-20">
-        <div className="flex justify-between gap-2">
-          {laneKeys.map((key, index) => (
-            <button
-              key={key}
-              className="flex-1 h-24 rounded-2xl bg-white/10 border border-white/20 active:bg-neon-blue/40 transition-colors"
-              onTouchStart={(e) => {
-                if (isReplay) return;
-                e.preventDefault();
-                keysPressed.current.add(key);
-                checkHit(index);
-              }}
-              onTouchEnd={(e) => {
-                if (isReplay) return;
-                e.preventDefault();
-                keysPressed.current.delete(key);
-              }}
-            />
-          ))}
         </div>
       </div>
 
@@ -925,7 +901,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           if (isPaused) resumeGame();
           else pauseGame();
         }}
-        className="absolute bottom-32 md:bottom-8 right-4 md:right-8 p-2 md:p-3 rounded-full bg-white/5 hover:bg-white/10 transition-colors z-10"
+        className="absolute bottom-4 md:bottom-8 right-4 md:right-8 p-2 md:p-3 rounded-full bg-white/5 hover:bg-white/10 transition-colors z-10"
       >
         {isPaused ? <Play className="w-5 h-5 md:w-6 md:h-6" /> : <Pause className="w-5 h-5 md:w-6 md:h-6" />}
       </button>
@@ -935,7 +911,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           stopGame();
           onExit();
         }}
-        className="absolute bottom-32 md:bottom-8 left-4 md:left-8 p-2 md:p-3 rounded-full bg-white/5 hover:bg-white/10 transition-colors z-10"
+        className="absolute bottom-4 md:bottom-8 left-4 md:left-8 p-2 md:p-3 rounded-full bg-white/5 hover:bg-white/10 transition-colors z-10"
       >
         <Home className="w-5 h-5 md:w-6 md:h-6" />
       </button>

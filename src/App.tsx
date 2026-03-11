@@ -18,12 +18,11 @@ const defaultSettings: Settings = {
   volume: 1,
   visualEffects: true,
   keybindings: ['d', 'f', 'j', 'k'],
-  chartDifficulty: 'NORMAL',
-  complexity: 0.34,
-  density: 0.3,
-  laneVariety: 0.44,
-  sliderProbability: 0.06,
-  stamina: 0.32
+  complexity: 0.5,
+  density: 0.5,
+  laneVariety: 0.5,
+  sliderProbability: 0.3,
+  stamina: 0.5
 };
 
 export default function App() {
@@ -65,7 +64,11 @@ export default function App() {
     setView('MENU');
   }, []);
 
-  const handleStartGame = useCallback(async (data: SongData, replay = false, replayEvents?: any[]) => {
+  const handleStartGame = useCallback(async (
+    data: SongData,
+    replay = false,
+    replayEvents?: { time: number; lane: number; type: string }[]
+  ) => {
     if (audioContext.state === 'suspended') {
       await audioContext.resume();
     }
@@ -175,9 +178,10 @@ export default function App() {
           density={songData.density}
           laneVariety={songData.laneVariety}
           sliderProbability={songData.sliderProbability}
+          stamina={songData.stamina}
           audioBuffer={songData.audioBuffer}
           onRetry={handleRetry}
-          onReplay={() => handleStartGame(songData, true)}
+          onReplay={() => handleStartGame(songData, true, lastResult.replayEvents)}
           onHome={handleHome}
           isReplay={isReplay}
           replayEvents={lastResult.replayEvents}

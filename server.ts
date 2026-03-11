@@ -90,6 +90,14 @@ interface SongStorageIssue {
   missingNotes: boolean;
 }
 
+interface LeaderboardModerationResult {
+  username: string;
+  reason: string;
+  removedGlobalScores: number;
+  removedSongScores: number;
+  affectedSongs: number;
+}
+
 function ensureDirectories() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -185,12 +193,21 @@ function clampNumber(value: any, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function normalizeUsername(value: string) {
+  return value.trim().toLowerCase();
+}
+
 function sortSongsDesc(songs: CommunitySongRecord[]) {
   return songs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
 function sortScoresDesc(scores: ScoreRecord[]) {
   return scores.sort((a, b) => b.score - a.score);
+}
+
+function toTopScoreFromScores(scores: ScoreRecord[]) {
+  if (scores.length === 0) return 0;
+  return sortScoresDesc([...scores])[0]?.score ?? 0;
 }
 
 function sortGlobalScoresDesc(scores: GlobalScoreRecord[]) {
@@ -360,6 +377,69 @@ async function startServer() {
     };
     saveAdminState(adminState);
     return ok(res, { message: "Password updated." });
+  });
+
+  app.post("/api/admin/leaderboard/remove-player", requireAdmin, (req, res) => {
+    const username = typeof req.body?.username === "string" ? req.body.username.trim() : "";
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : "";
+
+    if (!username) {
+      return fail(res, 400, "Username is required.");
+    }
+
+    if (!reason) {
+      return fail(res, 400, "Removal reason is required.");
+    }
+
+    const normalizedUsername = normalizeUsername(username);
+    const currentGlobalScores = readGlobalScores();
+    const removedGlobalScores = currentGlobalScores.filter(
+      (entry) => normalizeUsername(entry.username) === normalizedUsername
+    ).length;
+    const nextGlobalScores = currentGlobalScores.filter(
+      (entry) => normalizeUsername(entry.username) !== normalizedUsername
+    );
+
+    const currentSongs = readSongs();
+    let affectedSongs = 0;
+    let removedSongScores = 0;
+    const nextSongs = currentSongs.map((song) => {
+      const currentScores = song.scores || [];
+      const filteredScores = currentScores.filter(
+        (entry) => normalizeUsername(entry.username) !== normalizedUsername
+      );
+
+      if (filteredScores.length === currentScores.length) {
+        return song;
+      }
+
+      affectedSongs += 1;
+      removedSongScores += currentScores.length - filteredScores.length;
+      return {
+        ...song,
+        scores: filteredScores,
+        topScore: toTopScoreFromScores(filteredScores),
+      };
+    });
+
+    if (removedGlobalScores === 0 && removedSongScores === 0) {
+      return fail(res, 404, "Player not found on any leaderboard.");
+    }
+
+    writeGlobalScores(sortGlobalScoresDesc(nextGlobalScores));
+    if (affectedSongs > 0) {
+      writeSongs(nextSongs);
+    }
+
+    const result: LeaderboardModerationResult = {
+      username,
+      reason,
+      removedGlobalScores,
+      removedSongScores,
+      affectedSongs,
+    };
+
+    return ok(res, result);
   });
 
   app.get("/api/songs", (_req, res) => {
@@ -615,12 +695,17 @@ async function startServer() {
       return res.status(400).send("Missing URL");
     }
     try {
-      const response = await fetch(audioUrl);
+      const forwardedProto = typeof req.headers["x-forwarded-proto"] === "string"
+        ? req.headers["x-forwarded-proto"].split(",")[0]
+        : req.protocol;
+      const baseUrl = `${forwardedProto}://${req.get("host")}`;
+      const resolvedUrl = new URL(audioUrl, baseUrl).toString();
+      const response = await fetch(resolvedUrl);
       if (!response.ok) {
         return res.status(response.status).send("Failed to fetch audio");
       }
       const buffer = await response.arrayBuffer();
-      res.setHeader("Content-Type", response.headers.get("Content-Type") || "audio/mpeg");
+      res.setHeader("Content-Type", response.headers.get("Content-Type") || "application/octet-stream");
       res.send(Buffer.from(buffer));
     } catch (error) {
       console.error("Proxy error:", error);

@@ -2,15 +2,17 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search } from 'lucide-react';
 import { loadAudioFile, generateNotesFromAudio } from '../utils/audio';
-import { SongData, Settings, ChartDifficulty } from '../types';
+import { SongData, Settings } from '../types';
 import {
   changeAdminPassword,
   deleteCommunitySong,
   getCommunitySongs,
   getGlobalScores,
+  GlobalScoreRecord,
   getIntegrityReport,
   getReplays,
   loginAdmin,
+  removeLeaderboardPlayer,
   saveCommunitySong,
   updateCommunitySong
 } from '../services/pulseApi';
@@ -22,83 +24,32 @@ interface MenuProps {
   onSaveSettings: (settings: Settings) => void;
 }
 
-const CHART_DIFFICULTY_ORDER: ChartDifficulty[] = ['EASY', 'NORMAL', 'HARD', 'EXPERT', 'MASTER'];
+const LEADERBOARD_REMOVAL_REASONS = [
+  'Inappropriate name',
+  'Cheating or impossible score',
+  'Spam or duplicate entries',
+  'Offensive content',
+  'Requested removal',
+];
 
-const CHART_DIFFICULTY_PRESETS: Record<
-  ChartDifficulty,
-  {
-    label: string;
-    caption: string;
-    description: string;
-    complexity: number;
-    density: number;
-    laneVariety: number;
-    sliderProbability: number;
-    stamina: number;
-  }
-> = {
-  EASY: {
-    label: 'Easy',
-    caption: 'Wide spacing',
-    description: 'Gentle note flow with roomy timing and only light movement.',
-    complexity: 0.18,
-    density: 0.18,
-    laneVariety: 0.3,
-    sliderProbability: 0.02,
-    stamina: 0.18
-  },
-  NORMAL: {
-    label: 'Normal',
-    caption: 'Balanced flow',
-    description: 'Balanced general-song charting with readable streams and restrained bursts.',
-    complexity: 0.34,
-    density: 0.3,
-    laneVariety: 0.44,
-    sliderProbability: 0.06,
-    stamina: 0.32
-  },
-  HARD: {
-    label: 'Hard',
-    caption: 'Faster turns',
-    description: 'Busier patterns, quicker transitions, and more confident stream sections.',
-    complexity: 0.52,
-    density: 0.44,
-    laneVariety: 0.56,
-    sliderProbability: 0.1,
-    stamina: 0.45
-  },
-  EXPERT: {
-    label: 'Expert',
-    caption: 'Ranked-map flow',
-    description: 'More stream-heavy pacing with stronger hand flow and fewer random burst walls.',
-    complexity: 0.76,
-    density: 0.56,
-    laneVariety: 0.58,
-    sliderProbability: 0.08,
-    stamina: 0.56
-  },
-  MASTER: {
-    label: 'Master',
-    caption: 'Peak control',
-    description: 'High-density charts with sharper movement, sustained streams, and controlled burst usage.',
-    complexity: 0.88,
-    density: 0.68,
-    laneVariety: 0.76,
-    sliderProbability: 0.18,
-    stamina: 0.7
-  }
-};
+const normalizeUsername = (value: string) => value.trim().toLowerCase();
+
+const getTopScoreFromEntries = (entries: Array<{ score: number }>) =>
+  entries.reduce((max, entry) => Math.max(max, Number(entry.score) || 0), 0);
 
 export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings, onSaveSettings }) => {
   const [isUploading, setIsUploading] = useState(false);
   const [readySong, setReadySong] = useState<SongData | null>(null);
   const [metadata, setMetadata] = useState({ name: '', artist: '' });
   const [error, setError] = useState<string | null>(null);
-  const [chartDifficulty, setChartDifficulty] = useState<ChartDifficulty>(settings.chartDifficulty ?? 'NORMAL');
-  const { complexity, density, laneVariety, sliderProbability, stamina } = CHART_DIFFICULTY_PRESETS[chartDifficulty];
+  const [complexity, setComplexity] = useState(settings.complexity ?? 0.5);
+  const [density, setDensity] = useState(settings.density ?? 0.5);
+  const [laneVariety, setLaneVariety] = useState(settings.laneVariety ?? 0.5);
+  const [sliderProbability, setSliderProbability] = useState(settings.sliderProbability ?? 0.3);
+  const [stamina, setStamina] = useState(settings.stamina ?? 0.5);
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [communitySongs, setCommunitySongs] = useState<any[]>([]);
-  const [globalScores, setGlobalScores] = useState<any[]>([]);
+  const [globalScores, setGlobalScores] = useState<GlobalScoreRecord[]>([]);
   const [globalScoresOffset, setGlobalScoresOffset] = useState<number>(0);
   const [isLoadingMoreScores, setIsLoadingMoreScores] = useState(false);
   const [hasMoreScores, setHasMoreScores] = useState(true);
@@ -118,7 +69,10 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [integrityResults, setIntegrityResults] = useState<any[] | null>(null);
   const [isCheckingIntegrity, setIsCheckingIntegrity] = useState(false);
   const [isAdminLoading, setIsAdminLoading] = useState(false);
+  const [isModeratingLeaderboard, setIsModeratingLeaderboard] = useState(false);
   const [loadingSongId, setLoadingSongId] = useState<string | null>(null);
+  const [leaderboardRemovalTarget, setLeaderboardRemovalTarget] = useState<GlobalScoreRecord | null>(null);
+  const [leaderboardRemovalReason, setLeaderboardRemovalReason] = useState(LEADERBOARD_REMOVAL_REASONS[0]);
   
   // Settings states
   const [localSettings, setLocalSettings] = useState<Settings>(settings);
@@ -152,15 +106,10 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     localStorage.setItem('username', username);
   }, [username]);
 
-  useEffect(() => {
-    setLocalSettings(settings);
-  }, [settings]);
-
   // Sync generation settings to parent settings
   useEffect(() => {
     const updatedSettings = {
       ...settings,
-      chartDifficulty,
       complexity,
       density,
       laneVariety,
@@ -168,7 +117,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       stamina
     };
     onSaveSettings(updatedSettings);
-  }, [chartDifficulty]);
+  }, [complexity, density, laneVariety, sliderProbability, stamina]);
 
   useEffect(() => {
     const fetchCommunitySongs = async () => {
@@ -222,11 +171,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         setReadySong(prev => prev ? {
           ...prev,
           notes: newNotes,
-          difficulty: complexity,
-          density,
-          laneVariety,
-          sliderProbability,
-          stamina
+          difficulty: complexity
         } : null);
       } catch (err) {
         console.error("Failed to regenerate notes:", err);
@@ -237,6 +182,78 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
 
     return () => clearTimeout(timer);
   }, [complexity, density, laneVariety, sliderProbability, stamina, readySong?.audioBuffer]);
+
+  const loadStoredSongData = useCallback(async (
+    song: any,
+    chartOverrides?: Partial<Pick<SongData, 'difficulty' | 'density' | 'laneVariety' | 'sliderProbability' | 'stamina'>>
+  ): Promise<SongData> => {
+    if (!song.audioUrl) {
+      throw new Error('Audio URL is missing');
+    }
+
+    const proxyAssetUrl = (assetUrl: string) => `/api/audio-proxy?url=${encodeURIComponent(assetUrl)}`;
+    const response = await fetch(proxyAssetUrl(song.audioUrl));
+    if (!response.ok) {
+      throw new Error(`Failed to load audio: ${response.statusText}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    const difficulty = chartOverrides?.difficulty ?? song.difficulty;
+    const densityValue = chartOverrides?.density ?? song.density ?? difficulty;
+    const laneVarietyValue = chartOverrides?.laneVariety ?? song.laneVariety ?? difficulty;
+    const sliderProbabilityValue = chartOverrides?.sliderProbability ?? song.sliderProbability ?? 0.3;
+    const staminaValue = chartOverrides?.stamina ?? song.stamina ?? 0.5;
+
+    let notes = [];
+    if (Array.isArray(song.notes)) {
+      notes = song.notes;
+    } else if (typeof song.notes === 'string') {
+      try {
+        const parsedNotes = JSON.parse(song.notes);
+        notes = Array.isArray(parsedNotes) ? parsedNotes : [];
+      } catch (error) {
+        console.warn('Failed to parse embedded notes, retrying with stored chart.', error);
+      }
+    }
+
+    if (notes.length === 0 && song.notesUrl) {
+      try {
+        const notesResponse = await fetch(proxyAssetUrl(song.notesUrl));
+        if (!notesResponse.ok) {
+          throw new Error('Failed to fetch notes');
+        }
+        const parsedNotes = await notesResponse.json();
+        notes = Array.isArray(parsedNotes) ? parsedNotes : [];
+      } catch (error) {
+        console.warn('Failed to fetch stored notes, regenerating chart.', error);
+      }
+    }
+
+    if (notes.length === 0) {
+      notes = await generateNotesFromAudio(audioBuffer, {
+        complexity: difficulty,
+        density: densityValue,
+        laneVariety: laneVarietyValue,
+        sliderProbability: sliderProbabilityValue,
+        stamina: staminaValue
+      });
+    }
+
+    return {
+      id: song.id,
+      name: song.name,
+      artist: song.artist,
+      audioBuffer,
+      notes,
+      difficulty,
+      density: densityValue,
+      laneVariety: laneVarietyValue,
+      sliderProbability: sliderProbabilityValue,
+      stamina: staminaValue
+    };
+  }, [audioContext]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -278,11 +295,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         artist,
         audioBuffer,
         notes,
-        difficulty: complexity,
-        density,
-        laneVariety,
-        sliderProbability,
-        stamina
+        difficulty: complexity
       });
       setMetadata({ name, artist });
     } catch (err) {
@@ -337,128 +350,47 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     }
   };
 
-  const handleLoadCommunitySong = async (song: any) => {
-    console.log("Attempting to load song audio from URL:", song.audioUrl);
+  const handleLoadCommunitySong = useCallback(async (song: any) => {
     try {
-      if (!song.audioUrl) throw new Error('Audio URL is missing');
-      
-      const proxyUrl = `/api/audio-proxy?url=${encodeURIComponent(song.audioUrl)}`;
-      const response = await fetch(proxyUrl);
-      if (!response.ok) {
-        console.error(`Failed to fetch audio: ${response.status} ${response.statusText}`);
-        throw new Error(`Failed to load audio: ${response.statusText}`);
-      }
-      
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-      
-      // Use saved notes if available, otherwise generate
-      let notes = [];
-      if (song.notes) {
-        try {
-          notes = JSON.parse(song.notes);
-        } catch (e) {
-          console.warn("Failed to parse saved notes, regenerating...");
-          notes = await generateNotesFromAudio(audioBuffer, {
-            complexity: song.difficulty,
-            density: song.density ?? song.difficulty,
-            laneVariety: song.laneVariety ?? song.difficulty,
-            sliderProbability: song.sliderProbability ?? 0.3,
-            stamina: song.stamina ?? 0.5
-          });
-        }
-      } else if (song.notesUrl) {
-        try {
-          const notesResponse = await fetch(song.notesUrl);
-          if (!notesResponse.ok) throw new Error('Failed to fetch notes');
-          notes = await notesResponse.json();
-        } catch (e) {
-          console.warn("Failed to fetch/parse notes from URL, regenerating...", e);
-          notes = await generateNotesFromAudio(audioBuffer, {
-            complexity: song.difficulty,
-            density: song.density ?? song.difficulty,
-            laneVariety: song.laneVariety ?? song.difficulty,
-            sliderProbability: song.sliderProbability ?? 0.3,
-            stamina: song.stamina ?? 0.5
-          });
-        }
-      } else {
-        notes = await generateNotesFromAudio(audioBuffer, {
-          complexity: song.difficulty,
-          density: song.density ?? song.difficulty,
-          laneVariety: song.laneVariety ?? song.difficulty,
-          sliderProbability: song.sliderProbability ?? 0.3,
-          stamina: song.stamina ?? 0.5
-        });
-      }
-
+      const songData = await loadStoredSongData(song);
       setMetadata({ name: song.name, artist: song.artist });
-      setReadySong({
-        id: song.id,
-        name: song.name,
-        artist: song.artist,
-        audioBuffer,
-        notes,
-        difficulty: song.difficulty,
-        density: song.density ?? song.difficulty,
-        laneVariety: song.laneVariety ?? song.difficulty,
-        sliderProbability: song.sliderProbability ?? 0.3,
-        stamina: song.stamina ?? 0.5
-      });
+      setReadySong(songData);
       setActiveTab('LOCAL');
     } catch (err) {
       console.error(err);
       setError('Failed to load song audio.');
     }
-  };
+  }, [loadStoredSongData]);
 
-  const handleLoadReplay = async (replay: any) => {
+  const handleLoadReplay = useCallback(async (replay: any) => {
     if (!replay.songId) {
       setError('Cannot load replay for a local song.');
       return;
     }
     try {
-      // Find the song in community songs to get its audioUrl
       const song = communitySongs.find(s => s.id === replay.songId);
       if (!song) {
         throw new Error('Song not found in community library');
       }
 
-      const response = await fetch(song.audioUrl);
-      if (!response.ok) throw new Error('Failed to load audio');
-      
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-      const notes = await generateNotesFromAudio(audioBuffer, {
-        complexity: replay.difficulty,
+      const songData = await loadStoredSongData(song, {
+        difficulty: replay.difficulty,
         density: replay.density ?? replay.difficulty,
         laneVariety: replay.laneVariety ?? replay.difficulty,
         sliderProbability: replay.sliderProbability ?? 0.3,
         stamina: replay.stamina ?? 0.5
       });
 
-      const songData: SongData = {
-        id: replay.songId,
+      onStartGame({
+        ...songData,
         name: replay.songName,
-        artist: replay.artist,
-        audioBuffer,
-        notes,
-        difficulty: replay.difficulty,
-        density: replay.density ?? replay.difficulty,
-        laneVariety: replay.laneVariety ?? replay.difficulty,
-        sliderProbability: replay.sliderProbability ?? 0.3,
-        stamina: replay.stamina ?? 0.5
-      };
-      
-      // We need to pass replay events to the game.
-      // Wait, onStartGame only takes songData. We need to pass replayEvents as well.
-      // Let's modify onStartGame to accept replayEvents.
-      onStartGame(songData, true, replay.events);
+        artist: replay.artist
+      }, true, Array.isArray(replay.events) ? replay.events : []);
     } catch (err) {
       console.error(err);
       setError('Failed to load replay audio.');
     }
-  };
+  }, [communitySongs, loadStoredSongData, onStartGame]);
 
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -527,6 +459,65 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       setError('Failed to delete song');
     } finally {
       setLoadingSongId(null);
+    }
+  };
+
+  const openLeaderboardRemoval = (score: GlobalScoreRecord) => {
+    setLeaderboardRemovalTarget(score);
+    setLeaderboardRemovalReason(LEADERBOARD_REMOVAL_REASONS[0]);
+  };
+
+  const closeLeaderboardRemoval = () => {
+    if (isModeratingLeaderboard) return;
+    setLeaderboardRemovalTarget(null);
+    setLeaderboardRemovalReason(LEADERBOARD_REMOVAL_REASONS[0]);
+  };
+
+  const confirmLeaderboardRemoval = async () => {
+    if (!leaderboardRemovalTarget) return;
+    if (!adminToken) {
+      setError('Admin login required.');
+      return;
+    }
+
+    const targetUsername = leaderboardRemovalTarget.username;
+    const selectedReason = leaderboardRemovalReason;
+    setIsModeratingLeaderboard(true);
+
+    try {
+      await removeLeaderboardPlayer(adminToken, targetUsername, selectedReason);
+
+      setGlobalScores(prev =>
+        prev.filter(score => normalizeUsername(score.username) !== normalizeUsername(targetUsername))
+      );
+      setCommunitySongs(prev =>
+        prev.map(song => {
+          const currentScores = Array.isArray(song.scores) ? song.scores : [];
+          const nextScores = currentScores.filter(
+            (entry: any) => normalizeUsername(entry.username ?? '') !== normalizeUsername(targetUsername)
+          );
+
+          if (nextScores.length === currentScores.length) {
+            return song;
+          }
+
+          return {
+            ...song,
+            scores: nextScores,
+            topScore: getTopScoreFromEntries(nextScores)
+          };
+        })
+      );
+
+      setLeaderboardRemovalTarget(null);
+      setLeaderboardRemovalReason(LEADERBOARD_REMOVAL_REASONS[0]);
+      setError(null);
+      alert(`Removed ${targetUsername} from the leaderboard for "${selectedReason}".`);
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || 'Failed to remove player from leaderboard');
+    } finally {
+      setIsModeratingLeaderboard(false);
     }
   };
 
@@ -1074,7 +1065,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                     <Lock className="w-8 h-8" />
                   </div>
                   <h3 className="text-xl font-display font-bold text-white mb-2">Admin Access</h3>
-                  <p className="text-white/40 text-sm mb-6">Enter password to manage songs</p>
+                  <p className="text-white/40 text-sm mb-6">Enter password to manage songs and leaderboard</p>
                   <form onSubmit={handleAdminLogin} className="w-full max-w-xs flex flex-col gap-4">
                     <input 
                       type="password"
@@ -1104,7 +1095,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
               ) : (
                 <div className="flex flex-col h-full">
                   <div className="flex justify-between items-center mb-4">
-                    <p className="text-sm font-bold text-neon-pink uppercase tracking-widest">Manage Songs</p>
+                    <p className="text-sm font-bold text-neon-pink uppercase tracking-widest">Manage Songs + Leaderboard</p>
                     <div className="flex gap-4">
                       <button 
                         onClick={() => setActiveTab('LOCAL')}
@@ -1185,6 +1176,58 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                       </div>
                     </div>
                   )}
+
+                  <div className="mb-6 p-4 rounded-2xl bg-white/5 border border-white/10">
+                    <div className="flex items-start justify-between gap-4 mb-3">
+                      <div>
+                        <p className="text-xs font-bold text-white uppercase tracking-widest">Leaderboard Moderation</p>
+                        <p className="text-white/40 text-xs mt-1">Remove a username from the global leaderboard and matching song leaderboards.</p>
+                      </div>
+                      <span className="text-[10px] font-mono text-white/40 uppercase tracking-widest">
+                        {globalScores.length} loaded
+                      </span>
+                    </div>
+
+                    {globalScores.length === 0 ? (
+                      <div className="rounded-2xl border border-dashed border-white/10 px-4 py-6 text-center text-white/30 text-xs uppercase tracking-widest">
+                        No leaderboard entries loaded yet
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-h-[220px] overflow-y-auto pr-2 custom-scrollbar">
+                        {globalScores.map((score) => (
+                          <div key={score.id} className="flex items-center justify-between gap-3 rounded-2xl bg-black/30 border border-white/5 px-3 py-3">
+                            <div className="min-w-0">
+                              <p className="font-display font-bold text-white truncate">{score.username}</p>
+                              <p className="text-[10px] text-white/40 uppercase tracking-wider truncate">
+                                {score.songName} • {score.score.toLocaleString()} • {score.accuracy.toFixed(1)}%
+                              </p>
+                            </div>
+                            <button
+                              onClick={() => openLeaderboardRemoval(score)}
+                              disabled={isModeratingLeaderboard}
+                              className="shrink-0 px-3 py-2 rounded-xl bg-neon-pink/10 text-neon-pink hover:bg-neon-pink hover:text-white transition-all text-[10px] font-bold uppercase tracking-widest disabled:opacity-40"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        ))}
+
+                        {hasMoreScores && (
+                          <button
+                            onClick={fetchMoreGlobalScores}
+                            disabled={isLoadingMoreScores}
+                            className={`w-full mt-1 rounded-xl border border-white/10 px-3 py-2 text-[10px] font-bold uppercase tracking-widest transition-all ${
+                              isLoadingMoreScores
+                                ? 'text-white/30 bg-white/5 cursor-not-allowed'
+                                : 'text-neon-blue bg-neon-blue/10 hover:bg-neon-blue hover:text-black'
+                            }`}
+                          >
+                            {isLoadingMoreScores ? 'Loading...' : 'Load More Scores'}
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                   <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar touch-pan-y">
                     {communitySongs.map((song) => (
@@ -1356,49 +1399,125 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                     Generation Settings
                   </h4>
                   
-                  <div className="space-y-5">
-                    <div className="flex justify-between items-end">
-                      <div>
-                        <p className="text-white font-bold text-sm">Song Difficulty</p>
-                        <p className="text-white/40 text-[10px] uppercase tracking-widest">Colorful Stage style chart presets</p>
+                  <div className="space-y-8">
+                    {/* Difficulty */}
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-end">
+                        <div>
+                          <p className="text-white font-bold text-sm">Difficulty</p>
+                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Base complexity</p>
+                        </div>
+                        <span className="text-neon-purple font-mono text-xs">{Math.round(complexity * 100)}%</span>
                       </div>
-                      <span className="text-neon-purple font-mono text-xs">{CHART_DIFFICULTY_PRESETS[chartDifficulty].label}</span>
+                      <div className="flex items-center gap-4">
+                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Easy</span>
+                        <input 
+                          type="range" 
+                          min="0" 
+                          max="1" 
+                          step="0.1" 
+                          value={complexity} 
+                          onChange={(e) => setComplexity(parseFloat(e.target.value))}
+                          className="flex-1 accent-neon-purple h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                        />
+                        <span className="text-[10px] font-black text-neon-purple uppercase tracking-widest w-16">Expert</span>
+                      </div>
                     </div>
 
-                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                      {CHART_DIFFICULTY_ORDER.map((difficultyLevel) => {
-                        const preset = CHART_DIFFICULTY_PRESETS[difficultyLevel];
-                        const isActive = chartDifficulty === difficultyLevel;
-
-                        return (
-                          <button
-                            key={difficultyLevel}
-                            onClick={() => setChartDifficulty(difficultyLevel)}
-                            className={`rounded-2xl border p-4 text-left transition-all ${
-                              isActive
-                                ? 'border-neon-purple bg-neon-purple/15 shadow-[0_0_24px_rgba(236,72,153,0.18)]'
-                                : 'border-white/10 bg-black/30 hover:border-white/20 hover:bg-white/5'
-                            }`}
-                          >
-                            <p className={`font-display font-black uppercase tracking-widest ${isActive ? 'text-neon-purple' : 'text-white'}`}>
-                              {preset.label}
-                            </p>
-                            <p className="mt-2 text-[10px] uppercase tracking-widest text-white/45">{preset.caption}</p>
-                          </button>
-                        );
-                      })}
+                    {/* Density */}
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-end">
+                        <div>
+                          <p className="text-white font-bold text-sm">Density</p>
+                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Note frequency</p>
+                        </div>
+                        <span className="text-neon-green font-mono text-xs">{Math.round(density * 100)}%</span>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
+                        <input 
+                          type="range" 
+                          min="0" 
+                          max="1" 
+                          step="0.1" 
+                          value={density} 
+                          onChange={(e) => setDensity(parseFloat(e.target.value))}
+                          className="flex-1 accent-neon-green h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                        />
+                        <span className="text-[10px] font-black text-neon-green uppercase tracking-widest w-16">High</span>
+                      </div>
                     </div>
 
-                    <div className="rounded-2xl border border-white/10 bg-black/30 p-5">
-                      <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-widest text-white/45">
-                        <span className="rounded-full border border-white/10 px-3 py-1">Stream-aware</span>
-                        <span className="rounded-full border border-white/10 px-3 py-1">Burst-controlled</span>
-                        <span className="rounded-full border border-white/10 px-3 py-1">General-song balanced</span>
+                    {/* Lane Variety */}
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-end">
+                        <div>
+                          <p className="text-white font-bold text-sm">Lane Variety</p>
+                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Lane changes</p>
+                        </div>
+                        <span className="text-neon-pink font-mono text-xs">{Math.round(laneVariety * 100)}%</span>
                       </div>
-                      <p className="mt-4 text-sm font-bold text-white">{CHART_DIFFICULTY_PRESETS[chartDifficulty].description}</p>
-                      <p className="mt-2 text-xs text-white/45">
-                        The generator now uses this preset to control note density, lane motion, hold usage, and hand strain behind the scenes.
-                      </p>
+                      <div className="flex items-center gap-4">
+                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
+                        <input 
+                          type="range" 
+                          min="0" 
+                          max="1" 
+                          step="0.1" 
+                          value={laneVariety} 
+                          onChange={(e) => setLaneVariety(parseFloat(e.target.value))}
+                          className="flex-1 accent-neon-pink h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                        />
+                        <span className="text-[10px] font-black text-neon-pink uppercase tracking-widest w-16">High</span>
+                      </div>
+                    </div>
+
+                    {/* Sliders */}
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-end">
+                        <div>
+                          <p className="text-white font-bold text-sm">Sliders</p>
+                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Slider probability</p>
+                        </div>
+                        <span className="text-neon-blue font-mono text-xs">{Math.round(sliderProbability * 100)}%</span>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
+                        <input 
+                          type="range" 
+                          min="0" 
+                          max="1" 
+                          step="0.1" 
+                          value={sliderProbability} 
+                          onChange={(e) => setSliderProbability(parseFloat(e.target.value))}
+                          className="flex-1 accent-neon-blue h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                        />
+                        <span className="text-[10px] font-black text-neon-blue uppercase tracking-widest w-16">High</span>
+                      </div>
+                    </div>
+
+                    {/* Stamina */}
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-end">
+                        <div>
+                          <p className="text-white font-bold text-sm">Stamina</p>
+                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Burst capacity</p>
+                        </div>
+                        <span className="text-neon-orange font-mono text-xs">{Math.round(stamina * 100)}%</span>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
+                        <input 
+                          type="range" 
+                          min="0" 
+                          max="1" 
+                          step="0.1" 
+                          value={stamina} 
+                          onChange={(e) => setStamina(parseFloat(e.target.value))}
+                          className="flex-1 accent-neon-orange h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                        />
+                        <span className="text-[10px] font-black text-neon-orange uppercase tracking-widest w-16">High</span>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1532,6 +1651,68 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   className="flex-1 py-3 rounded-2xl bg-neon-pink text-white font-bold hover:bg-neon-pink/80 transition-all"
                 >
                   Delete
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {leaderboardRemovalTarget && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={closeLeaderboardRemoval}
+              className="absolute inset-0 bg-black/80 backdrop-blur-md"
+            />
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="relative w-full max-w-md bg-zinc-900 border border-white/10 rounded-[32px] p-8 shadow-2xl"
+            >
+              <h3 className="text-xl font-display font-black text-white mb-3">Remove Player?</h3>
+              <p className="text-white/60 text-sm mb-6">
+                This removes <span className="text-white font-bold">{leaderboardRemovalTarget.username}</span> from the global leaderboard and matching song leaderboards.
+              </p>
+
+              <label className="block text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2">
+                Removal Reason
+              </label>
+              <select
+                value={leaderboardRemovalReason}
+                onChange={(e) => setLeaderboardRemovalReason(e.target.value)}
+                disabled={isModeratingLeaderboard}
+                className="w-full bg-black/50 border border-white/20 rounded-xl p-3 text-sm text-white focus:border-neon-pink outline-none mb-8"
+              >
+                {LEADERBOARD_REMOVAL_REASONS.map((reason) => (
+                  <option key={reason} value={reason}>
+                    {reason}
+                  </option>
+                ))}
+              </select>
+
+              <div className="flex gap-4">
+                <button
+                  onClick={closeLeaderboardRemoval}
+                  disabled={isModeratingLeaderboard}
+                  className="flex-1 py-3 rounded-2xl bg-white/5 text-white font-bold hover:bg-white/10 transition-all disabled:opacity-40"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmLeaderboardRemoval}
+                  disabled={isModeratingLeaderboard}
+                  className={`flex-1 py-3 rounded-2xl font-bold transition-all ${
+                    isModeratingLeaderboard
+                      ? 'bg-white/10 text-white/40 cursor-not-allowed'
+                      : 'bg-neon-pink text-white hover:bg-neon-pink/80'
+                  }`}
+                >
+                  {isModeratingLeaderboard ? 'Removing...' : 'Remove Player'}
                 </button>
               </div>
             </motion.div>

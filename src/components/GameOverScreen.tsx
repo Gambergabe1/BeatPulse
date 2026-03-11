@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Trophy, RotateCcw, Home, Star, Share2, Activity, List, Music, Save } from 'lucide-react';
-import { ReplayEvent, SavedReplay } from '../types';
+import { ReplayEvent } from '../types';
 import { getSongById, saveReplay } from '../services/pulseApi';
 
 interface HighScore {
@@ -22,6 +22,7 @@ interface GameOverScreenProps {
   density?: number;
   laneVariety?: number;
   sliderProbability?: number;
+  stamina?: number;
   audioBuffer: AudioBuffer;
   onRetry: () => void;
   onHome: () => void;
@@ -41,6 +42,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   density,
   laneVariety,
   sliderProbability,
+  stamina,
   audioBuffer,
   onRetry,
   onHome,
@@ -78,6 +80,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
         density: density ?? difficulty,
         laneVariety: laneVariety ?? difficulty,
         sliderProbability: sliderProbability ?? 0.3,
+        stamina: stamina ?? 0.5,
         score,
         accuracy,
         date: new Date().toLocaleDateString(),
@@ -435,7 +438,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
           </div>
         </motion.div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 w-full">
+        <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-5 gap-4 w-full">
           <button 
             onClick={onRetry}
             className="w-full px-6 py-5 rounded-full bg-white text-black font-display font-black uppercase tracking-widest hover:bg-neon-blue hover:text-white transition-all flex items-center justify-center gap-3 group text-sm"
@@ -460,15 +463,17 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
               <Save className="w-5 h-5" />
               {isSaved ? 'Saved' : 'Save Replay'}
             </button>
-          ) : (
+          ) : null}
+
+          {replayEvents.length > 0 ? (
             <button 
               onClick={onReplay}
               className="w-full px-6 py-5 rounded-full bg-neon-blue text-white font-display font-black uppercase tracking-widest hover:bg-white hover:text-black transition-all flex items-center justify-center gap-3 group text-sm"
             >
               <Music className="w-5 h-5" />
-              Watch Again
+              {isReplay ? 'Watch Again' : 'Watch Replay'}
             </button>
-          )}
+          ) : null}
 
           <button 
             onClick={handleShare}

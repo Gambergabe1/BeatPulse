@@ -3,6 +3,7 @@ import { sql } from "@vercel/postgres";
 import multer from "multer";
 import { put, del as deleteBlob } from "@vercel/blob";
 import crypto from "crypto";
+import { handleBlobUploadRequest } from "./blob-upload-handler";
 
 const app = express();
 const uploader = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 150 } });
@@ -295,6 +296,18 @@ function canonicalizeSongAssetPath(id: string, candidate: string | null, fallbac
   if (!candidate) return `songs/${id}/${fallbackFileName}`;
   if (candidate.startsWith("songs/")) return candidate;
   return `songs/${id}/${fileName}`;
+}
+
+function isAbsoluteHttpUrl(value: string) {
+  return /^https?:\/\//i.test(value);
+}
+
+function isSafeSongId(value: string) {
+  return /^[A-Za-z0-9-]{8,64}$/.test(value);
+}
+
+function isSafeSongAssetPath(id: string, value: string) {
+  return value.startsWith(`songs/${id}/`) && /^songs\/[A-Za-z0-9-]{8,64}\/[A-Za-z0-9_.-]{1,180}$/.test(value);
 }
 
 function createAdminToken(secret: string): string {
@@ -689,6 +702,10 @@ app.get("/api/health", (_req, res) => {
   ok(res, { status: "ok", message: "BeatPulse server is healthy" });
 });
 
+app.post("/api/blob/upload", async (req, res) => {
+  return handleBlobUploadRequest(req, res);
+});
+
 app.post("/api/admin/login", async (req, res) => {
   try {
     await ensureStorageReady();
@@ -858,10 +875,6 @@ app.get("/api/songs/:id", async (req, res) => {
 app.post("/api/songs", uploader.single("audio"), async (req, res) => {
   try {
     await ensureStorageReady();
-    ensureBlobEnvironment();
-    if (!req.file) return fail(res, 400, "Audio file is required.");
-
-    const id = crypto.randomUUID();
     const name = (typeof req.body?.name === "string" && req.body.name.trim()) || "Untitled";
     const artist = (typeof req.body?.artist === "string" && req.body.artist.trim()) || "Unknown Artist";
     const difficulty = clampNumber(req.body?.difficulty, 0.5);
@@ -870,30 +883,76 @@ app.post("/api/songs", uploader.single("audio"), async (req, res) => {
     const sliderProbability = clampNumber(req.body?.sliderProbability, 0.3);
     const stamina = clampNumber(req.body?.stamina, 0.5);
     const authorName = (typeof req.body?.authorName === "string" && req.body.authorName.trim()) || "Anonymous";
+    const createdAt = new Date().toISOString();
+    let id = "";
+    let audioPath = "";
+    let notesPath = "";
+    let audioUrl = "";
+    let notesUrl = "";
 
-    let notes: unknown[] = [];
-    try {
-      const parsed = typeof req.body?.notes === "string" ? JSON.parse(req.body.notes) : [];
-      if (Array.isArray(parsed)) notes = parsed;
-    } catch {
-      notes = [];
+    if (req.file) {
+      ensureBlobEnvironment();
+      id = crypto.randomUUID();
+
+      let notes: unknown[] = [];
+      try {
+        const parsed = typeof req.body?.notes === "string" ? JSON.parse(req.body.notes) : [];
+        if (Array.isArray(parsed)) notes = parsed;
+      } catch {
+        notes = [];
+      }
+
+      const fileExt = (req.file.originalname || ".mp3").match(/\.[0-9a-z]{1,8}$/i)?.[0] || ".mp3";
+      const safeAudioName = sanitizeFileName(
+        req.file.originalname ? req.file.originalname.replace(fileExt, "") : "audio"
+      );
+      const safeFileName = `${safeAudioName}${fileExt}`;
+      audioPath = `songs/${id}/${safeFileName}`;
+      notesPath = `songs/${id}/notes.json`;
+
+      const audioBlob = await put(audioPath, req.file.buffer, {
+        access: "public",
+        token: BLOB_WRITE_TOKEN,
+      });
+      const notesBlob = await put(notesPath, JSON.stringify(notes), {
+        access: "public",
+        contentType: "application/json",
+        token: BLOB_WRITE_TOKEN,
+      });
+
+      audioUrl = audioBlob.url;
+      notesUrl = notesBlob.url;
+    } else {
+      id = typeof req.body?.id === "string" ? req.body.id.trim() : "";
+      audioUrl = typeof req.body?.audioUrl === "string" ? req.body.audioUrl.trim() : "";
+      notesUrl = typeof req.body?.notesUrl === "string" ? req.body.notesUrl.trim() : "";
+      const providedAudioPath = extractRelativeAssetPath(req.body?.audioPath);
+      const providedNotesPath = extractRelativeAssetPath(req.body?.notesPath);
+
+      if (!id || !isSafeSongId(id)) {
+        return fail(res, 400, "A valid song id is required.");
+      }
+
+      if (!audioUrl || !notesUrl || !providedAudioPath || !providedNotesPath) {
+        return fail(res, 400, "Uploaded song asset details are required.");
+      }
+
+      audioPath = canonicalizeSongAssetPath(id, providedAudioPath, "audio.mp3");
+      notesPath = canonicalizeSongAssetPath(id, providedNotesPath, "notes.json");
+
+      if (
+        !isAbsoluteHttpUrl(audioUrl) ||
+        !isAbsoluteHttpUrl(notesUrl) ||
+        !isSafeSongAssetPath(id, audioPath) ||
+        !isSafeSongAssetPath(id, notesPath)
+      ) {
+        return fail(res, 400, "Uploaded asset details are invalid.");
+      }
     }
 
-    const fileExt = (req.file.originalname || ".mp3").match(/\.[0-9a-z]{1,8}$/i)?.[0] || ".mp3";
-    const safeAudioName = sanitizeFileName(req.file.originalname ? req.file.originalname.replace(fileExt, "") : "audio");
-    const safeFileName = `${safeAudioName}${fileExt}`;
-    const audioPath = `songs/${id}/${safeFileName}`;
-    const notesPath = `songs/${id}/notes.json`;
-
-    const audioBlob = await put(audioPath, req.file.buffer, {
-      access: "public",
-      token: BLOB_WRITE_TOKEN,
-    });
-    const notesBlob = await put(notesPath, JSON.stringify(notes), {
-      access: "public",
-      contentType: "application/json",
-      token: BLOB_WRITE_TOKEN,
-    });
+    if (await readSong(id)) {
+      return fail(res, 409, "Song already exists.");
+    }
 
     const newSong: CommunitySongRecord = {
       id,
@@ -907,11 +966,11 @@ app.post("/api/songs", uploader.single("audio"), async (req, res) => {
       topScore: 0,
       scores: [],
       authorName,
-      createdAt: new Date().toISOString(),
+      createdAt,
       audioPath,
       notesPath,
-      audioUrl: audioBlob.url,
-      notesUrl: notesBlob.url,
+      audioUrl,
+      notesUrl,
       status: "ready",
     };
 

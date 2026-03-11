@@ -1,3 +1,5 @@
+import { upload } from '@vercel/blob/client';
+
 export interface ScoreRecord {
   score: number;
   accuracy: number;
@@ -96,6 +98,9 @@ interface ApiSuccessResponse<T> {
 
 type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
 
+const DIRECT_UPLOAD_ENDPOINT = '/api/blob/upload';
+const MULTIPART_UPLOAD_THRESHOLD_BYTES = 8 * 1024 * 1024;
+
 function getFallbackErrorMessage(rawText: string, status: number) {
   const trimmed = rawText.trim();
   if (!trimmed) return `Request failed (${status})`;
@@ -129,6 +134,62 @@ async function parseApiResponse<T>(res: Response): Promise<T> {
   return parsedPayload.data;
 }
 
+function sanitizeUploadFileName(input: string) {
+  return input.replace(/[^\w.-]/g, '_').replace(/_+/g, '_').slice(0, 120) || 'upload';
+}
+
+function isLocalHostname() {
+  if (typeof window === 'undefined') return true;
+  const hostname = window.location.hostname.toLowerCase();
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]';
+}
+
+function getAudioExtension(file: File) {
+  return file.name.match(/\.[0-9a-z]{1,8}$/i)?.[0] || '.mp3';
+}
+
+async function uploadSongAssetsDirectly(payload: {
+  id: string;
+  audioFile: File;
+  notes: unknown[];
+}) {
+  try {
+    const audioExtension = getAudioExtension(payload.audioFile);
+    const audioBaseName = payload.audioFile.name
+      ? sanitizeUploadFileName(payload.audioFile.name.replace(audioExtension, ''))
+      : 'audio';
+    const audioPath = `songs/${payload.id}/${audioBaseName}${audioExtension}`;
+    const notesPath = `songs/${payload.id}/notes.json`;
+    const notesBlob = new Blob([JSON.stringify(payload.notes)], { type: 'application/json' });
+
+    const [audioUpload, notesUpload] = await Promise.all([
+      upload(audioPath, payload.audioFile, {
+        access: 'public',
+        handleUploadUrl: DIRECT_UPLOAD_ENDPOINT,
+        contentType: payload.audioFile.type || undefined,
+        multipart: payload.audioFile.size >= MULTIPART_UPLOAD_THRESHOLD_BYTES,
+      }),
+      upload(notesPath, notesBlob, {
+        access: 'public',
+        handleUploadUrl: DIRECT_UPLOAD_ENDPOINT,
+        contentType: 'application/json',
+      }),
+    ]);
+
+    return {
+      audioUrl: audioUpload.url,
+      audioPath: audioUpload.pathname,
+      notesUrl: notesUpload.url,
+      notesPath: notesUpload.pathname,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Direct upload failed.';
+    throw new Error(message === 'Failed to  retrieve the client token'
+      ? 'Direct upload is unavailable on this deployment.'
+      : message);
+  }
+}
+
 export const getCommunitySongs = async (): Promise<CommunitySongRecord[]> => {
   return parseApiResponse<CommunitySongRecord[]>(await fetch('/api/songs'));
 };
@@ -149,6 +210,34 @@ export const saveCommunitySong = async (payload: {
   authorName: string;
   notes: unknown[];
 }): Promise<CommunitySongRecord> => {
+  if (!isLocalHostname()) {
+    const id = crypto.randomUUID();
+    const uploadedAssets = await uploadSongAssetsDirectly({
+      id,
+      audioFile: payload.audioFile,
+      notes: payload.notes,
+    });
+
+    const res = await fetch('/api/songs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id,
+        name: payload.name,
+        artist: payload.artist,
+        difficulty: payload.difficulty,
+        density: payload.density,
+        laneVariety: payload.laneVariety,
+        sliderProbability: payload.sliderProbability,
+        stamina: payload.stamina,
+        authorName: payload.authorName,
+        ...uploadedAssets,
+      }),
+    });
+
+    return parseApiResponse<CommunitySongRecord>(res);
+  }
+
   const formData = new FormData();
   formData.append('audio', payload.audioFile);
   formData.append('name', payload.name);

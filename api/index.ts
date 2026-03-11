@@ -211,6 +211,14 @@ function getPublicErrorMessage(error: unknown): string {
   return "Internal Server Error";
 }
 
+type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise<unknown>;
+
+function withAsync(handler: AsyncHandler) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(handler(req, res, next)).catch(next);
+  };
+}
+
 function toSongRecord(row: any, scores: ScoreRecord[]): CommunitySongRecord {
   return {
     id: row.id,
@@ -529,7 +537,7 @@ app.get("/api/health", (_req, res) => {
   ok(res, { status: "ok", message: "BeatPulse server is healthy" });
 });
 
-app.post("/api/admin/login", async (req, res) => {
+app.post("/api/admin/login", withAsync(async (req, res) => {
   const state = await getAdminState();
   const password = typeof req.body?.password === "string" ? req.body.password : "";
   if (!password) {
@@ -542,9 +550,10 @@ app.post("/api/admin/login", async (req, res) => {
 
   const token = createAdminToken(state.tokenSecret);
   return ok(res, { token });
-});
+}));
 
-app.post("/api/admin/password", getRequireAdmin(), async (req, res) => {
+app.post("/api/admin/password", getRequireAdmin(), withAsync(async (req, res) => {
+  const database = getDb();
   const state = await getAdminState();
   const newPassword = typeof req.body?.newPassword === "string" ? req.body.newPassword.trim() : "";
 
@@ -558,7 +567,7 @@ app.post("/api/admin/password", getRequireAdmin(), async (req, res) => {
     updatedAt: new Date().toISOString(),
   };
 
-  await sql`
+  await database.sql`
     UPDATE admin_state
     SET password_hash = ${nextState.passwordHash}, token_secret = ${nextState.tokenSecret}, updated_at = ${nextState.updatedAt}
     WHERE id = 1
@@ -568,20 +577,21 @@ app.post("/api/admin/password", getRequireAdmin(), async (req, res) => {
     await getAdminState();
   }
   return ok(res, { message: "Password updated." });
-});
+}));
 
-app.get("/api/songs", async (_req, res) => {
+app.get("/api/songs", withAsync(async (_req, res) => {
   const songs = await getAllSongs();
   return ok(res, songs);
-});
+}));
 
-app.get("/api/songs/:id", async (req, res) => {
+app.get("/api/songs/:id", withAsync(async (req, res) => {
   const song = await getSongById(req.params.id);
   if (!song) return fail(res, 404, "Song not found");
   return ok(res, song);
-});
+}));
 
-app.post("/api/songs", uploader.single("audio"), async (req, res) => {
+app.post("/api/songs", uploader.single("audio"), withAsync(async (req, res) => {
+  const database = getDb();
   if (!req.file) {
     return fail(res, 400, "Audio file is required.");
   }
@@ -602,10 +612,7 @@ app.post("/api/songs", uploader.single("audio"), async (req, res) => {
   const audioFileName = `${safeBaseName}${ext || ".mp3"}`;
   const audioKey = `songs/${id}/${audioFileName}`;
   const notesKey = `songs/${id}/notes.json`;
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
-  if (!token) {
-    return fail(res, 500, "Storage token is not configured.");
-  }
+  const token = getBlobToken();
 
   let audioBlob: { url: string } | null = null;
   let notesBlob: { url: string } | null = null;
@@ -621,7 +628,7 @@ app.post("/api/songs", uploader.single("audio"), async (req, res) => {
       contentType: "application/json",
     });
 
-    await sql`
+    await database.sql`
       INSERT INTO songs (
         id, name, artist, audio_url, audio_blob_key, notes_url, notes_blob_key,
         difficulty, density, lane_variety, slider_probability, stamina, top_score, author_name
@@ -642,11 +649,12 @@ app.post("/api/songs", uploader.single("audio"), async (req, res) => {
       await deleteBlobSafe(audioBlob?.url, notesBlob?.url);
     }
     console.error("Song upload failed:", error);
-    return fail(res, 500, "Failed to save song.");
+    const publicMessage = getPublicErrorMessage(error);
+    return fail(res, 500, publicMessage === "Internal Server Error" ? "Failed to save song." : publicMessage);
   }
-});
+}));
 
-app.patch("/api/songs/:id", getRequireAdmin(), async (req, res) => {
+app.patch("/api/songs/:id", getRequireAdmin(), withAsync(async (req, res) => {
   const body = req.body || {};
   const id = req.params.id;
 
@@ -679,7 +687,8 @@ app.patch("/api/songs/:id", getRequireAdmin(), async (req, res) => {
   const cleanSliderProbability = normalizeNumber(next.sliderProbability, existing.sliderProbability);
   const cleanStamina = normalizeNumber(next.stamina, existing.stamina);
 
-  await sql`
+  const database = getDb();
+  await database.sql`
     UPDATE songs
     SET name = ${next.name},
         artist = ${next.artist},
@@ -695,9 +704,9 @@ app.patch("/api/songs/:id", getRequireAdmin(), async (req, res) => {
   const updated = await getSongById(id);
   if (!updated) return fail(res, 500, "Failed to read updated song.");
   return ok(res, updated);
-});
+}));
 
-app.post("/api/songs/:id/scores", async (req, res) => {
+app.post("/api/songs/:id/scores", withAsync(async (req, res) => {
   const id = req.params.id;
   const song = await getSongByIdRaw(id);
   if (!song) return fail(res, 404, "Song not found");
@@ -710,11 +719,12 @@ app.post("/api/songs/:id/scores", async (req, res) => {
     return fail(res, 400, "Score and accuracy must be numbers.");
   }
 
-  await sql`
+  const database = getDb();
+  await database.sql`
     INSERT INTO song_scores (song_id, score, accuracy, username)
     VALUES (${id}, ${score}, ${accuracy}, ${username});
   `;
-  await sql`
+  await database.sql`
     UPDATE songs
     SET top_score = GREATEST(top_score, ${score})
     WHERE id = ${id}
@@ -723,11 +733,12 @@ app.post("/api/songs/:id/scores", async (req, res) => {
   const updated = await getSongById(id);
   if (!updated) return fail(res, 500, "Failed to read updated song.");
   return ok(res, updated);
-});
+}));
 
-app.delete("/api/songs/:id", getRequireAdmin(), async (req, res) => {
+app.delete("/api/songs/:id", getRequireAdmin(), withAsync(async (req, res) => {
   const id = req.params.id;
-  const { rows } = await sql`
+  const database = getDb();
+  const { rows } = await database.sql`
     DELETE FROM songs
     WHERE id = ${id}
     RETURNING audio_url, notes_url
@@ -740,13 +751,14 @@ app.delete("/api/songs/:id", getRequireAdmin(), async (req, res) => {
   const songRow = rows[0] as any;
   await deleteBlobSafe(songRow.audio_url, songRow.notes_url);
   return ok(res, { message: "Song deleted." });
-});
+}));
 
-app.get("/api/global-scores", async (req, res) => {
+app.get("/api/global-scores", withAsync(async (req, res) => {
   const limit = Math.max(1, Math.min(500, normalizeNumber(req.query.limit, 100)));
   const offset = Math.max(0, normalizeNumber(req.query.offset, 0));
 
-  const { rows: items } = await sql`
+  const database = getDb();
+  const { rows: items } = await database.sql`
     SELECT id, score, accuracy, username, date, song_name, artist, created_at
     FROM global_scores
     ORDER BY score DESC, created_at DESC
@@ -754,7 +766,7 @@ app.get("/api/global-scores", async (req, res) => {
     OFFSET ${offset}
   `;
 
-  const { rows: countRows } = await sql`SELECT COUNT(*)::int AS count FROM global_scores`;
+  const { rows: countRows } = await database.sql`SELECT COUNT(*)::int AS count FROM global_scores`;
   const total = Number(countRows[0]?.count || 0);
   const nextOffset = offset + limit < total ? offset + limit : null;
 
@@ -770,9 +782,9 @@ app.get("/api/global-scores", async (req, res) => {
   }));
 
   return ok(res, { scores, nextOffset });
-});
+}));
 
-app.post("/api/global-scores", async (req, res) => {
+app.post("/api/global-scores", withAsync(async (req, res) => {
   const score = normalizeNumber(req.body?.score, Number.NaN);
   const accuracy = normalizeNumber(req.body?.accuracy, Number.NaN);
   const songName = (typeof req.body?.songName === "string" && req.body.songName.trim()) || "Unknown Song";
@@ -784,22 +796,19 @@ app.post("/api/global-scores", async (req, res) => {
     return fail(res, 400, "Score and accuracy must be numbers.");
   }
 
-  await sql`
-    INSERT INTO global_scores (score, accuracy, username, song_name, artist, date)
-    VALUES (${score}, ${accuracy}, ${username}, ${songName}, ${artist}, ${date})
-  `;
-
-  const { rows } = await sql`
+  const database = getDb();
+  const { rows } = await database.sql`
     INSERT INTO global_scores (score, accuracy, username, song_name, artist, date)
     VALUES (${score}, ${accuracy}, ${username}, ${songName}, ${artist}, ${date})
     RETURNING id
   `;
 
   return ok(res, { id: String(rows[0]?.id ?? crypto.randomUUID()) });
-});
+}));
 
-app.get("/api/replays", async (_req, res) => {
-  const { rows } = await sql`
+app.get("/api/replays", withAsync(async (_req, res) => {
+  const database = getDb();
+  const { rows } = await database.sql`
     SELECT id, song_id, song_name, artist, difficulty, density, lane_variety,
       slider_probability, stamina, score, accuracy, date, created_at, events
     FROM replays
@@ -822,9 +831,9 @@ app.get("/api/replays", async (_req, res) => {
     events: parseSongNotes(row.events),
   }));
   return ok(res, replays);
-});
+}));
 
-app.post("/api/replays", async (req, res) => {
+app.post("/api/replays", withAsync(async (req, res) => {
   const body = req.body || {};
   const songId = (typeof body.songId === "string" && body.songId.trim()) || "";
   const songName = (typeof body.songName === "string" && body.songName.trim()) || "";
@@ -853,7 +862,8 @@ app.post("/api/replays", async (req, res) => {
     events: Array.isArray(body.events) ? body.events : [],
   };
 
-  await sql`
+  const database = getDb();
+  await database.sql`
     INSERT INTO replays (
       song_id, song_name, artist, difficulty, density, lane_variety,
       slider_probability, stamina, score, accuracy, date, events
@@ -874,9 +884,9 @@ app.post("/api/replays", async (req, res) => {
   `;
 
   return ok(res, record);
-});
+}));
 
-app.get("/api/integrity", async (_req, res) => {
+app.get("/api/integrity", withAsync(async (_req, res) => {
   const songs = await getAllSongs();
   const report = await Promise.all(
     songs.map(async (song) => {
@@ -892,8 +902,9 @@ app.get("/api/integrity", async (_req, res) => {
     })
   );
 
-  const { rows: scoreRows } = await sql`SELECT COUNT(*)::int AS count FROM global_scores`;
-  const { rows: replayRows } = await sql`SELECT COUNT(*)::int AS count FROM replays`;
+  const database = getDb();
+  const { rows: scoreRows } = await database.sql`SELECT COUNT(*)::int AS count FROM global_scores`;
+  const { rows: replayRows } = await database.sql`SELECT COUNT(*)::int AS count FROM replays`;
 
   return ok(res, {
     songsCount: songs.length,
@@ -902,9 +913,9 @@ app.get("/api/integrity", async (_req, res) => {
     missingAssetSongsCount: report.filter((entry) => entry.missingAudio || entry.missingNotes).length,
     missingAssetSongs: report.filter((entry) => entry.missingAudio || entry.missingNotes),
   });
-});
+}));
 
-app.get("/api/audio-proxy", async (req, res) => {
+app.get("/api/audio-proxy", withAsync(async (req, res) => {
   const audioUrl = req.query.url as string;
   if (!audioUrl) {
     return res.status(400).send("Missing URL");
@@ -921,11 +932,11 @@ app.get("/api/audio-proxy", async (req, res) => {
     console.error("Proxy error:", error);
     res.status(500).send("Internal Server Error");
   }
-});
+}));
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   console.error("API error:", error);
-  return fail(res, 500, "Internal Server Error");
+  return fail(res, 500, getPublicErrorMessage(error));
 });
 
 export default app;

@@ -10,8 +10,7 @@ import { GameCanvas } from './components/GameCanvas';
 import { GameOverScreen } from './components/GameOverScreen';
 import { Tutorial } from './components/Tutorial';
 import { SongData, Settings } from './types';
-import { doc, getDoc, updateDoc, collection, addDoc } from 'firebase/firestore';
-import { db } from './firebase';
+import { postSongScore, saveGlobalScore } from './services/pulseApi';
 
 type View = 'INTRO' | 'TUTORIAL' | 'MENU' | 'GAME' | 'RESULTS';
 
@@ -89,33 +88,22 @@ export default function App() {
     if (songData && !isReplay) {
       if (songData.id) {
         try {
-          const songRef = doc(db, 'songs', songData.id);
-          const songSnap = await getDoc(songRef);
-          
-          if (songSnap.exists()) {
-            const song = songSnap.data();
-            const scores = song.scores || [];
-            scores.push({ score, accuracy, date: new Date().toLocaleDateString(), username: localStorage.getItem('username') || 'Anonymous' });
-            scores.sort((a: any, b: any) => b.score - a.score);
-            const topScores = scores.slice(0, 5);
-            const topScore = Math.max(song.topScore || 0, score);
-            
-            await updateDoc(songRef, {
-              scores: topScores,
-              topScore: topScore
-            });
-          }
+          await postSongScore(
+            songData.id,
+            score,
+            accuracy,
+            localStorage.getItem('username') || 'Anonymous'
+          );
         } catch (err) {
           console.error("Failed to save score to song:", err);
         }
       }
 
       try {
-        await addDoc(collection(db, 'globalScores'), {
+        await saveGlobalScore({
           score,
           accuracy,
           date: new Date().toLocaleDateString(),
-          createdAt: new Date().toISOString(),
           username: localStorage.getItem('username') || 'Anonymous',
           songName: songData.name,
           artist: songData.artist
@@ -197,4 +185,3 @@ export default function App() {
     </div>
   );
 }
-

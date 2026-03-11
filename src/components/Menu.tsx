@@ -1,12 +1,19 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+﻿import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Music, Upload, Play, Trophy, Github, Disc, Cloud, Save, User, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, LogIn, Search } from 'lucide-react';
+import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search } from 'lucide-react';
 import { loadAudioFile, generateNotesFromAudio } from '../utils/audio';
 import { SongData, Settings } from '../types';
-import { collection, addDoc, getDocs, query, orderBy, deleteDoc, doc, updateDoc, limit, serverTimestamp, startAfter, QueryDocumentSnapshot, onSnapshot } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL, deleteObject, uploadString } from 'firebase/storage';
-import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User as FirebaseUser, createUserWithEmailAndPassword, signInWithEmailAndPassword, updateProfile, signOut } from 'firebase/auth';
-import { db, storage, auth } from '../firebase';
+import {
+  changeAdminPassword,
+  deleteCommunitySong,
+  getCommunitySongs,
+  getGlobalScores,
+  getIntegrityReport,
+  getReplays,
+  loginAdmin,
+  saveCommunitySong,
+  updateCommunitySong
+} from '../services/pulseApi';
 
 interface MenuProps {
   onStartGame: (songData: SongData, isReplay?: boolean, replayEvents?: any[]) => void;
@@ -28,7 +35,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [communitySongs, setCommunitySongs] = useState<any[]>([]);
   const [globalScores, setGlobalScores] = useState<any[]>([]);
-  const [lastScoreDoc, setLastScoreDoc] = useState<QueryDocumentSnapshot | null>(null);
+  const [globalScoresOffset, setGlobalScoresOffset] = useState<number>(0);
   const [isLoadingMoreScores, setIsLoadingMoreScores] = useState(false);
   const [hasMoreScores, setHasMoreScores] = useState(true);
   const [activeTab, setActiveTab] = useState<'LOCAL' | 'COMMUNITY' | 'GLOBAL' | 'ADMIN' | 'SETTINGS' | 'REPLAYS'>('LOCAL');
@@ -53,78 +60,9 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [localSettings, setLocalSettings] = useState<Settings>(settings);
   const [activeKeybindIndex, setActiveKeybindIndex] = useState<number | null>(null);
   const [savedReplays, setSavedReplays] = useState<any[]>([]);
-  const [user, setUser] = useState<FirebaseUser | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const [showAuthModal, setShowAuthModal] = useState(false);
-  const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [authDisplayName, setAuthDisplayName] = useState('');
-  const [authLoading, setAuthLoading] = useState(false);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewTimeoutRef = useRef<any>(null);
-
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      if (u?.displayName) setUsername(u.displayName);
-    });
-    return () => unsubscribe();
-  }, []);
-
-  const handleLogin = () => {
-    setShowAuthModal(true);
-  };
-
-  const handleGoogleLogin = async () => {
-    try {
-      setAuthLoading(true);
-      const provider = new GoogleAuthProvider();
-      await signInWithPopup(auth, provider);
-      setShowAuthModal(false);
-    } catch (err: any) {
-      console.error("Login failed:", err);
-      setError(err.message || "Failed to sign in with Google.");
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleEmailAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError(null);
-    setAuthLoading(true);
-
-    try {
-      if (authMode === 'signup') {
-        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-        if (authDisplayName) {
-          await updateProfile(userCredential.user, { displayName: authDisplayName });
-          setUsername(authDisplayName);
-        }
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
-      }
-      setShowAuthModal(false);
-      setEmail('');
-      setPassword('');
-      setAuthDisplayName('');
-    } catch (err: any) {
-      console.error("Auth failed:", err);
-      setError(err.message || "Authentication failed.");
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleSignOut = async () => {
-    try {
-      await signOut(auth);
-      setUsername('Anonymous');
-    } catch (err) {
-      console.error("Sign out failed:", err);
-    }
-  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -164,25 +102,21 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   }, [complexity, density, laneVariety, sliderProbability, stamina]);
 
   useEffect(() => {
-    const unsubscribeSongs = onSnapshot(query(collection(db, 'songs'), orderBy('createdAt', 'desc')), (snapshot) => {
-      console.log("Firestore snapshot update. Songs count:", snapshot.size);
-      const songs = snapshot.docs.map(doc => ({ 
-        id: doc.id, 
-        ...doc.data() 
-      }));
-      setCommunitySongs(songs);
-    }, (err) => {
-      console.error('Failed to fetch songs:', err);
-    });
+    const fetchCommunitySongs = async () => {
+      try {
+        const songs = await getCommunitySongs();
+        setCommunitySongs(songs);
+      } catch (err) {
+        console.error('Failed to fetch songs:', err);
+      }
+    };
       
     const fetchGlobalScores = async () => {
       try {
-        const q = query(collection(db, 'globalScores'), orderBy('score', 'desc'), limit(100));
-        const querySnapshot = await getDocs(q);
-        const scores = querySnapshot.docs.map(doc => doc.data());
+        const { scores, nextOffset } = await getGlobalScores({ limit: 100, offset: 0 });
         setGlobalScores(scores);
-        setLastScoreDoc(querySnapshot.docs[querySnapshot.docs.length - 1] || null);
-        setHasMoreScores(querySnapshot.docs.length === 100);
+        setGlobalScoresOffset(nextOffset || 0);
+        setHasMoreScores(nextOffset !== null);
       } catch (err) {
         console.error('Failed to fetch global scores:', err);
       }
@@ -191,20 +125,15 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       
     const fetchReplays = async () => {
       try {
-        const q = query(collection(db, 'replays'), orderBy('createdAt', 'desc'));
-        const querySnapshot = await getDocs(q);
-        const replays = querySnapshot.docs.map(doc => ({
-          id: doc.id,
-          ...doc.data()
-        }));
+        const replays = await getReplays();
         setSavedReplays(replays);
       } catch (err) {
         console.error('Failed to fetch replays:', err);
       }
     };
+
+    fetchCommunitySongs();
     fetchReplays();
-    
-    return () => unsubscribeSongs();
   }, []);
 
   // Dynamic note scaling when complexity changes
@@ -294,17 +223,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   };
 
   const handleSaveToCommunity = async () => {
-    console.log("handleSaveToCommunity called. User:", user);
-    if (!user) {
-      setError("You must be logged in to save songs.");
-      return;
-    }
     if (!readySong || !lastUploadedFile) {
-      return;
-    }
-
-    if (!user) {
-      setError('Please sign in to share songs.');
       return;
     }
 
@@ -314,69 +233,28 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     }
 
     setIsSaving(true);
+    setError(null);
+
     try {
-      console.log("Starting upload...");
-      // 1. Upload audio to Firebase Storage
-      const storageRef = ref(storage, `songs/${Date.now()}_${lastUploadedFile.name}`);
-      console.log("Storage ref created:", storageRef.fullPath);
-      
-      console.log("Calling uploadBytes...");
-      const uploadResult = await uploadBytes(storageRef, lastUploadedFile);
-      console.log("uploadBytes complete. Snapshot:", uploadResult.metadata.fullPath);
-      
-      console.log("Calling getDownloadURL...");
-      const audioUrl = await getDownloadURL(uploadResult.ref);
-      console.log("getDownloadURL complete. URL:", audioUrl);
-
-      // 2. Upload notes to Firebase Storage
-      const notesString = JSON.stringify(readySong.notes);
-      const notesRef = ref(storage, `notes/${Date.now()}_${metadata.name}.json`);
-      await uploadString(notesRef, notesString);
-      const notesUrl = await getDownloadURL(notesRef);
-      console.log("Notes uploaded to:", notesUrl);
-
-      // 3. Save metadata and notes URL to Firestore
-      const songDoc = {
+      const newSong = await saveCommunitySong({
+        audioFile: lastUploadedFile,
         name: metadata.name,
         artist: metadata.artist,
-        audioUrl,
-        notesUrl,
         difficulty: readySong.difficulty,
         density: readySong.density ?? 0.5,
         laneVariety: readySong.laneVariety ?? 0.5,
         sliderProbability: readySong.sliderProbability ?? 0.3,
         stamina: readySong.stamina ?? 0.5,
-        topScore: 0,
-        createdAt: serverTimestamp(),
-        authorUid: user.uid,
-        authorName: user.displayName || user.email || 'Anonymous'
-      };
+        authorName: username || 'Anonymous',
+        notes: readySong.notes
+      });
 
-      console.log("Saving to Firestore... Notes URL:", songDoc.notesUrl);
-      console.log("About to call addDoc... db instance:", db);
-      console.log("songDoc content:", songDoc);
-      
-      try {
-        const docRef = await addDoc(collection(db, 'songs'), songDoc);
-        console.log("Firestore save complete, doc ID:", docRef.id);
-        
-        const newSong = { 
-          id: docRef.id,
-          ...songDoc,
-          createdAt: new Date().toISOString()
-        };
-        console.log("Adding new song to state:", newSong);
-        setCommunitySongs(prev => [newSong, ...prev]);
-        
-        alert('Song saved to community library!');
-      } catch (error) {
-        console.error("CRITICAL: Firestore addDoc failed:", error);
-        setError("Failed to save to database. Please check console for details.");
-        throw error; // Re-throw to be caught by the outer catch block
-      }
+      setCommunitySongs(prev => [newSong, ...prev]);
+      alert('Song saved to community library!');
     } catch (err: any) {
-      console.error("Save error details:", err);
-      setError(`Failed to save song: ${err.message || 'Unknown error'}`);
+      console.error('Save error details:', err);
+      const message = err?.message || 'Unknown error';
+      setError(`Failed to save song: ${message}`);
     } finally {
       setIsSaving(false);
     }
@@ -509,20 +387,11 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     e.preventDefault();
     setIsAdminLoading(true);
     try {
-      const res = await fetch('/api/admin/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: adminPassword })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setAdminToken(data.token);
-        localStorage.setItem('adminToken', data.token);
-        setAdminPassword('');
-        setError(null);
-      } else {
-        setError(data.error || 'Login failed');
-      }
+      const token = await loginAdmin(adminPassword);
+      setAdminToken(token);
+      localStorage.setItem('adminToken', token);
+      setAdminPassword('');
+      setError(null);
     } catch (err) {
       setError('Login failed');
     } finally {
@@ -544,23 +413,15 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     }
     setIsAdminLoading(true);
     try {
-      const res = await fetch('/api/admin/password', {
-        method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${adminToken}`
-        },
-        body: JSON.stringify({ newPassword: newAdminPassword })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setNewAdminPassword('');
-        setIsChangingPassword(false);
-        setError(null);
-        alert('Admin password changed successfully!');
-      } else {
-        setError(data.error || 'Failed to change password');
+      if (!adminToken) {
+        setError('Admin login required.');
+        return;
       }
+      await changeAdminPassword(adminToken, newAdminPassword);
+      setNewAdminPassword('');
+      setIsChangingPassword(false);
+      setError(null);
+      alert('Admin password changed successfully!');
     } catch (err) {
       setError('Failed to change password');
     } finally {
@@ -578,18 +439,10 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     setDeleteTargetId(null);
     setLoadingSongId(id);
     try {
-      const song = communitySongs.find(s => s.id === id);
-      if (song?.audioUrl) {
-        // Try to delete from storage if it's a firebase URL
-        try {
-          const storageRef = ref(storage, song.audioUrl);
-          await deleteObject(storageRef);
-        } catch (e) {
-          console.warn("Could not delete audio file from storage:", e);
-        }
+      if (!adminToken) {
+        throw new Error('Admin login required.');
       }
-      
-      await deleteDoc(doc(db, 'songs', id));
+      await deleteCommunitySong(id, adminToken);
       setCommunitySongs(prev => prev.filter(s => s.id !== id));
     } catch (err) {
       console.error(err);
@@ -625,7 +478,10 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
 
     setLoadingSongId(id);
     try {
-      await updateDoc(doc(db, 'songs', id), editForm);
+      if (!adminToken) {
+        throw new Error('Admin login required.');
+      }
+      await updateCommunitySong(id, editForm, adminToken);
       setCommunitySongs(prev => prev.map(s => s.id === id ? { ...s, ...editForm } : s));
       setEditingSong(null);
       setError(null);
@@ -642,53 +498,53 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     setIntegrityResults([]);
     setError(null);
     try {
-      // Check songs collection
-      const songsSnapshot = await getDocs(query(collection(db, 'songs'), limit(5)));
-      const songsCount = songsSnapshot.size;
+      const report = await getIntegrityReport();
+      const results = [
+        { name: 'Songs Collection', status: 'OK', details: `${report.songsCount} songs found` },
+        { name: 'Global Scores Collection', status: 'OK', details: `${report.scoresCount} scores found` },
+        { name: 'Replays Collection', status: 'OK', details: `${report.replaysCount} replays found` },
+        {
+          name: 'Song Storage Files',
+          status: report.missingAssetSongsCount > 0 ? 'WARN' : 'OK',
+          details:
+            report.missingAssetSongsCount > 0
+              ? `${report.missingAssetSongsCount} songs have missing audio/notes files`
+              : 'Song audio + notes files are present for all stored songs',
+        },
+      ];
 
-      // Check globalScores collection
-      const scoresSnapshot = await getDocs(query(collection(db, 'globalScores'), limit(5)));
-      const scoresCount = scoresSnapshot.size;
+      if (report.missingAssetSongsCount > 0) {
+        report.missingAssetSongs.forEach((entry) => {
+          const missing = [];
+          if (entry.missingAudio) missing.push("audio");
+          if (entry.missingNotes) missing.push("notes");
+          results.push({
+            name: `Missing Files: ${entry.name} (${entry.artist})`,
+            status: 'ERROR',
+            details: `Missing: ${missing.join(", ") || "unknown"}`,
+          });
+        });
+      }
 
-      // Check replays collection
-      const replaysSnapshot = await getDocs(query(collection(db, 'replays'), limit(5)));
-      const replaysCount = replaysSnapshot.size;
-
-      setIntegrityResults([
-        { name: 'Songs Collection', status: 'OK', details: `${songsCount} songs found` },
-        { name: 'Global Scores Collection', status: 'OK', details: `${scoresCount} scores found` },
-        { name: 'Replays Collection', status: 'OK', details: `${replaysCount} replays found` }
-      ]);
+      setIntegrityResults(results);
     } catch (err: any) {
       console.error("Integrity check failed:", err);
       setError(`Integrity check failed: ${err.message || 'Unknown error'}`);
-      setIntegrityResults([{ name: 'Firebase Connection', status: 'ERROR', details: err.message }]);
+      setIntegrityResults([{ name: 'Integrity Check', status: 'ERROR', details: err.message || 'Unknown error' }]);
     } finally {
       setIsCheckingIntegrity(false);
     }
   };
 
   const fetchMoreGlobalScores = async () => {
-    if (isLoadingMoreScores || !hasMoreScores || !lastScoreDoc) return;
+    if (isLoadingMoreScores || !hasMoreScores) return;
 
     setIsLoadingMoreScores(true);
     try {
-      const q = query(
-        collection(db, 'globalScores'), 
-        orderBy('score', 'desc'), 
-        startAfter(lastScoreDoc),
-        limit(100)
-      );
-      const querySnapshot = await getDocs(q);
-      const newScores = querySnapshot.docs.map(doc => doc.data());
-      
-      if (newScores.length > 0) {
-        setGlobalScores(prev => [...prev, ...newScores]);
-        setLastScoreDoc(querySnapshot.docs[querySnapshot.docs.length - 1]);
-        setHasMoreScores(newScores.length === 100);
-      } else {
-        setHasMoreScores(false);
-      }
+      const { scores, nextOffset } = await getGlobalScores({ limit: 100, offset: globalScoresOffset });
+      setGlobalScores(prev => [...prev, ...scores]);
+      setGlobalScoresOffset(nextOffset || 0);
+      setHasMoreScores(nextOffset !== null);
     } catch (err) {
       console.error('Failed to fetch more global scores:', err);
     } finally {
@@ -783,33 +639,14 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
 
         {/* Top Utility Buttons */}
         <div className="w-full flex justify-end gap-3 mb-6">
-          {!user ? (
-            <button 
-              onClick={handleLogin}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl border border-neon-blue/30 bg-neon-blue/10 text-neon-blue hover:bg-neon-blue hover:text-black transition-all font-display font-bold text-xs uppercase tracking-widest"
-            >
-              <LogIn className="w-4 h-4" />
-              Sign In
-            </button>
-          ) : (
-            <div className="flex items-center gap-3">
-              <div className="flex items-center gap-3 px-4 py-2 rounded-xl border border-white/10 bg-white/5">
-                <div className="w-5 h-5 rounded-full bg-neon-purple/20 flex items-center justify-center">
-                  <User className="w-3 h-3 text-neon-purple" />
-                </div>
-                <span className="text-[10px] font-bold text-white/60 uppercase tracking-widest truncate max-w-[100px]">
-                  {user.displayName || user.email?.split('@')[0] || 'User'}
-                </span>
-              </div>
-              <button 
-                onClick={handleSignOut}
-                className="p-2 rounded-xl border border-white/10 bg-white/5 text-white/40 hover:text-neon-pink hover:border-neon-pink/30 transition-all"
-                title="Sign Out"
-              >
-                <X className="w-4 h-4" />
-              </button>
+          <div className="flex items-center gap-3 px-4 py-2 rounded-xl border border-white/10 bg-white/5">
+            <div className="w-5 h-5 rounded-full bg-neon-purple/20 flex items-center justify-center">
+              <User className="w-3 h-3 text-neon-purple" />
             </div>
-          )}
+            <span className="text-[10px] font-bold text-white/60 uppercase tracking-widest truncate max-w-[120px]">
+              {username || 'Anonymous'}
+            </span>
+          </div>
           <button 
             onClick={() => setActiveTab('ADMIN')}
             className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-all font-display font-bold text-xs uppercase tracking-widest ${
@@ -1256,15 +1093,15 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                         </button>
                       </div>
                       <div className="space-y-2 max-h-[150px] overflow-y-auto pr-2 custom-scrollbar">
-                        {integrityResults.map(res => (
-                          <div key={res.id} className="flex justify-between items-center text-[10px] font-mono p-2 rounded bg-white/5">
-                            <span className="text-white truncate max-w-[150px]">{res.name}</span>
-                            <div className="flex gap-3">
-                              <span className="text-white/40">{res.filename}</span>
+                        {integrityResults.map((res) => (
+                          <div key={`${res.name}-${res.status}`} className="rounded bg-white/5 p-2 space-y-1">
+                            <div className="flex justify-between items-center text-[10px] font-mono">
+                              <span className="text-white truncate max-w-[200px]">{res.name}</span>
                               <span className={res.status === 'OK' ? 'text-neon-green' : 'text-neon-pink'}>
-                                {res.status} {res.fileSize > 0 ? `(${(res.fileSize / 1024 / 1024).toFixed(2)}MB)` : ''}
+                                {res.status}
                               </span>
                             </div>
+                            <p className="text-white/40 text-[10px]">{res.details}</p>
                           </div>
                         ))}
                       </div>
@@ -1700,123 +1537,9 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         )}
       </AnimatePresence>
 
-      {/* Auth Modal */}
-      <AnimatePresence>
-        {showAuthModal && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowAuthModal(false)}
-              className="absolute inset-0 bg-black/80 backdrop-blur-md"
-            />
-            <motion.div 
-              initial={{ scale: 0.9, opacity: 0, y: 20 }}
-              animate={{ scale: 1, opacity: 1, y: 0 }}
-              exit={{ scale: 0.9, opacity: 0, y: 20 }}
-              className="relative w-full max-w-md bg-zinc-900 border border-white/10 rounded-[32px] p-8 shadow-2xl overflow-hidden"
-            >
-              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-neon-blue via-neon-purple to-neon-pink" />
-              
-              <div className="flex justify-between items-center mb-8">
-                <h2 className="text-2xl font-display font-black italic text-white uppercase tracking-tight">
-                  {authMode === 'signin' ? 'Welcome Back' : 'Join the Pulse'}
-                </h2>
-                <button 
-                  onClick={() => setShowAuthModal(false)}
-                  className="p-2 rounded-full hover:bg-white/5 text-white/40 hover:text-white transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <div className="space-y-6">
-                {/* Google Login */}
-                <button 
-                  onClick={handleGoogleLogin}
-                  disabled={authLoading}
-                  className="w-full flex items-center justify-center gap-3 py-3 rounded-2xl bg-white text-black font-display font-bold text-sm hover:bg-white/90 transition-all disabled:opacity-50"
-                >
-                  <svg className="w-5 h-5" viewBox="0 0 24 24">
-                    <path fill="currentColor" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
-                    <path fill="currentColor" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
-                    <path fill="currentColor" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" />
-                    <path fill="currentColor" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" />
-                  </svg>
-                  Continue with Google
-                </button>
-
-                <div className="relative flex items-center py-2">
-                  <div className="flex-grow border-t border-white/10"></div>
-                  <span className="flex-shrink mx-4 text-[10px] font-bold text-white/20 uppercase tracking-widest">Or use email</span>
-                  <div className="flex-grow border-t border-white/10"></div>
-                </div>
-
-                {/* Email Auth Form */}
-                <form onSubmit={handleEmailAuth} className="space-y-4">
-                  {authMode === 'signup' && (
-                    <div>
-                      <label className="block text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2 ml-1">Display Name</label>
-                      <input 
-                        type="text"
-                        value={authDisplayName}
-                        onChange={(e) => setAuthDisplayName(e.target.value)}
-                        required
-                        className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-white text-sm focus:border-neon-blue outline-none transition-all"
-                        placeholder="Your DJ Name"
-                      />
-                    </div>
-                  )}
-                  <div>
-                    <label className="block text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2 ml-1">Email Address</label>
-                    <input 
-                      type="email"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      required
-                      className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-white text-sm focus:border-neon-blue outline-none transition-all"
-                      placeholder="email@example.com"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-bold text-white/40 uppercase tracking-widest mb-2 ml-1">Password</label>
-                    <input 
-                      type="password"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      required
-                      className="w-full bg-white/5 border border-white/10 rounded-2xl p-4 text-white text-sm focus:border-neon-blue outline-none transition-all"
-                      placeholder="••••••••"
-                    />
-                  </div>
-
-                  <button 
-                    type="submit"
-                    disabled={authLoading}
-                    className="w-full py-4 rounded-2xl bg-neon-blue text-black font-display font-black text-sm uppercase tracking-widest hover:shadow-[0_0_20px_rgba(0,243,255,0.4)] transition-all disabled:opacity-50"
-                  >
-                    {authLoading ? (
-                      <div className="w-5 h-5 border-2 border-black border-t-transparent rounded-full animate-spin mx-auto" />
-                    ) : (
-                      authMode === 'signin' ? 'Sign In' : 'Create Account'
-                    )}
-                  </button>
-                </form>
-
-                <div className="text-center">
-                  <button 
-                    onClick={() => setAuthMode(authMode === 'signin' ? 'signup' : 'signin')}
-                    className="text-xs text-white/40 hover:text-neon-blue transition-colors"
-                  >
-                    {authMode === 'signin' ? "Don't have an account? Sign Up" : "Already have an account? Sign In"}
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
     </div>
   );
 };
+
+
+

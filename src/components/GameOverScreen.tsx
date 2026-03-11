@@ -2,8 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Trophy, RotateCcw, Home, Star, Share2, Activity, List, Music, Save } from 'lucide-react';
 import { ReplayEvent, SavedReplay } from '../types';
-import { doc, getDoc, collection, addDoc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { getSongById, saveReplay } from '../services/pulseApi';
 
 interface HighScore {
   score: number;
@@ -86,7 +85,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
         events: replayEvents
       };
       
-      await addDoc(collection(db, 'replays'), newReplay);
+      await saveReplay(newReplay);
       setIsSaved(true);
     } catch (err) {
       console.error("Failed to save replay:", err);
@@ -100,11 +99,8 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
     const fetchScores = async () => {
       if (songId) {
         try {
-          const songRef = doc(db, 'songs', songId);
-          const songSnap = await getDoc(songRef);
-          if (songSnap.exists()) {
-            setHighScores(songSnap.data().scores || []);
-          }
+          const song = await getSongById(songId);
+          setHighScores(song.scores || []);
         } catch (err) {
           console.error("Failed to fetch high scores:", err);
         }

@@ -2,7 +2,7 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search } from 'lucide-react';
 import { loadAudioFile, generateNotesFromAudio } from '../utils/audio';
-import { SongData, Settings } from '../types';
+import { SongData, Settings, ChartDifficulty } from '../types';
 import {
   changeAdminPassword,
   deleteCommunitySong,
@@ -22,16 +22,80 @@ interface MenuProps {
   onSaveSettings: (settings: Settings) => void;
 }
 
+const CHART_DIFFICULTY_ORDER: ChartDifficulty[] = ['EASY', 'NORMAL', 'HARD', 'EXPERT', 'MASTER'];
+
+const CHART_DIFFICULTY_PRESETS: Record<
+  ChartDifficulty,
+  {
+    label: string;
+    caption: string;
+    description: string;
+    complexity: number;
+    density: number;
+    laneVariety: number;
+    sliderProbability: number;
+    stamina: number;
+  }
+> = {
+  EASY: {
+    label: 'Easy',
+    caption: 'Wide spacing',
+    description: 'Gentle note flow with roomy timing and only light movement.',
+    complexity: 0.18,
+    density: 0.18,
+    laneVariety: 0.3,
+    sliderProbability: 0.02,
+    stamina: 0.18
+  },
+  NORMAL: {
+    label: 'Normal',
+    caption: 'Balanced flow',
+    description: 'Balanced general-song charting with readable streams and restrained bursts.',
+    complexity: 0.34,
+    density: 0.3,
+    laneVariety: 0.44,
+    sliderProbability: 0.06,
+    stamina: 0.32
+  },
+  HARD: {
+    label: 'Hard',
+    caption: 'Faster turns',
+    description: 'Busier patterns, quicker transitions, and more confident stream sections.',
+    complexity: 0.52,
+    density: 0.44,
+    laneVariety: 0.56,
+    sliderProbability: 0.1,
+    stamina: 0.45
+  },
+  EXPERT: {
+    label: 'Expert',
+    caption: 'Ranked-map flow',
+    description: 'More stream-heavy pacing with stronger hand flow and fewer random burst walls.',
+    complexity: 0.72,
+    density: 0.58,
+    laneVariety: 0.66,
+    sliderProbability: 0.14,
+    stamina: 0.58
+  },
+  MASTER: {
+    label: 'Master',
+    caption: 'Peak control',
+    description: 'High-density charts with sharper movement, sustained streams, and controlled burst usage.',
+    complexity: 0.88,
+    density: 0.68,
+    laneVariety: 0.76,
+    sliderProbability: 0.18,
+    stamina: 0.7
+  }
+};
+
 export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings, onSaveSettings }) => {
   const [isUploading, setIsUploading] = useState(false);
   const [readySong, setReadySong] = useState<SongData | null>(null);
   const [metadata, setMetadata] = useState({ name: '', artist: '' });
   const [error, setError] = useState<string | null>(null);
-  const [complexity, setComplexity] = useState(settings.complexity ?? 0.5);
-  const [density, setDensity] = useState(settings.density ?? 0.5);
-  const [laneVariety, setLaneVariety] = useState(settings.laneVariety ?? 0.5);
-  const [sliderProbability, setSliderProbability] = useState(settings.sliderProbability ?? 0.3);
-  const [stamina, setStamina] = useState(settings.stamina ?? 0.5);
+  const [chartDifficulty, setChartDifficulty] = useState<ChartDifficulty>(settings.chartDifficulty ?? 'NORMAL');
+  const { complexity, density, laneVariety, sliderProbability, stamina } = CHART_DIFFICULTY_PRESETS[chartDifficulty];
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [communitySongs, setCommunitySongs] = useState<any[]>([]);
   const [globalScores, setGlobalScores] = useState<any[]>([]);
@@ -88,10 +152,15 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     localStorage.setItem('username', username);
   }, [username]);
 
+  useEffect(() => {
+    setLocalSettings(settings);
+  }, [settings]);
+
   // Sync generation settings to parent settings
   useEffect(() => {
     const updatedSettings = {
       ...settings,
+      chartDifficulty,
       complexity,
       density,
       laneVariety,
@@ -99,7 +168,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       stamina
     };
     onSaveSettings(updatedSettings);
-  }, [complexity, density, laneVariety, sliderProbability, stamina]);
+  }, [chartDifficulty]);
 
   useEffect(() => {
     const fetchCommunitySongs = async () => {
@@ -1287,125 +1356,49 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                     Generation Settings
                   </h4>
                   
-                  <div className="space-y-8">
-                    {/* Difficulty */}
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-end">
-                        <div>
-                          <p className="text-white font-bold text-sm">Difficulty</p>
-                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Base complexity</p>
-                        </div>
-                        <span className="text-neon-purple font-mono text-xs">{Math.round(complexity * 100)}%</span>
+                  <div className="space-y-5">
+                    <div className="flex justify-between items-end">
+                      <div>
+                        <p className="text-white font-bold text-sm">Song Difficulty</p>
+                        <p className="text-white/40 text-[10px] uppercase tracking-widest">Colorful Stage style chart presets</p>
                       </div>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Easy</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.1" 
-                          value={complexity} 
-                          onChange={(e) => setComplexity(parseFloat(e.target.value))}
-                          className="flex-1 accent-neon-purple h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                        />
-                        <span className="text-[10px] font-black text-neon-purple uppercase tracking-widest w-16">Expert</span>
-                      </div>
+                      <span className="text-neon-purple font-mono text-xs">{CHART_DIFFICULTY_PRESETS[chartDifficulty].label}</span>
                     </div>
 
-                    {/* Density */}
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-end">
-                        <div>
-                          <p className="text-white font-bold text-sm">Density</p>
-                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Note frequency</p>
-                        </div>
-                        <span className="text-neon-green font-mono text-xs">{Math.round(density * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.1" 
-                          value={density} 
-                          onChange={(e) => setDensity(parseFloat(e.target.value))}
-                          className="flex-1 accent-neon-green h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                        />
-                        <span className="text-[10px] font-black text-neon-green uppercase tracking-widest w-16">High</span>
-                      </div>
+                    <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                      {CHART_DIFFICULTY_ORDER.map((difficultyLevel) => {
+                        const preset = CHART_DIFFICULTY_PRESETS[difficultyLevel];
+                        const isActive = chartDifficulty === difficultyLevel;
+
+                        return (
+                          <button
+                            key={difficultyLevel}
+                            onClick={() => setChartDifficulty(difficultyLevel)}
+                            className={`rounded-2xl border p-4 text-left transition-all ${
+                              isActive
+                                ? 'border-neon-purple bg-neon-purple/15 shadow-[0_0_24px_rgba(236,72,153,0.18)]'
+                                : 'border-white/10 bg-black/30 hover:border-white/20 hover:bg-white/5'
+                            }`}
+                          >
+                            <p className={`font-display font-black uppercase tracking-widest ${isActive ? 'text-neon-purple' : 'text-white'}`}>
+                              {preset.label}
+                            </p>
+                            <p className="mt-2 text-[10px] uppercase tracking-widest text-white/45">{preset.caption}</p>
+                          </button>
+                        );
+                      })}
                     </div>
 
-                    {/* Lane Variety */}
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-end">
-                        <div>
-                          <p className="text-white font-bold text-sm">Lane Variety</p>
-                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Lane changes</p>
-                        </div>
-                        <span className="text-neon-pink font-mono text-xs">{Math.round(laneVariety * 100)}%</span>
+                    <div className="rounded-2xl border border-white/10 bg-black/30 p-5">
+                      <div className="flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-widest text-white/45">
+                        <span className="rounded-full border border-white/10 px-3 py-1">Stream-aware</span>
+                        <span className="rounded-full border border-white/10 px-3 py-1">Burst-controlled</span>
+                        <span className="rounded-full border border-white/10 px-3 py-1">General-song balanced</span>
                       </div>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.1" 
-                          value={laneVariety} 
-                          onChange={(e) => setLaneVariety(parseFloat(e.target.value))}
-                          className="flex-1 accent-neon-pink h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                        />
-                        <span className="text-[10px] font-black text-neon-pink uppercase tracking-widest w-16">High</span>
-                      </div>
-                    </div>
-
-                    {/* Sliders */}
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-end">
-                        <div>
-                          <p className="text-white font-bold text-sm">Sliders</p>
-                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Slider probability</p>
-                        </div>
-                        <span className="text-neon-blue font-mono text-xs">{Math.round(sliderProbability * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.1" 
-                          value={sliderProbability} 
-                          onChange={(e) => setSliderProbability(parseFloat(e.target.value))}
-                          className="flex-1 accent-neon-blue h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                        />
-                        <span className="text-[10px] font-black text-neon-blue uppercase tracking-widest w-16">High</span>
-                      </div>
-                    </div>
-
-                    {/* Stamina */}
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-end">
-                        <div>
-                          <p className="text-white font-bold text-sm">Stamina</p>
-                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Burst capacity</p>
-                        </div>
-                        <span className="text-neon-orange font-mono text-xs">{Math.round(stamina * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.1" 
-                          value={stamina} 
-                          onChange={(e) => setStamina(parseFloat(e.target.value))}
-                          className="flex-1 accent-neon-orange h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                        />
-                        <span className="text-[10px] font-black text-neon-orange uppercase tracking-widest w-16">High</span>
-                      </div>
+                      <p className="mt-4 text-sm font-bold text-white">{CHART_DIFFICULTY_PRESETS[chartDifficulty].description}</p>
+                      <p className="mt-2 text-xs text-white/45">
+                        The generator now uses this preset to control note density, lane motion, hold usage, and hand strain behind the scenes.
+                      </p>
                     </div>
                   </div>
                 </div>

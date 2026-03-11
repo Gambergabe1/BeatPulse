@@ -18,11 +18,12 @@ const defaultSettings: Settings = {
   volume: 1,
   visualEffects: true,
   keybindings: ['d', 'f', 'j', 'k'],
-  complexity: 0.5,
-  density: 0.5,
-  laneVariety: 0.5,
-  sliderProbability: 0.3,
-  stamina: 0.5
+  chartDifficulty: 'NORMAL',
+  complexity: 0.34,
+  density: 0.3,
+  laneVariety: 0.44,
+  sliderProbability: 0.06,
+  stamina: 0.32
 };
 
 export default function App() {

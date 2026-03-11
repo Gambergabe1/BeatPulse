@@ -27,6 +27,18 @@ interface AnalysisFrame {
   dominantBand: "low" | "mid" | "high";
 }
 
+interface LaneStrainState {
+  strain: number;
+  updatedAt: number;
+  lastNoteTime: number;
+}
+
+interface HandStrainState {
+  strain: number;
+  updatedAt: number;
+  lastNoteTime: number;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -37,6 +49,62 @@ function createNoteId(): string {
   }
 
   return Math.random().toString(36).slice(2, 11);
+}
+
+function getHandForLane(lane: number): 0 | 1 {
+  return lane <= 1 ? 0 : 1;
+}
+
+function decayStrain(strain: number, deltaTime: number, decayRate: number): number {
+  if (deltaTime <= 0) return strain;
+  return strain * Math.exp(-deltaTime * decayRate);
+}
+
+function getLaneStrainAt(state: LaneStrainState, time: number): number {
+  return decayStrain(state.strain, time - state.updatedAt, 3.1);
+}
+
+function getHandStrainAt(state: HandStrainState, time: number): number {
+  return decayStrain(state.strain, time - state.updatedAt, 1.65);
+}
+
+function applyStrainToLane(
+  laneStates: LaneStrainState[],
+  handStates: HandStrainState[],
+  lane: number,
+  time: number,
+  stamina: number,
+  isChord: boolean,
+  hasSlider: boolean
+) {
+  const laneState = laneStates[lane];
+  const hand = getHandForLane(lane);
+  const handState = handStates[hand];
+  const laneStrain = getLaneStrainAt(laneState, time);
+  const handStrain = getHandStrainAt(handState, time);
+  const laneInterval =
+    Number.isFinite(laneState.lastNoteTime) && laneState.lastNoteTime > 0
+      ? time - laneState.lastNoteTime
+      : 1;
+  const handInterval =
+    Number.isFinite(handState.lastNoteTime) && handState.lastNoteTime > 0
+      ? time - handState.lastNoteTime
+      : 1;
+
+  const repeatFactor = laneInterval < 0.18 ? 1.18 + ((0.18 - laneInterval) * 5.4) : 1;
+  const handSpeedFactor = 1 + clamp((0.22 - handInterval) * 4.6, 0, 1.8);
+  const laneSpeedFactor = 1 + clamp((0.2 - laneInterval) * 4.8, 0, 1.9);
+  const staminaRelief = 1 - (stamina * 0.22);
+  const chordFactor = isChord ? 0.76 : 1;
+  const sliderFactor = hasSlider ? 0.82 : 1;
+
+  laneState.strain = laneStrain + (0.44 * laneSpeedFactor * repeatFactor * sliderFactor * staminaRelief);
+  laneState.updatedAt = time;
+  laneState.lastNoteTime = time;
+
+  handState.strain = handStrain + (0.58 * handSpeedFactor * Math.max(1, repeatFactor * 0.85) * chordFactor * staminaRelief);
+  handState.updatedAt = time;
+  handState.lastNoteTime = time;
 }
 
 async function renderFilteredChannel(
@@ -138,7 +206,11 @@ function chooseLane(
   lastLane: number,
   laneVariety: number,
   consecutiveOnLane: number,
-  maxConsecutive: number
+  maxConsecutive: number,
+  laneStates: LaneStrainState[],
+  handStates: HandStrainState[],
+  currentTime: number,
+  stamina: number
 ): number {
   const centroidLane = clamp(Math.round(frame.centroid * 3), 0, 3);
   const bandAnchor =
@@ -152,9 +224,13 @@ function chooseLane(
   let bestScore = -Infinity;
 
   for (const lane of availableLanes) {
+    const laneStrain = getLaneStrainAt(laneStates[lane], currentTime);
+    const handStrain = getHandStrainAt(handStates[getHandForLane(lane)], currentTime);
     let score = 0;
     score += 1.6 - Math.abs(lane - tonalLane) * (1.05 - laneVariety * 0.35);
     score += 0.5 - Math.abs(lane - centroidLane) * 0.25;
+    score -= laneStrain * (1.45 - stamina * 0.9);
+    score -= handStrain * (1.2 - stamina * 0.65);
 
     if (lastLane !== -1) {
       const distance = Math.abs(lane - lastLane);
@@ -165,7 +241,23 @@ function chooseLane(
       if (consecutiveOnLane >= maxConsecutive && lane === lastLane) score -= 5;
     }
 
-    score += (Math.random() - 0.5) * (0.12 + laneVariety * 0.38);
+    const laneInterval =
+      Number.isFinite(laneStates[lane].lastNoteTime) && laneStates[lane].lastNoteTime > 0
+        ? currentTime - laneStates[lane].lastNoteTime
+        : 1;
+    const handInterval =
+      Number.isFinite(handStates[getHandForLane(lane)].lastNoteTime) && handStates[getHandForLane(lane)].lastNoteTime > 0
+        ? currentTime - handStates[getHandForLane(lane)].lastNoteTime
+        : 1;
+
+    if (laneInterval < 0.16) {
+      score -= (0.16 - laneInterval) * (9.5 - stamina * 3.2);
+    }
+    if (handInterval < 0.12) {
+      score -= (0.12 - handInterval) * (7.8 - stamina * 2.8);
+    }
+
+    score += (Math.random() - 0.5) * (0.08 + laneVariety * 0.22);
 
     if (score > bestScore) {
       bestScore = score;
@@ -295,14 +387,34 @@ export async function generateNotesFromAudio(
     frames.reduce((sum, frame) => sum + frame.total, 0) / (frames.length || 1);
   const silenceFloor = globalAverageEnergy * 0.38;
   const laneAvailability = [0, 0, 0, 0];
+  const laneStates: LaneStrainState[] = [0, 1, 2, 3].map(() => ({
+    strain: 0,
+    updatedAt: 0,
+    lastNoteTime: -Infinity,
+  }));
+  const handStates: HandStrainState[] = [0, 1].map(() => ({
+    strain: 0,
+    updatedAt: 0,
+    lastNoteTime: -Infinity,
+  }));
 
   let lastNoteTime = -Infinity;
   let lastLane = -1;
   let consecutiveOnLane = 0;
+  let currentQuickRunCount = 1;
+  let currentQuickRunRegistered = false;
+  let currentQuickRunStart = -Infinity;
+  let recentBurstStarts: number[] = [];
 
-  const staminaWindow = 1.2;
-  const staminaAllowance = 2 + (stamina * 8) + (density * 4);
-  const baseSpacing = Math.max(minNoteSpacing, 0.3 - density * 0.18 - complexity * 0.05);
+  const baseSpacing = Math.max(minNoteSpacing, 0.24 - density * 0.11 - complexity * 0.025);
+  const streamSpacingFloor = Math.max(minNoteSpacing, baseSpacing * 0.82);
+  const streamSpacingCeiling = Math.max(streamSpacingFloor + 0.06, 0.3 - density * 0.04 - complexity * 0.015);
+  const quickBurstSpacing = Math.max(streamSpacingFloor, 0.145 - density * 0.025 - stamina * 0.015);
+  const burstSpacingFloor = Math.max(minNoteSpacing, quickBurstSpacing * 0.78);
+  const burstWindowSeconds = 15;
+  const maxBurstClustersPerWindow = 4;
+  const handStrainCap = 0.92 + (stamina * 1.75) + (density * 0.45);
+  const totalStrainCap = 1.7 + (stamina * 2.6);
 
   for (let i = 2; i < frames.length - 2; i++) {
     const frame = frames[i];
@@ -317,20 +429,40 @@ export async function generateNotesFromAudio(
     if (frame.total < silenceFloor) continue;
 
     const threshold = 0.88 - density * 0.16 - complexity * 0.08;
+    const timeSinceLast = frame.time - lastNoteTime;
+    const isStreamContinuation =
+      Number.isFinite(lastNoteTime) &&
+      timeSinceLast >= streamSpacingFloor &&
+      timeSinceLast <= streamSpacingCeiling &&
+      (frame.lowRatio > 1.01 || frame.midRatio > 1.03 || frame.onsetRatio > 1.02);
+    const requiredScore = isStreamContinuation
+      ? threshold - (0.08 + density * 0.04 + complexity * 0.03)
+      : threshold;
     const isLocalPeak =
       frame.combinedScore >= frames[i - 1].combinedScore &&
       frame.combinedScore >= frames[i + 1].combinedScore &&
       frame.combinedScore >= frames[i - 2].combinedScore * 0.95 &&
       frame.combinedScore >= frames[i + 2].combinedScore * 0.95;
 
-    if (!isLocalPeak || frame.combinedScore < threshold) continue;
+    if (!isLocalPeak || frame.combinedScore < requiredScore) continue;
 
-    const timeSinceLast = frame.time - lastNoteTime;
-    const currentStamina = notes.filter((note) => frame.time - note.time < staminaWindow).length;
+    recentBurstStarts = recentBurstStarts.filter((startTime) => frame.time - startTime <= burstWindowSeconds);
+    const continuesQuickRun = Number.isFinite(lastNoteTime) && timeSinceLast < quickBurstSpacing;
+    const leftHandStrain = getHandStrainAt(handStates[0], frame.time);
+    const rightHandStrain = getHandStrainAt(handStates[1], frame.time);
+    const peakHandStrain = Math.max(leftHandStrain, rightHandStrain);
+    const totalHandStrain = leftHandStrain + rightHandStrain;
     const strongEnoughForBurst = frame.combinedScore > threshold + 0.55;
+    const exceptionalBurstPeak = frame.combinedScore > threshold + 0.92;
 
-    if (currentStamina > staminaAllowance && !strongEnoughForBurst) continue;
-    if (timeSinceLast < Math.max(minNoteSpacing, baseSpacing - Math.min(0.1, frame.combinedScore * 0.03))) continue;
+    if ((peakHandStrain > handStrainCap || totalHandStrain > totalStrainCap) && !strongEnoughForBurst) continue;
+    if (continuesQuickRun && currentQuickRunCount >= 4 && !strongEnoughForBurst) continue;
+    if (continuesQuickRun && recentBurstStarts.length >= maxBurstClustersPerWindow && !exceptionalBurstPeak) continue;
+
+    const spacingFloor = continuesQuickRun
+      ? burstSpacingFloor
+      : Math.max(minNoteSpacing, baseSpacing - Math.min(0.04, frame.combinedScore * 0.015));
+    if (timeSinceLast < spacingFloor) continue;
 
     const availableLanes = [0, 1, 2, 3].filter((lane) => laneAvailability[lane] <= frame.time);
     if (availableLanes.length === 0) continue;
@@ -341,15 +473,20 @@ export async function generateNotesFromAudio(
       lastLane,
       laneVariety,
       consecutiveOnLane,
-      maxConsecutive
+      maxConsecutive,
+      laneStates,
+      handStates,
+      frame.time,
+      stamina
     );
 
     const shouldMakeChord =
       availableLanes.length >= 2 &&
-      density > 0.45 &&
-      timeSinceLast > Math.max(0.14, minNoteSpacing * 1.5) &&
+      density > 0.52 &&
+      timeSinceLast > Math.max(0.18, baseSpacing * 1.35) &&
+      totalHandStrain < totalStrainCap * (0.88 + stamina * 0.12) &&
       (
-        frame.combinedScore > threshold + 0.9 ||
+        frame.combinedScore > threshold + 1.02 ||
         (frame.lowRatio > 1.45 && frame.highRatio > 1.32) ||
         (frame.toneRatio > 1.7 && laneVariety > 0.7)
       );
@@ -395,12 +532,41 @@ export async function generateNotesFromAudio(
       if (duration) {
         laneAvailability[lane] = frame.time + duration;
       }
+
+      applyStrainToLane(
+        laneStates,
+        handStates,
+        lane,
+        frame.time,
+        stamina,
+        lanesToCreate.length > 1,
+        Boolean(duration)
+      );
     }
 
     if (primaryLane === lastLane) {
       consecutiveOnLane++;
     } else {
       consecutiveOnLane = 1;
+    }
+
+    if (continuesQuickRun) {
+      if (currentQuickRunCount <= 1 || !Number.isFinite(currentQuickRunStart)) {
+        currentQuickRunCount = 2;
+        currentQuickRunStart = lastNoteTime;
+        currentQuickRunRegistered = false;
+      } else {
+        currentQuickRunCount++;
+      }
+
+      if (currentQuickRunCount >= 4 && !currentQuickRunRegistered) {
+        recentBurstStarts.push(currentQuickRunStart);
+        currentQuickRunRegistered = true;
+      }
+    } else {
+      currentQuickRunCount = 1;
+      currentQuickRunStart = frame.time;
+      currentQuickRunRegistered = false;
     }
 
     lastLane = primaryLane;

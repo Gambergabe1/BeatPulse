@@ -36,10 +36,13 @@ export interface GameState {
   duration: number;
 }
 
+export type ChartDifficulty = 'EASY' | 'NORMAL' | 'HARD' | 'EXPERT' | 'MASTER';
+
 export interface Settings {
   volume: number;
   visualEffects: boolean;
   keybindings: [string, string, string, string];
+  chartDifficulty: ChartDifficulty;
   complexity: number;
   density: number;
   laneVariety: number;

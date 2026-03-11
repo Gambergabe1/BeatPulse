@@ -500,7 +500,7 @@ async function setStoredSchemaVersion(details: Record<string, number>) {
 }
 
 async function migrateSongRows() {
-  const { rows } = await sql`SELECT ctid, * FROM songs`;
+  const { rows } = await sql`SELECT ctid::text AS ctid, * FROM songs`;
   let migrated = 0;
 
   for (const row of rows) {
@@ -525,7 +525,7 @@ async function migrateSongRows() {
         author_name = ${normalized.authorName},
         created_at = ${normalized.createdAt},
         status = ${normalized.status}
-      WHERE ctid = ${row.ctid}
+      WHERE ctid::text = ${row.ctid}
     `;
     migrated += 1;
   }
@@ -534,7 +534,7 @@ async function migrateSongRows() {
 }
 
 async function migrateGlobalScoreRows() {
-  const { rows } = await sql`SELECT ctid, * FROM global_scores`;
+  const { rows } = await sql`SELECT ctid::text AS ctid, * FROM global_scores`;
   let migrated = 0;
 
   for (const row of rows) {
@@ -550,7 +550,7 @@ async function migrateGlobalScoreRows() {
         song_name = ${normalized.songName},
         artist = ${normalized.artist},
         created_at = ${normalized.createdAt}
-      WHERE ctid = ${row.ctid}
+      WHERE ctid::text = ${row.ctid}
     `;
     migrated += 1;
   }
@@ -559,7 +559,7 @@ async function migrateGlobalScoreRows() {
 }
 
 async function migrateReplayRows() {
-  const { rows } = await sql`SELECT ctid, * FROM replays`;
+  const { rows } = await sql`SELECT ctid::text AS ctid, * FROM replays`;
   let migrated = 0;
 
   for (const row of rows) {
@@ -581,7 +581,7 @@ async function migrateReplayRows() {
         date = ${normalized.date},
         created_at = ${normalized.createdAt},
         events = ${JSON.stringify(normalized.events)}::jsonb
-      WHERE ctid = ${row.ctid}
+      WHERE ctid::text = ${row.ctid}
     `;
     migrated += 1;
   }

@@ -588,10 +588,16 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     setError(null);
     try {
       const report = await getIntegrityReport();
+      const hasConfigurationIssues = (report.configurationIssues?.length ?? 0) > 0;
       const results = [
-        { name: 'Songs Collection', status: 'OK', details: `${report.songsCount} songs found` },
-        { name: 'Global Scores Collection', status: 'OK', details: `${report.scoresCount} scores found` },
-        { name: 'Replays Collection', status: 'OK', details: `${report.replaysCount} replays found` },
+        ...(report.configurationIssues || []).map((issue) => ({
+          name: 'Integrity Environment',
+          status: 'WARN',
+          details: issue,
+        })),
+        { name: 'Songs Collection', status: hasConfigurationIssues ? 'WARN' : 'OK', details: `${report.songsCount} songs found` },
+        { name: 'Global Scores Collection', status: hasConfigurationIssues ? 'WARN' : 'OK', details: `${report.scoresCount} scores found` },
+        { name: 'Replays Collection', status: hasConfigurationIssues ? 'WARN' : 'OK', details: `${report.replaysCount} replays found` },
         {
           name: 'Song Storage Files',
           status: report.missingAssetSongsCount > 0 ? 'WARN' : 'OK',

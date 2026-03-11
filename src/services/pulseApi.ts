@@ -81,15 +81,37 @@ interface ApiSuccessResponse<T> {
 
 type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
 
-async function parseApiResponse<T>(res: Response): Promise<T> {
-  const payload = (await res.json().catch(() => ({}))) as ApiResponse<T>;
+function getFallbackErrorMessage(rawText: string, status: number) {
+  const trimmed = rawText.trim();
+  if (!trimmed) return `Request failed (${status})`;
+  if (trimmed.startsWith('<')) return `Request failed (${status})`;
+  return trimmed.slice(0, 240);
+}
 
-  if (!res.ok || payload.success === false) {
-    const message = payload.success === false ? payload.error : `Request failed (${res.status})`;
+async function parseApiResponse<T>(res: Response): Promise<T> {
+  const rawText = await res.text();
+  let parsedPayload = {} as ApiResponse<T>;
+  if (rawText) {
+    try {
+      parsedPayload = JSON.parse(rawText) as ApiResponse<T>;
+    } catch {
+      parsedPayload = {} as ApiResponse<T>;
+    }
+  }
+
+  if (!rawText) {
+    throw new Error(res.ok ? 'Empty API response' : `Request failed (${res.status})`);
+  }
+
+  if (!res.ok || parsedPayload.success !== true) {
+    const message =
+      parsedPayload.success === false
+        ? parsedPayload.error
+        : getFallbackErrorMessage(rawText, res.status);
     throw new Error(message || 'Request failed');
   }
 
-  return payload.data;
+  return parsedPayload.data;
 }
 
 export const getCommunitySongs = async (): Promise<CommunitySongRecord[]> => {
@@ -256,6 +278,7 @@ export const getIntegrityReport = async (): Promise<{
   replaysCount: number;
   missingAssetSongsCount: number;
   missingAssetSongs: SongStorageIssue[];
+  configurationIssues: string[];
 }> => {
   return parseApiResponse<{
     songsCount: number;
@@ -263,5 +286,6 @@ export const getIntegrityReport = async (): Promise<{
     replaysCount: number;
     missingAssetSongsCount: number;
     missingAssetSongs: SongStorageIssue[];
+    configurationIssues: string[];
   }>(await fetch('/api/integrity'));
 };

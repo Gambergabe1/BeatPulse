@@ -3,6 +3,7 @@ import multer from "multer";
 import crypto from "node:crypto";
 import path from "node:path";
 import { del, put } from "@vercel/blob";
+import { handleUpload, type HandleUploadBody } from "@vercel/blob/client";
 import { createPool } from "@vercel/postgres";
 
 function readEnv(name: string): string | undefined {
@@ -92,6 +93,22 @@ interface SongStorageIssue {
   artist: string;
   missingAudio: boolean;
   missingNotes: boolean;
+}
+
+interface SongRegistrationPayload {
+  id: string;
+  name: string;
+  artist: string;
+  audioUrl: string;
+  audioPath: string;
+  notesUrl: string;
+  notesPath: string;
+  difficulty: number;
+  density: number;
+  laneVariety: number;
+  sliderProbability: number;
+  stamina: number;
+  authorName: string;
 }
 
 let schemaPromise: Promise<void> | null = null;
@@ -225,6 +242,16 @@ function getPublicErrorMessage(error: unknown): string {
   }
 
   return "Internal Server Error";
+}
+
+function normalizeText(input: unknown, fallback: string): string {
+  if (typeof input !== "string") return fallback;
+  const trimmed = input.trim();
+  return trimmed || fallback;
+}
+
+function isSongBlobPath(value: string, songId: string): boolean {
+  return value.startsWith(`songs/${songId}/`);
 }
 
 type AsyncHandler = (req: Request, res: Response, next: NextFunction) => Promise<unknown>;
@@ -513,6 +540,44 @@ async function deleteBlobSafe(...urls: Array<string | undefined>) {
   }
 }
 
+async function createSongRecordFromPayload(payload: SongRegistrationPayload) {
+  const database = getDb();
+  try {
+    await database.sql`
+      INSERT INTO songs (
+        id, name, artist, audio_url, audio_blob_key, notes_url, notes_blob_key,
+        difficulty, density, lane_variety, slider_probability, stamina, top_score, author_name
+      ) VALUES (
+        ${payload.id},
+        ${payload.name},
+        ${payload.artist},
+        ${payload.audioUrl},
+        ${payload.audioPath},
+        ${payload.notesUrl},
+        ${payload.notesPath},
+        ${payload.difficulty},
+        ${payload.density},
+        ${payload.laneVariety},
+        ${payload.sliderProbability},
+        ${payload.stamina},
+        0,
+        ${payload.authorName}
+      )
+    `;
+
+    const saved = await getSongById(payload.id);
+    if (!saved) {
+      throw new Error("Song persisted but could not be loaded.");
+    }
+
+    return saved;
+  } catch (error) {
+    await database.sql`DELETE FROM songs WHERE id = ${payload.id}`;
+    await deleteBlobSafe(payload.audioUrl, payload.notesUrl);
+    throw error;
+  }
+}
+
 async function checkBlobExists(url: string): Promise<boolean> {
   try {
     const response = await fetch(url, { method: "HEAD" });
@@ -553,6 +618,44 @@ app.use("/api", ensureAppConfig);
 app.get("/api/health", (_req, res) => {
   ok(res, { status: "ok", message: "BeatPulse server is healthy" });
 });
+
+app.post("/api/blob-upload", withAsync(async (req, res) => {
+  const body = req.body as HandleUploadBody;
+  const jsonResponse = await handleUpload({
+    token: getBlobToken(),
+    request: req,
+    body,
+    onBeforeGenerateToken: async (pathname, clientPayload) => {
+      const parsedPayload = clientPayload ? JSON.parse(clientPayload) : null;
+      const songId = normalizeText(parsedPayload?.songId, "");
+      const kind = normalizeText(parsedPayload?.kind, "");
+      const isNotesUpload = pathname.endsWith("/notes.json");
+
+      if (!songId || !isSongBlobPath(pathname, songId)) {
+        throw new Error("Invalid upload path.");
+      }
+
+      if (isNotesUpload && kind !== "notes") {
+        throw new Error("Invalid notes upload request.");
+      }
+
+      if (!isNotesUpload && kind !== "audio") {
+        throw new Error("Invalid audio upload request.");
+      }
+
+      return {
+        allowedContentTypes: isNotesUpload ? ["application/json"] : ["audio/*"],
+        maximumSizeInBytes: isNotesUpload ? 1024 * 1024 * 5 : 1024 * 1024 * 500,
+        addRandomSuffix: false,
+        allowOverwrite: true,
+        tokenPayload: clientPayload,
+      };
+    },
+    onUploadCompleted: async () => {},
+  });
+
+  return res.json(jsonResponse);
+}));
 
 app.post("/api/admin/login", withAsync(async (req, res) => {
   const state = await getAdminState();
@@ -607,8 +710,49 @@ app.get("/api/songs/:id", withAsync(async (req, res) => {
   return ok(res, song);
 }));
 
+app.post("/api/songs/register", withAsync(async (req, res) => {
+  const id = normalizeText(req.body?.id, crypto.randomUUID());
+  const name = normalizeText(req.body?.name, "Untitled");
+  const artist = normalizeText(req.body?.artist, "Unknown Artist");
+  const audioUrl = normalizeText(req.body?.audioUrl, "");
+  const audioPath = normalizeText(req.body?.audioPath, "");
+  const notesUrl = normalizeText(req.body?.notesUrl, "");
+  const notesPath = normalizeText(req.body?.notesPath, "");
+  const difficulty = normalizeNumber(req.body?.difficulty, 0.5);
+  const density = normalizeNumber(req.body?.density, 0.5);
+  const laneVariety = normalizeNumber(req.body?.laneVariety, 0.5);
+  const sliderProbability = normalizeNumber(req.body?.sliderProbability, 0.3);
+  const stamina = normalizeNumber(req.body?.stamina, 0.5);
+  const authorName = normalizeText(req.body?.authorName, "Anonymous");
+
+  if (!audioUrl || !notesUrl || !audioPath || !notesPath) {
+    return fail(res, 400, "Uploaded song files are missing.");
+  }
+
+  if (!isSongBlobPath(audioPath, id) || !isSongBlobPath(notesPath, id)) {
+    return fail(res, 400, "Uploaded song files do not match the song ID.");
+  }
+
+  const saved = await createSongRecordFromPayload({
+    id,
+    name,
+    artist,
+    audioUrl,
+    audioPath,
+    notesUrl,
+    notesPath,
+    difficulty,
+    density,
+    laneVariety,
+    sliderProbability,
+    stamina,
+    authorName,
+  });
+
+  return ok(res, saved);
+}));
+
 app.post("/api/songs", uploader.single("audio"), withAsync(async (req, res) => {
-  const database = getDb();
   if (!req.file) {
     return fail(res, 400, "Audio file is required.");
   }
@@ -644,25 +788,25 @@ app.post("/api/songs", uploader.single("audio"), withAsync(async (req, res) => {
       token,
       contentType: "application/json",
     });
-
-    await database.sql`
-      INSERT INTO songs (
-        id, name, artist, audio_url, audio_blob_key, notes_url, notes_blob_key,
-        difficulty, density, lane_variety, slider_probability, stamina, top_score, author_name
-      ) VALUES (
-        ${id}, ${name}, ${artist}, ${audioBlob.url}, ${audioKey}, ${notesBlob.url}, ${notesKey},
-        ${difficulty}, ${density}, ${laneVariety}, ${sliderProbability}, ${stamina}, 0, ${authorName}
-      )
-    `;
-
-    const saved = await getSongById(id);
-    if (!saved) {
-      throw new Error("Song persisted but could not be loaded.");
-    }
+    const saved = await createSongRecordFromPayload({
+      id,
+      name,
+      artist,
+      audioUrl: audioBlob.url,
+      audioPath: audioKey,
+      notesUrl: notesBlob.url,
+      notesPath: notesKey,
+      difficulty,
+      density,
+      laneVariety,
+      sliderProbability,
+      stamina,
+      authorName,
+    });
 
     return ok(res, saved);
   } catch (error) {
-    if (audioBlob?.url || notesBlob?.url) {
+    if ((audioBlob?.url || notesBlob?.url) && !(error instanceof Error && error.message === "Song persisted but could not be loaded.")) {
       await deleteBlobSafe(audioBlob?.url, notesBlob?.url);
     }
     console.error("Song upload failed:", error);

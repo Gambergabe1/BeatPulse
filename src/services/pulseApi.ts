@@ -1,3 +1,5 @@
+import { upload } from '@vercel/blob/client';
+
 export interface ScoreRecord {
   score: number;
   accuracy: number;
@@ -62,6 +64,23 @@ interface ApiSuccessResponse<T> {
 
 type ApiResponse<T> = ApiSuccessResponse<T> | ApiErrorResponse;
 
+function createSongId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+
+  return `song-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sanitizeFileName(input: string): string {
+  return input.replace(/[^\w.-]/g, '_').replace(/_+/g, '_').slice(0, 120) || 'upload';
+}
+
+function getFileExtension(fileName: string): string {
+  const match = /\.[^./\\]+$/.exec(fileName);
+  return match ? match[0] : '.mp3';
+}
+
 async function parseApiResponse<T>(res: Response): Promise<T> {
   const payload = (await res.json().catch(() => ({}))) as ApiResponse<T>;
 
@@ -93,21 +112,50 @@ export const saveCommunitySong = async (payload: {
   authorName: string;
   notes: unknown[];
 }): Promise<CommunitySongRecord> => {
-  const formData = new FormData();
-  formData.append('audio', payload.audioFile);
-  formData.append('name', payload.name);
-  formData.append('artist', payload.artist);
-  formData.append('difficulty', String(payload.difficulty));
-  formData.append('density', String(payload.density));
-  formData.append('laneVariety', String(payload.laneVariety));
-  formData.append('sliderProbability', String(payload.sliderProbability));
-  formData.append('stamina', String(payload.stamina));
-  formData.append('authorName', payload.authorName);
-  formData.append('notes', JSON.stringify(payload.notes));
+  const songId = createSongId();
+  const fileExtension = getFileExtension(payload.audioFile.name);
+  const baseName = sanitizeFileName(payload.audioFile.name.replace(/\.[^./\\]+$/, ''));
+  const audioPath = `songs/${songId}/${baseName}${fileExtension || '.mp3'}`;
+  const notesPath = `songs/${songId}/notes.json`;
 
-  const res = await fetch('/api/songs', {
+  const [audioBlob, notesBlob] = await Promise.all([
+    upload(audioPath, payload.audioFile, {
+      access: 'public',
+      contentType: payload.audioFile.type || 'audio/mpeg',
+      handleUploadUrl: '/api/blob-upload',
+      clientPayload: JSON.stringify({ songId, kind: 'audio' }),
+      multipart: true,
+    }),
+    upload(
+      notesPath,
+      new Blob([JSON.stringify(payload.notes)], { type: 'application/json' }),
+      {
+        access: 'public',
+        contentType: 'application/json',
+        handleUploadUrl: '/api/blob-upload',
+        clientPayload: JSON.stringify({ songId, kind: 'notes' }),
+      }
+    ),
+  ]);
+
+  const res = await fetch('/api/songs/register', {
     method: 'POST',
-    body: formData,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      id: songId,
+      name: payload.name,
+      artist: payload.artist,
+      difficulty: payload.difficulty,
+      density: payload.density,
+      laneVariety: payload.laneVariety,
+      sliderProbability: payload.sliderProbability,
+      stamina: payload.stamina,
+      authorName: payload.authorName,
+      audioUrl: audioBlob.url,
+      audioPath,
+      notesUrl: notesBlob.url,
+      notesPath,
+    }),
   });
   return parseApiResponse<CommunitySongRecord>(res);
 };

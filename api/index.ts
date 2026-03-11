@@ -94,18 +94,20 @@ interface StorageNormalizedRows {
   replays: number;
 }
 
-function ensureEnvironment() {
+function ensureDatabaseEnvironment() {
   if (!process.env.POSTGRES_URL && !process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL/POSTGRES_URL is not configured.");
   }
+}
 
+function ensureBlobEnvironment() {
   if (!BLOB_WRITE_TOKEN) {
     throw new Error("BLOB_READ_WRITE_TOKEN is not configured.");
   }
 }
 
 async function prepareStorageSchema() {
-  ensureEnvironment();
+  ensureDatabaseEnvironment();
 
   await sql`
     CREATE TABLE IF NOT EXISTS admin_state (
@@ -856,6 +858,7 @@ app.get("/api/songs/:id", async (req, res) => {
 app.post("/api/songs", uploader.single("audio"), async (req, res) => {
   try {
     await ensureStorageReady();
+    ensureBlobEnvironment();
     if (!req.file) return fail(res, 400, "Audio file is required.");
 
     const id = crypto.randomUUID();
@@ -1016,6 +1019,7 @@ app.post("/api/songs/:id/scores", async (req, res) => {
 app.delete("/api/songs/:id", requireAdmin, async (req, res) => {
   try {
     await ensureStorageReady();
+    ensureBlobEnvironment();
     const song = await readSong(req.params.id);
     if (!song) return fail(res, 404, "Song not found");
 

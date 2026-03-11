@@ -131,6 +131,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       setCommunitySongs(songs);
     } catch (err) {
       console.error('Failed to fetch songs:', err);
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Failed to load community songs: ${message}`);
     }
   }, []);
 
@@ -142,6 +144,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       setHasMoreScores(nextOffset !== null);
     } catch (err) {
       console.error('Failed to fetch global scores:', err);
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Failed to load global scores: ${message}`);
     }
   }, []);
 
@@ -151,6 +155,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       setSavedReplays(replays);
     } catch (err) {
       console.error('Failed to fetch replays:', err);
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Failed to load replays: ${message}`);
     }
   }, []);
 

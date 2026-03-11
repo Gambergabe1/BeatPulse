@@ -1,43 +1,54 @@
-﻿<div align="center">
+<div align="center">
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
 
-# Run and deploy your AI Studio app
+# BeatPulse
 
-This contains everything you need to run your app locally.
+This app ships with a Vite frontend and a Vercel-native API for songs, scores, replays, and admin auth.
 
-View your app in AI Studio: https://ai.studio/apps/55cf825e-b8ca-40aa-a7d3-12c87156e76f
-
-## Run Locally
-
-**Prerequisites:**  Node.js
-
+## Run locally (current local backend)
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
+2. Set env vars in `.env.local`:
+   - `GEMINI_API_KEY`
+3. Start the local server:
    `npm run dev`
 
+## Vercel API backend (what this repo now uses for deployment)
 
-## Admin panel
+1. Install dependencies:
+   `npm install`
+2. Set env vars for API mode in `.env` or `.env.local`:
+   - `ADMIN_PASSWORD` (optional, defaults to `admin1234`)
+   - `POSTGRES_URL` or `DATABASE_URL`
+   - `BLOB_READ_WRITE_TOKEN`
+3. Deploy with Vercel (`npm run build` for local production preview).
 
-The project now ships with working admin endpoints in `server.ts`. On first server start, the app creates `.admin-state.json` and uses `admin1234` as the default password unless `ADMIN_PASSWORD` is set in your environment. Change it immediately from the in-app admin screen after logging in.
+## Deploy to Vercel
 
+1. Create a Vercel project connected to this repo.
+2. Ensure these env vars are set in the Vercel dashboard:
+   - `POSTGRES_URL` or `DATABASE_URL`
+   - `BLOB_READ_WRITE_TOKEN`
+   - `ADMIN_PASSWORD` (recommended)
+   - `GEMINI_API_KEY` (if the frontend requires it)
+3. Deploy; Vercel will:
+   - build the React frontend with `vite build`
+   - serve `/api/*` via `api/index.ts`
 
-## Local storage backend
+## API endpoints
 
-This project now uses the built-in local backend in `server.ts` for songs, scores, replays, and admin actions.
-No external managed backend service is required for save/load or admin login flows.
-
-Admin sign-in uses `ADMIN_PASSWORD` from `.env.local` or `.env` (falls back to `admin1234` if not set).
-
-### Persistence guarantees
-
-Song audio files are stored under `uploads/<songId>/...` and metadata is stored in `.server-data/songs.json` by default.
-Both are only removed when `/api/songs/:id` is called from an authenticated admin session (the admin panel delete button).
-Uploads are written with atomic file writes, so a failed upload does not leave partial or orphaned song records.
-
-If you want persistence across restarts on a platform with ephemeral disks, point the server at a mounted volume by setting:
-- `BEATPULSE_DATA_DIR` (metadata)
-- `BEATPULSE_UPLOAD_DIR` (audio + notes files)
+- `POST /api/admin/login`
+- `POST /api/admin/password`
+- `GET /api/songs`
+- `POST /api/songs`
+- `PATCH /api/songs/:id`
+- `DELETE /api/songs/:id`
+- `POST /api/songs/:id/scores`
+- `GET /api/global-scores`
+- `POST /api/global-scores`
+- `GET /api/replays`
+- `POST /api/replays`
+- `GET /api/integrity`
+- `GET /api/audio-proxy`

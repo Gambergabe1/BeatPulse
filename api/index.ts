@@ -9,6 +9,9 @@ const uploader = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const BLOB_WRITE_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
+const STORAGE_SCHEMA_VERSION = 2;
+
+let storageReadyPromise: Promise<void> | null = null;
 
 type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
@@ -91,7 +94,7 @@ function ensureEnvironment() {
   }
 }
 
-async function ensureStorageReady() {
+async function prepareStorageSchema() {
   ensureEnvironment();
 
   await sql`
@@ -153,6 +156,56 @@ async function ensureStorageReady() {
       events JSONB NOT NULL DEFAULT '[]'::jsonb
     );
   `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS storage_meta (
+      key TEXT PRIMARY KEY,
+      value JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL
+    );
+  `;
+
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS audio_url TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS audio_path TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS notes_url TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS notes_path TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS density REAL`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS lane_variety REAL`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS slider_probability REAL`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS stamina REAL`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS top_score REAL`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS scores JSONB`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS author_name TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS status TEXT`;
+
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS id TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS song_name TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS artist TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
+
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS id TEXT`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS song_id TEXT`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS song_name TEXT`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS density REAL`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS lane_variety REAL`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS slider_probability REAL`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS stamina REAL`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS events JSONB`;
+}
+
+async function ensureStorageReady() {
+  if (!storageReadyPromise) {
+    storageReadyPromise = (async () => {
+      await prepareStorageSchema();
+      await migratePersistedStorage();
+    })().catch((error) => {
+      storageReadyPromise = null;
+      throw error;
+    });
+  }
+
+  return storageReadyPromise;
 }
 
 function createPasswordHash(password: string): string {
@@ -177,6 +230,59 @@ function clampNumber(value: unknown, fallback: number): number {
 
 function normalizeUsername(value: string) {
   return value.trim().toLowerCase();
+}
+
+function toText(value: unknown, fallback: string) {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function toIsoTimestamp(value: unknown, fallback = new Date().toISOString()) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  if (typeof value === "string" && value.trim()) {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  return fallback;
+}
+
+function toDisplayDate(value: unknown, createdAt: string) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return new Date(createdAt).toLocaleDateString();
+}
+
+function extractRelativeAssetPath(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return null;
+
+  let normalized = value.trim();
+  if (/^https?:\/\//i.test(normalized)) {
+    try {
+      normalized = new URL(normalized).pathname;
+    } catch {
+      return null;
+    }
+  }
+
+  normalized = normalized.replace(/\\/g, "/").replace(/^\/+/, "");
+  return normalized || null;
+}
+
+function basenameFromPath(value: string) {
+  const normalized = value.replace(/\\/g, "/").replace(/\/+$/, "");
+  const parts = normalized.split("/");
+  return parts[parts.length - 1] || "file";
+}
+
+function canonicalizeSongAssetPath(id: string, candidate: string | null, fallbackFileName: string) {
+  const fileName = candidate ? basenameFromPath(candidate) : fallbackFileName;
+  if (!candidate) return `songs/${id}/${fallbackFileName}`;
+  if (candidate.startsWith("songs/")) return candidate;
+  return `songs/${id}/${fileName}`;
 }
 
 function createAdminToken(secret: string): string {
@@ -214,13 +320,17 @@ function sanitizeFileName(input: string): string {
   return input.replace(/[^\w.-]/g, "_").replace(/_+/g, "_").slice(0, 120) || "upload";
 }
 
-function parseScoreArray(raw: Json): ScoreRecord[] {
+function parseScoreArray(raw: Json, createdAt = new Date().toISOString()): ScoreRecord[] {
   if (!Array.isArray(raw)) return [];
-  const parsed = raw.filter((entry) => {
+  return raw.map((entry) => {
     const row = entry as Partial<ScoreRecord>;
-    return typeof row.score === "number" && Number.isFinite(row.score) && typeof row.accuracy === "number" && Number.isFinite(row.accuracy) && typeof row.date === "string" && typeof row.username === "string";
-  }) as ScoreRecord[];
-  return parsed;
+    return {
+      score: clampNumber(row.score, 0),
+      accuracy: clampNumber(row.accuracy, 0),
+      date: toDisplayDate(row.date, createdAt),
+      username: toText(row.username, "Anonymous"),
+    };
+  });
 }
 
 function parseEventsArray(raw: Json): unknown[] {
@@ -228,58 +338,78 @@ function parseEventsArray(raw: Json): unknown[] {
 }
 
 function normalizeSongRow(row: any): CommunitySongRecord {
-  const scores = parseScoreArray(row.scores as Json);
-  const topScore = clampNumber(row.top_score, 0);
+  const id = toText(row.id, crypto.randomUUID());
+  const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+  const difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
+  const density = clampNumber(row.density, difficulty);
+  const laneVariety = clampNumber(row.lane_variety ?? row.laneVariety, difficulty);
+  const sliderProbability = clampNumber(row.slider_probability ?? row.sliderProbability, 0.3);
+  const stamina = clampNumber(row.stamina, 0.5);
+  const scores = sortScoresDesc(parseScoreArray(row.scores as Json, createdAt));
+  const audioPath = canonicalizeSongAssetPath(
+    id,
+    extractRelativeAssetPath(row.audio_path ?? row.audioPath ?? row.audio_url ?? row.audioUrl),
+    "audio.mp3"
+  );
+  const notesPath = canonicalizeSongAssetPath(
+    id,
+    extractRelativeAssetPath(row.notes_path ?? row.notesPath ?? row.notes_url ?? row.notesUrl),
+    "notes.json"
+  );
+  const topScore = Math.max(clampNumber(row.top_score ?? row.topScore, 0), toTopScoreFromScores(scores));
   return {
-    id: String(row.id),
-    name: String(row.name),
-    artist: String(row.artist),
-    audioUrl: String(row.audio_url),
-    audioPath: String(row.audio_path),
-    notesUrl: String(row.notes_url),
-    notesPath: String(row.notes_path),
-    difficulty: clampNumber(row.difficulty, 0.5),
-    density: clampNumber(row.density, 0.5),
-    laneVariety: clampNumber(row.lane_variety, 0.5),
-    sliderProbability: clampNumber(row.slider_probability, 0.3),
-    stamina: clampNumber(row.stamina, 0.5),
+    id,
+    name: toText(row.name, "Untitled"),
+    artist: toText(row.artist, "Unknown Artist"),
+    audioUrl: toText(row.audio_url ?? row.audioUrl, ""),
+    audioPath,
+    notesUrl: toText(row.notes_url ?? row.notesUrl, ""),
+    notesPath,
+    difficulty,
+    density,
+    laneVariety,
+    sliderProbability,
+    stamina,
     topScore,
     scores,
-    authorName: String(row.author_name),
-    createdAt: new Date(row.created_at).toISOString(),
-    status: (row.status || "ready") as "ready",
+    authorName: toText(row.author_name ?? row.authorName, "Anonymous"),
+    createdAt,
+    status: "ready",
   };
 }
 
 function normalizeReplayRow(row: any): ReplayRecord {
+  const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+  const difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
   return {
-    id: String(row.id),
-    songId: String(row.song_id),
-    songName: String(row.song_name),
-    artist: String(row.artist),
-    difficulty: clampNumber(row.difficulty, 0.5),
-    density: clampNumber(row.density, 0.5),
-    laneVariety: clampNumber(row.lane_variety, 0.5),
-    sliderProbability: clampNumber(row.slider_probability, 0.3),
+    id: toText(row.id, crypto.randomUUID()),
+    songId: toText(row.song_id ?? row.songId, ""),
+    songName: toText(row.song_name ?? row.songName, "Unknown Song"),
+    artist: toText(row.artist, "Unknown Artist"),
+    difficulty,
+    density: clampNumber(row.density, difficulty),
+    laneVariety: clampNumber(row.lane_variety ?? row.laneVariety, difficulty),
+    sliderProbability: clampNumber(row.slider_probability ?? row.sliderProbability, 0.3),
     stamina: clampNumber(row.stamina, 0.5),
     score: clampNumber(row.score, 0),
     accuracy: clampNumber(row.accuracy, 0),
-    date: String(row.date),
-    createdAt: new Date(row.created_at).toISOString(),
+    date: toDisplayDate(row.date, createdAt),
+    createdAt,
     events: parseEventsArray(row.events as Json),
   };
 }
 
 function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
+  const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
   return {
-    id: String(row.id),
+    id: toText(row.id, crypto.randomUUID()),
     score: clampNumber(row.score, 0),
     accuracy: clampNumber(row.accuracy, 0),
-    date: String(row.date),
-    username: String(row.username),
-    createdAt: new Date(row.created_at).toISOString(),
-    songName: String(row.song_name),
-    artist: String(row.artist),
+    date: toDisplayDate(row.date, createdAt),
+    username: toText(row.username, "Anonymous"),
+    createdAt,
+    songName: toText(row.song_name ?? row.songName, "Unknown Song"),
+    artist: toText(row.artist, "Unknown Artist"),
   };
 }
 
@@ -347,6 +477,135 @@ async function readSong(id: string): Promise<CommunitySongRecord | null> {
   const { rows } = await sql`SELECT * FROM songs WHERE id = ${id} LIMIT 1`;
   if (rows.length === 0) return null;
   return normalizeSongRow(rows[0]);
+}
+
+async function getStoredSchemaVersion() {
+  const { rows } = await sql`SELECT value FROM storage_meta WHERE key = 'schema_version' LIMIT 1`;
+  const rawValue = rows[0]?.value as { version?: number | string } | undefined;
+  return clampNumber(rawValue?.version, 0);
+}
+
+async function setStoredSchemaVersion(details: Record<string, number>) {
+  const payload = {
+    version: STORAGE_SCHEMA_VERSION,
+    ...details,
+  };
+
+  await sql`
+    INSERT INTO storage_meta (key, value, updated_at)
+    VALUES ('schema_version', ${JSON.stringify(payload)}::jsonb, ${new Date().toISOString()})
+    ON CONFLICT (key)
+    DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at
+  `;
+}
+
+async function migrateSongRows() {
+  const { rows } = await sql`SELECT ctid, * FROM songs`;
+  let migrated = 0;
+
+  for (const row of rows) {
+    const normalized = normalizeSongRow(row);
+    await sql`
+      UPDATE songs
+      SET
+        id = ${normalized.id},
+        name = ${normalized.name},
+        artist = ${normalized.artist},
+        audio_url = ${normalized.audioUrl},
+        audio_path = ${normalized.audioPath},
+        notes_url = ${normalized.notesUrl},
+        notes_path = ${normalized.notesPath},
+        difficulty = ${normalized.difficulty},
+        density = ${normalized.density},
+        lane_variety = ${normalized.laneVariety},
+        slider_probability = ${normalized.sliderProbability},
+        stamina = ${normalized.stamina},
+        top_score = ${normalized.topScore},
+        scores = ${JSON.stringify(normalized.scores)}::jsonb,
+        author_name = ${normalized.authorName},
+        created_at = ${normalized.createdAt},
+        status = ${normalized.status}
+      WHERE ctid = ${row.ctid}
+    `;
+    migrated += 1;
+  }
+
+  return migrated;
+}
+
+async function migrateGlobalScoreRows() {
+  const { rows } = await sql`SELECT ctid, * FROM global_scores`;
+  let migrated = 0;
+
+  for (const row of rows) {
+    const normalized = normalizeGlobalScoreRow(row);
+    await sql`
+      UPDATE global_scores
+      SET
+        id = ${normalized.id},
+        score = ${normalized.score},
+        accuracy = ${normalized.accuracy},
+        date = ${normalized.date},
+        username = ${normalized.username},
+        song_name = ${normalized.songName},
+        artist = ${normalized.artist},
+        created_at = ${normalized.createdAt}
+      WHERE ctid = ${row.ctid}
+    `;
+    migrated += 1;
+  }
+
+  return migrated;
+}
+
+async function migrateReplayRows() {
+  const { rows } = await sql`SELECT ctid, * FROM replays`;
+  let migrated = 0;
+
+  for (const row of rows) {
+    const normalized = normalizeReplayRow(row);
+    await sql`
+      UPDATE replays
+      SET
+        id = ${normalized.id},
+        song_id = ${normalized.songId},
+        song_name = ${normalized.songName},
+        artist = ${normalized.artist},
+        difficulty = ${normalized.difficulty},
+        density = ${normalized.density},
+        lane_variety = ${normalized.laneVariety},
+        slider_probability = ${normalized.sliderProbability},
+        stamina = ${normalized.stamina},
+        score = ${normalized.score},
+        accuracy = ${normalized.accuracy},
+        date = ${normalized.date},
+        created_at = ${normalized.createdAt},
+        events = ${JSON.stringify(normalized.events)}::jsonb
+      WHERE ctid = ${row.ctid}
+    `;
+    migrated += 1;
+  }
+
+  return migrated;
+}
+
+async function migratePersistedStorage() {
+  const currentVersion = await getStoredSchemaVersion();
+  if (currentVersion >= STORAGE_SCHEMA_VERSION) {
+    return;
+  }
+
+  const [songsMigrated, globalScoresMigrated, replaysMigrated] = await Promise.all([
+    migrateSongRows(),
+    migrateGlobalScoreRows(),
+    migrateReplayRows(),
+  ]);
+
+  await setStoredSchemaVersion({
+    songsMigrated,
+    globalScoresMigrated,
+    replaysMigrated,
+  });
 }
 
 function toTopScoreFromScores(scores: ScoreRecord[]) {

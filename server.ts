@@ -18,8 +18,10 @@ const UPLOAD_DIR = path.resolve(process.env.BEATPULSE_UPLOAD_DIR || path.join(AP
 const SONGS_FILE = path.join(DATA_DIR, "songs.json");
 const GLOBAL_SCORES_FILE = path.join(DATA_DIR, "global-scores.json");
 const REPLAYS_FILE = path.join(DATA_DIR, "replays.json");
+const STORAGE_META_FILE = path.join(DATA_DIR, "storage-meta.json");
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
+const STORAGE_SCHEMA_VERSION = 2;
 
 interface AdminState {
   passwordHash: string;
@@ -98,6 +100,13 @@ interface LeaderboardModerationResult {
   affectedSongs: number;
 }
 
+interface StorageMetaRecord {
+  schemaVersion: number;
+  updatedAt: string;
+  migratedCollections: string[];
+  backups: string[];
+}
+
 function ensureDirectories() {
   if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -113,6 +122,13 @@ function readCollection<T>(filePath: string, fallback: T): T {
     const raw = fs.readFileSync(filePath, "utf8");
     return JSON.parse(raw) as T;
   } catch (error) {
+    const invalidBackupPath = `${filePath}.invalid-${Date.now()}.bak`;
+    try {
+      fs.copyFileSync(filePath, invalidBackupPath);
+    } catch {
+      // Ignore backup failures and fall back to a clean file.
+    }
+    writeCollection(filePath, fallback);
     return fallback;
   }
 }
@@ -160,8 +176,164 @@ function hasSongAsset(relativePath: string) {
   return false;
 }
 
+function backupStorageFile(filePath: string, label: string) {
+  if (!fs.existsSync(filePath)) return null;
+  const backupPath = `${filePath}.${label}.${Date.now()}.bak`;
+  fs.copyFileSync(filePath, backupPath);
+  return backupPath;
+}
+
+function toText(value: unknown, fallback: string) {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function toIsoTimestamp(value: unknown, fallback = new Date().toISOString()) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value.toISOString();
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  if (typeof value === "string" && value.trim()) {
+    const date = new Date(value);
+    if (!Number.isNaN(date.getTime())) return date.toISOString();
+  }
+  return fallback;
+}
+
+function toDisplayDate(value: unknown, createdAt: string) {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  return new Date(createdAt).toLocaleDateString();
+}
+
+function extractRelativeAssetPath(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) return null;
+
+  let normalized = value.trim();
+  if (/^https?:\/\//i.test(normalized)) {
+    try {
+      normalized = new URL(normalized).pathname;
+    } catch {
+      return null;
+    }
+  }
+
+  normalized = normalized.replace(/\\/g, "/").replace(/^\/+/, "");
+  const uploadMarker = "api/uploads/";
+  const uploadIndex = normalized.indexOf(uploadMarker);
+  if (uploadIndex >= 0) {
+    normalized = normalized.slice(uploadIndex + uploadMarker.length);
+  }
+
+  if (normalized.startsWith("uploads/")) {
+    normalized = normalized.slice("uploads/".length);
+  }
+
+  normalized = normalized.replace(/^\.?\//, "");
+  return normalized || null;
+}
+
+function canonicalizeSongAssetPath(id: string, candidate: string | null, fallbackFileName: string) {
+  const fileName = candidate ? path.posix.basename(candidate) : fallbackFileName;
+  if (!candidate) return `songs/${id}/${fallbackFileName}`;
+  if (candidate.startsWith("songs/")) return candidate;
+  return `songs/${id}/${fileName}`;
+}
+
+function toLocalUploadUrl(relativePath: string) {
+  return `/api/uploads/${relativePath.replace(/\\/g, "/")}`;
+}
+
+function normalizeScoreRecord(raw: any, createdAt: string): ScoreRecord {
+  return {
+    score: clampNumber(raw?.score, 0),
+    accuracy: clampNumber(raw?.accuracy, 0),
+    date: toDisplayDate(raw?.date, createdAt),
+    username: toText(raw?.username, "Anonymous"),
+  };
+}
+
+function normalizeSongRecord(raw: any): CommunitySongRecord {
+  const id = toText(raw?.id, crypto.randomUUID());
+  const createdAt = toIsoTimestamp(raw?.createdAt ?? raw?.created_at);
+  const difficulty = clampNumber(raw?.difficulty ?? raw?.complexity, 0.5);
+  const density = clampNumber(raw?.density, difficulty);
+  const laneVariety = clampNumber(raw?.laneVariety ?? raw?.lane_variety, difficulty);
+  const sliderProbability = clampNumber(raw?.sliderProbability ?? raw?.slider_probability, 0.3);
+  const stamina = clampNumber(raw?.stamina, 0.5);
+  const rawScores = Array.isArray(raw?.scores) ? raw.scores : [];
+  const scores = sortScoresDesc(rawScores.map((entry) => normalizeScoreRecord(entry, createdAt)));
+  const audioPath = canonicalizeSongAssetPath(
+    id,
+    extractRelativeAssetPath(raw?.audioPath ?? raw?.audio_path ?? raw?.audioUrl ?? raw?.audio_url),
+    "audio.mp3"
+  );
+  const notesPath = canonicalizeSongAssetPath(
+    id,
+    extractRelativeAssetPath(raw?.notesPath ?? raw?.notes_path ?? raw?.notesUrl ?? raw?.notes_url),
+    "notes.json"
+  );
+
+  return {
+    id,
+    name: toText(raw?.name, "Untitled"),
+    artist: toText(raw?.artist, "Unknown Artist"),
+    audioUrl: toLocalUploadUrl(audioPath),
+    audioPath,
+    notesUrl: toLocalUploadUrl(notesPath),
+    notesPath,
+    difficulty,
+    density,
+    laneVariety,
+    sliderProbability,
+    stamina,
+    topScore: Math.max(clampNumber(raw?.topScore ?? raw?.top_score, 0), toTopScoreFromScores(scores)),
+    scores,
+    authorName: toText(raw?.authorName ?? raw?.author_name, "Anonymous"),
+    createdAt,
+    status: "ready",
+  };
+}
+
+function normalizeGlobalScoreRecord(raw: any): GlobalScoreRecord {
+  const createdAt = toIsoTimestamp(raw?.createdAt ?? raw?.created_at);
+  return {
+    id: toText(raw?.id, crypto.randomUUID()),
+    score: clampNumber(raw?.score, 0),
+    accuracy: clampNumber(raw?.accuracy, 0),
+    date: toDisplayDate(raw?.date, createdAt),
+    username: toText(raw?.username, "Anonymous"),
+    createdAt,
+    songName: toText(raw?.songName ?? raw?.song_name, "Unknown Song"),
+    artist: toText(raw?.artist, "Unknown Artist"),
+  };
+}
+
+function normalizeReplayRecord(raw: any): ReplayRecord {
+  const createdAt = toIsoTimestamp(raw?.createdAt ?? raw?.created_at);
+  const difficulty = clampNumber(raw?.difficulty ?? raw?.complexity, 0.5);
+  return {
+    id: toText(raw?.id, crypto.randomUUID()),
+    songId: toText(raw?.songId ?? raw?.song_id, ""),
+    songName: toText(raw?.songName ?? raw?.song_name, "Unknown Song"),
+    artist: toText(raw?.artist, "Unknown Artist"),
+    difficulty,
+    density: clampNumber(raw?.density, difficulty),
+    laneVariety: clampNumber(raw?.laneVariety ?? raw?.lane_variety, difficulty),
+    sliderProbability: clampNumber(raw?.sliderProbability ?? raw?.slider_probability, 0.3),
+    stamina: clampNumber(raw?.stamina, 0.5),
+    score: clampNumber(raw?.score, 0),
+    accuracy: clampNumber(raw?.accuracy, 0),
+    date: toDisplayDate(raw?.date, createdAt),
+    createdAt,
+    events: Array.isArray(raw?.events) ? raw.events : [],
+  };
+}
+
 function readSongs(): CommunitySongRecord[] {
-  return readCollection<CommunitySongRecord[]>(SONGS_FILE, []);
+  const raw = readCollection<unknown>(SONGS_FILE, []);
+  return sortSongsDesc((Array.isArray(raw) ? raw : []).map((entry) => normalizeSongRecord(entry)));
 }
 
 function writeSongs(songs: CommunitySongRecord[]) {
@@ -169,7 +341,8 @@ function writeSongs(songs: CommunitySongRecord[]) {
 }
 
 function readGlobalScores(): GlobalScoreRecord[] {
-  return readCollection<GlobalScoreRecord[]>(GLOBAL_SCORES_FILE, []);
+  const raw = readCollection<unknown>(GLOBAL_SCORES_FILE, []);
+  return sortGlobalScoresDesc((Array.isArray(raw) ? raw : []).map((entry) => normalizeGlobalScoreRecord(entry)));
 }
 
 function writeGlobalScores(scores: GlobalScoreRecord[]) {
@@ -177,11 +350,55 @@ function writeGlobalScores(scores: GlobalScoreRecord[]) {
 }
 
 function readReplays(): ReplayRecord[] {
-  return readCollection<ReplayRecord[]>(REPLAYS_FILE, []);
+  const raw = readCollection<unknown>(REPLAYS_FILE, []);
+  return sortReplaysDesc((Array.isArray(raw) ? raw : []).map((entry) => normalizeReplayRecord(entry)));
 }
 
 function writeReplays(replays: ReplayRecord[]) {
   writeCollection(REPLAYS_FILE, replays);
+}
+
+function migrateLocalStorage(): StorageMetaRecord {
+  const migratedCollections: string[] = [];
+  const backups: string[] = [];
+
+  const normalizedSongs = readSongs();
+  const normalizedGlobalScores = readGlobalScores();
+  const normalizedReplays = readReplays();
+
+  const rawSongs = readCollection<unknown>(SONGS_FILE, []);
+  if (JSON.stringify(rawSongs) !== JSON.stringify(normalizedSongs)) {
+    const backup = backupStorageFile(SONGS_FILE, `schema-v${STORAGE_SCHEMA_VERSION}`);
+    if (backup) backups.push(backup);
+    writeSongs(normalizedSongs);
+    migratedCollections.push("songs");
+  }
+
+  const rawGlobalScores = readCollection<unknown>(GLOBAL_SCORES_FILE, []);
+  if (JSON.stringify(rawGlobalScores) !== JSON.stringify(normalizedGlobalScores)) {
+    const backup = backupStorageFile(GLOBAL_SCORES_FILE, `schema-v${STORAGE_SCHEMA_VERSION}`);
+    if (backup) backups.push(backup);
+    writeGlobalScores(normalizedGlobalScores);
+    migratedCollections.push("global-scores");
+  }
+
+  const rawReplays = readCollection<unknown>(REPLAYS_FILE, []);
+  if (JSON.stringify(rawReplays) !== JSON.stringify(normalizedReplays)) {
+    const backup = backupStorageFile(REPLAYS_FILE, `schema-v${STORAGE_SCHEMA_VERSION}`);
+    if (backup) backups.push(backup);
+    writeReplays(normalizedReplays);
+    migratedCollections.push("replays");
+  }
+
+  const meta: StorageMetaRecord = {
+    schemaVersion: STORAGE_SCHEMA_VERSION,
+    updatedAt: new Date().toISOString(),
+    migratedCollections,
+    backups,
+  };
+
+  writeCollection(STORAGE_META_FILE, meta);
+  return meta;
 }
 
 function sanitizeFileName(input: string): string {
@@ -326,6 +543,12 @@ async function startServer() {
   let adminState = loadAdminState();
 
   ensureDirectories();
+  const storageMeta = migrateLocalStorage();
+  if (storageMeta.migratedCollections.length > 0) {
+    console.log(
+      `Migrated local storage to schema v${storageMeta.schemaVersion}: ${storageMeta.migratedCollections.join(", ")}`
+    );
+  }
   app.use(express.json({ limit: "2mb" }));
   app.use("/api/uploads", (req, res, next) => {
     if (!req.path.startsWith("/songs/")) return next();

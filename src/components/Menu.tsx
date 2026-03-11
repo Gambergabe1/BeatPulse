@@ -1,6 +1,6 @@
 ﻿import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search } from 'lucide-react';
+import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search, ArrowLeft } from 'lucide-react';
 import { loadAudioFile, generateNotesFromAudio } from '../utils/audio';
 import { SongData, Settings } from '../types';
 import {
@@ -23,6 +23,8 @@ interface MenuProps {
   settings: Settings;
   onSaveSettings: (settings: Settings) => void;
 }
+
+type MainTab = 'LOCAL' | 'COMMUNITY' | 'GLOBAL' | 'SETTINGS' | 'REPLAYS';
 
 const LEADERBOARD_REMOVAL_REASONS = [
   'Inappropriate name',
@@ -53,7 +55,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [globalScoresOffset, setGlobalScoresOffset] = useState<number>(0);
   const [isLoadingMoreScores, setIsLoadingMoreScores] = useState(false);
   const [hasMoreScores, setHasMoreScores] = useState(true);
-  const [activeTab, setActiveTab] = useState<'LOCAL' | 'COMMUNITY' | 'GLOBAL' | 'ADMIN' | 'SETTINGS' | 'REPLAYS'>('LOCAL');
+  const [activeTab, setActiveTab] = useState<MainTab | 'ADMIN'>('LOCAL');
+  const [lastMainTab, setLastMainTab] = useState<MainTab>('LOCAL');
   const [isSaving, setIsSaving] = useState(false);
   const [lastUploadedFile, setLastUploadedFile] = useState<File | null>(null);
   const [username, setUsername] = useState(localStorage.getItem('username') || 'Anonymous');
@@ -81,6 +84,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [searchQuery, setSearchQuery] = useState('');
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewTimeoutRef = useRef<any>(null);
+  const isAdminPage = activeTab === 'ADMIN';
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -355,6 +359,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       const songData = await loadStoredSongData(song);
       setMetadata({ name: song.name, artist: song.artist });
       setReadySong(songData);
+      setLastMainTab('LOCAL');
       setActiveTab('LOCAL');
     } catch (err) {
       console.error(err);
@@ -412,8 +417,23 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const handleAdminLogout = () => {
     setAdminToken(null);
     localStorage.removeItem('adminToken');
-    setActiveTab('LOCAL');
   };
+
+  const handleMainTabChange = useCallback((tab: MainTab) => {
+    setLastMainTab(tab);
+    setActiveTab(tab);
+  }, []);
+
+  const handleOpenAdminPage = useCallback(() => {
+    if (activeTab !== 'ADMIN') {
+      setLastMainTab(activeTab);
+    }
+    setActiveTab('ADMIN');
+  }, [activeTab]);
+
+  const handleBackToMainPage = useCallback(() => {
+    setActiveTab(lastMainTab);
+  }, [lastMainTab]);
 
   const handleChangeAdminPassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -707,7 +727,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         </div>
 
         {/* Top Utility Buttons */}
-        <div className="w-full flex justify-end gap-3 mb-6">
+        <div className="w-full flex items-center justify-between gap-3 mb-6">
           <div className="flex items-center gap-3 px-4 py-2 rounded-xl border border-white/10 bg-white/5">
             <div className="w-5 h-5 rounded-full bg-neon-purple/20 flex items-center justify-center">
               <User className="w-3 h-3 text-neon-purple" />
@@ -716,31 +736,41 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
               {username || 'Anonymous'}
             </span>
           </div>
-          <button 
-            onClick={() => setActiveTab('ADMIN')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-all font-display font-bold text-xs uppercase tracking-widest ${
-              activeTab === 'ADMIN' 
-                ? 'bg-neon-pink text-white border-neon-pink shadow-[0_0_15px_rgba(255,0,111,0.3)]' 
-                : 'bg-white/5 text-white/40 border-white/10 hover:bg-white/10 hover:text-white hover:border-white/20'
-            }`}
-          >
-            <Lock className="w-4 h-4" />
-            Admin
-          </button>
-          <button 
-            onClick={() => setActiveTab('SETTINGS')}
-            className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-all font-display font-bold text-xs uppercase tracking-widest ${
-              activeTab === 'SETTINGS' 
-                ? 'bg-neon-blue text-black border-neon-blue shadow-[0_0_15px_rgba(0,243,255,0.3)]' 
-                : 'bg-white/5 text-white/40 border-white/10 hover:bg-white/10 hover:text-white hover:border-white/20'
-            }`}
-          >
-            <SettingsIcon className="w-4 h-4" />
-            Settings
-          </button>
+          {isAdminPage ? (
+            <button
+              onClick={handleBackToMainPage}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl border bg-white/5 text-white border-white/10 hover:bg-white/10 transition-all font-display font-bold text-xs uppercase tracking-widest"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              Back
+            </button>
+          ) : (
+            <div className="flex gap-3">
+              <button 
+                onClick={handleOpenAdminPage}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl border transition-all font-display font-bold text-xs uppercase tracking-widest bg-white/5 text-white/40 border-white/10 hover:bg-white/10 hover:text-white hover:border-white/20"
+              >
+                <Lock className="w-4 h-4" />
+                Admin
+              </button>
+              <button 
+                onClick={() => handleMainTabChange('SETTINGS')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-all font-display font-bold text-xs uppercase tracking-widest ${
+                  activeTab === 'SETTINGS' 
+                    ? 'bg-neon-blue text-black border-neon-blue shadow-[0_0_15px_rgba(0,243,255,0.3)]' 
+                    : 'bg-white/5 text-white/40 border-white/10 hover:bg-white/10 hover:text-white hover:border-white/20'
+                }`}
+              >
+                <SettingsIcon className="w-4 h-4" />
+                Settings
+              </button>
+            </div>
+          )}
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full">
+        <div className={`grid gap-6 w-full ${isAdminPage ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
+          {!isAdminPage && (
+            <>
           {/* Upload Card */}
           <div className="relative">
             {!readySong ? (
@@ -881,27 +911,41 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
               </p>
             </div>
           </div>
+            </>
+          )}
 
           {/* Community Library Card */}
           <div className="md:col-span-2 rounded-[2rem] bg-black/40 backdrop-blur-xl border border-white/10 p-8 flex flex-col shadow-2xl relative overflow-hidden">
-            <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-neon-blue/50 to-transparent" />
+            <div className={`absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent ${isAdminPage ? 'via-neon-pink/50' : 'via-neon-blue/50'} to-transparent`} />
             
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 mb-8">
               <div className="flex items-center gap-4">
                 <div className="relative">
-                  <div className="absolute inset-0 bg-neon-blue blur-lg opacity-20 animate-pulse" />
-                  <div className="relative p-3 rounded-2xl bg-neon-blue/10 border border-neon-blue/20 text-neon-blue">
-                    <Cloud className="w-6 h-6" />
+                  <div className={`absolute inset-0 ${isAdminPage ? 'bg-neon-pink' : 'bg-neon-blue'} blur-lg opacity-20 animate-pulse`} />
+                  <div className={`relative p-3 rounded-2xl border ${isAdminPage ? 'bg-neon-pink/10 border-neon-pink/20 text-neon-pink' : 'bg-neon-blue/10 border-neon-blue/20 text-neon-blue'}`}>
+                    {isAdminPage ? <Lock className="w-6 h-6" /> : <Cloud className="w-6 h-6" />}
                   </div>
                 </div>
                 <div>
-                  <h3 className="text-2xl font-display font-black uppercase tracking-tight italic">
-                    Community <span className="text-neon-blue">Library</span>
-                  </h3>
-                  <p className="text-[10px] text-white/30 uppercase tracking-[0.2em] font-bold">Global Rhythm Database</p>
+                  {isAdminPage ? (
+                    <>
+                      <h3 className="text-2xl font-display font-black uppercase tracking-tight italic">
+                        Admin <span className="text-neon-pink">Panel</span>
+                      </h3>
+                      <p className="text-[10px] text-white/30 uppercase tracking-[0.2em] font-bold">Restricted Control Surface</p>
+                    </>
+                  ) : (
+                    <>
+                      <h3 className="text-2xl font-display font-black uppercase tracking-tight italic">
+                        Community <span className="text-neon-blue">Library</span>
+                      </h3>
+                      <p className="text-[10px] text-white/30 uppercase tracking-[0.2em] font-bold">Global Rhythm Database</p>
+                    </>
+                  )}
                 </div>
               </div>
 
+              {!isAdminPage && (
               <div className="flex bg-white/5 backdrop-blur-md rounded-2xl p-1.5 border border-white/5 self-start lg:self-center">
                 {[
                   { id: 'LOCAL', label: 'Local', icon: <Activity className="w-3.5 h-3.5" /> },
@@ -911,7 +955,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 ].map((tab) => (
                   <button 
                     key={tab.id}
-                    onClick={() => setActiveTab(tab.id as any)}
+                    onClick={() => handleMainTabChange(tab.id as MainTab)}
                     className={`relative px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all flex items-center gap-2 group ${
                       activeTab === tab.id ? 'text-black' : 'text-white/40 hover:text-white/70'
                     }`}
@@ -928,6 +972,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   </button>
                 ))}
               </div>
+              )}
             </div>
             
             {activeTab === 'COMMUNITY' ? (
@@ -1098,7 +1143,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                     <p className="text-sm font-bold text-neon-pink uppercase tracking-widest">Manage Songs + Leaderboard</p>
                     <div className="flex gap-4">
                       <button 
-                        onClick={() => setActiveTab('LOCAL')}
+                        onClick={() => handleMainTabChange('LOCAL')}
                         className="text-xs text-neon-blue hover:text-white uppercase tracking-widest flex items-center gap-1"
                       >
                         <Upload className="w-3 h-3" />

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "updatedAt": "2026-03-24T16:53:34.762Z",
+  "migratedCollections": [],
+  "backups": [],
+  "checkedCollections": [
+    "songs",
+    "global-scores",
+    "replays"
+  ],
+  "normalizedRows": {
+    "songs": 0,
+    "globalScores": 0,
+    "replays": 0
+  }
+}

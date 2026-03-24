@@ -37,8 +37,10 @@ const LEADERBOARD_REMOVAL_REASONS = [
 
 const normalizeUsername = (value: string) => value.trim().toLowerCase();
 
-const getTopScoreFromEntries = (entries: Array<{ score: number }>) =>
-  entries.reduce((max, entry) => Math.max(max, Number(entry.score) || 0), 0);
+const getTopScoreFromEntries = (entries: Array<{ score: number }>) => {
+  if (!entries || entries.length === 0) return 0;
+  return entries.reduce((max, entry) => Math.max(max, Number(entry.score) || 0), 0);
+};
 
 export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings, onSaveSettings }) => {
   const [isUploading, setIsUploading] = useState(false);
@@ -128,44 +130,62 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const loadCommunitySongs = useCallback(async () => {
     try {
       const songs = await getCommunitySongs();
-      setCommunitySongs(songs);
+      setCommunitySongs(songs || []);
     } catch (err) {
       console.error('Failed to fetch songs:', err);
       const message = err instanceof Error ? err.message : 'Unknown error';
       setError(`Failed to load community songs: ${message}`);
+      setCommunitySongs([]); // Set to empty array on error
     }
   }, []);
 
   const loadGlobalScores = useCallback(async () => {
     try {
       const { scores, nextOffset } = await getGlobalScores({ limit: 100, offset: 0 });
-      setGlobalScores(scores);
+      setGlobalScores(scores || []);
       setGlobalScoresOffset(nextOffset || 0);
       setHasMoreScores(nextOffset !== null);
     } catch (err) {
       console.error('Failed to fetch global scores:', err);
       const message = err instanceof Error ? err.message : 'Unknown error';
       setError(`Failed to load global scores: ${message}`);
+      setGlobalScores([]); // Set to empty array on error
     }
   }, []);
 
   const loadReplays = useCallback(async () => {
     try {
       const replays = await getReplays();
-      setSavedReplays(replays);
+      setSavedReplays(replays || []);
     } catch (err) {
       console.error('Failed to fetch replays:', err);
       const message = err instanceof Error ? err.message : 'Unknown error';
       setError(`Failed to load replays: ${message}`);
+      setSavedReplays([]); // Set to empty array on error
     }
   }, []);
 
   const refreshStoredCollections = useCallback(async () => {
-    await Promise.all([loadCommunitySongs(), loadGlobalScores(), loadReplays()]);
+    try {
+      await Promise.all([loadCommunitySongs(), loadGlobalScores(), loadReplays()]);
+    } catch (err) {
+      console.error('Failed to refresh collections:', err);
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setError(`Failed to refresh data: ${message}`);
+    }
   }, [loadCommunitySongs, loadGlobalScores, loadReplays]);
 
   useEffect(() => {
-    refreshStoredCollections();
+    // Load collections on mount with error handling
+    const initializeCollections = async () => {
+      try {
+        await refreshStoredCollections();
+      } catch (err) {
+        console.error('Failed to initialize collections:', err);
+      }
+    };
+    
+    initializeCollections();
   }, [refreshStoredCollections]);
 
   // Dynamic note scaling when complexity changes
@@ -206,67 +226,72 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     }
 
     const proxyAssetUrl = (assetUrl: string) => `/api/audio-proxy?url=${encodeURIComponent(assetUrl)}`;
-    const response = await fetch(proxyAssetUrl(song.audioUrl));
-    if (!response.ok) {
-      throw new Error(`Failed to load audio: ${response.statusText}`);
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-    const difficulty = chartOverrides?.difficulty ?? song.difficulty;
-    const densityValue = chartOverrides?.density ?? song.density ?? difficulty;
-    const laneVarietyValue = chartOverrides?.laneVariety ?? song.laneVariety ?? difficulty;
-    const sliderProbabilityValue = chartOverrides?.sliderProbability ?? song.sliderProbability ?? 0.3;
-    const staminaValue = chartOverrides?.stamina ?? song.stamina ?? 0.5;
-
-    let notes = [];
-    if (Array.isArray(song.notes)) {
-      notes = song.notes;
-    } else if (typeof song.notes === 'string') {
-      try {
-        const parsedNotes = JSON.parse(song.notes);
-        notes = Array.isArray(parsedNotes) ? parsedNotes : [];
-      } catch (error) {
-        console.warn('Failed to parse embedded notes, retrying with stored chart.', error);
+    try {
+      const response = await fetch(proxyAssetUrl(song.audioUrl));
+      if (!response.ok) {
+        throw new Error(`Failed to load audio: ${response.statusText}`);
       }
-    }
 
-    if (notes.length === 0 && song.notesUrl) {
-      try {
-        const notesResponse = await fetch(proxyAssetUrl(song.notesUrl));
-        if (!notesResponse.ok) {
-          throw new Error('Failed to fetch notes');
+      const arrayBuffer = await response.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+      const difficulty = chartOverrides?.difficulty ?? song.difficulty;
+      const densityValue = chartOverrides?.density ?? song.density ?? difficulty;
+      const laneVarietyValue = chartOverrides?.laneVariety ?? song.laneVariety ?? difficulty;
+      const sliderProbabilityValue = chartOverrides?.sliderProbability ?? song.sliderProbability ?? 0.3;
+      const staminaValue = chartOverrides?.stamina ?? song.stamina ?? 0.5;
+
+      let notes = [];
+      if (Array.isArray(song.notes)) {
+        notes = song.notes;
+      } else if (typeof song.notes === 'string') {
+        try {
+          const parsedNotes = JSON.parse(song.notes);
+          notes = Array.isArray(parsedNotes) ? parsedNotes : [];
+        } catch (error) {
+          console.warn('Failed to parse embedded notes, retrying with stored chart.', error);
         }
-        const parsedNotes = await notesResponse.json();
-        notes = Array.isArray(parsedNotes) ? parsedNotes : [];
-      } catch (error) {
-        console.warn('Failed to fetch stored notes, regenerating chart.', error);
       }
-    }
 
-    if (notes.length === 0) {
-      notes = await generateNotesFromAudio(audioBuffer, {
-        complexity: difficulty,
+      if (notes.length === 0 && song.notesUrl) {
+        try {
+          const notesResponse = await fetch(proxyAssetUrl(song.notesUrl));
+          if (!notesResponse.ok) {
+            throw new Error('Failed to fetch notes');
+          }
+          const parsedNotes = await notesResponse.json();
+          notes = Array.isArray(parsedNotes) ? parsedNotes : [];
+        } catch (error) {
+          console.warn('Failed to fetch stored notes, regenerating chart.', error);
+        }
+      }
+
+      if (notes.length === 0) {
+        notes = await generateNotesFromAudio(audioBuffer, {
+          complexity: difficulty,
+          density: densityValue,
+          laneVariety: laneVarietyValue,
+          sliderProbability: sliderProbabilityValue,
+          stamina: staminaValue
+        });
+      }
+
+      return {
+        id: song.id,
+        name: song.name,
+        artist: song.artist,
+        audioBuffer,
+        notes,
+        difficulty,
         density: densityValue,
         laneVariety: laneVarietyValue,
         sliderProbability: sliderProbabilityValue,
         stamina: staminaValue
-      });
+      };
+    } catch (error) {
+      console.error('Failed to load stored song data:', error);
+      throw error;
     }
-
-    return {
-      id: song.id,
-      name: song.name,
-      artist: song.artist,
-      audioBuffer,
-      notes,
-      difficulty,
-      density: densityValue,
-      laneVariety: laneVarietyValue,
-      sliderProbability: sliderProbabilityValue,
-      stamina: staminaValue
-    };
   }, [audioContext]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -690,7 +715,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const handleGlobalScoresScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
     const isAtBottom = target.scrollHeight - target.scrollTop <= target.clientHeight + 50;
-    if (isAtBottom) {
+    if (isAtBottom && globalScores.length > 0) {
       fetchMoreGlobalScores();
     }
   };
@@ -738,7 +763,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     return () => handlePreviewStop();
   }, []);
 
-  const filteredCommunitySongs = communitySongs.filter(song => 
+  const filteredCommunitySongs = (communitySongs || []).filter(song => 
     song.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     song.artist.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -1034,7 +1059,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   />
                 </div>
 
-                {filteredCommunitySongs.length === 0 ? (
+                {!communitySongs || communitySongs.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
                     <Music className="w-12 h-12 mb-4 opacity-10" />
                     <p className="text-sm font-bold uppercase tracking-widest">
@@ -1043,6 +1068,12 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                     <p className="text-xs mt-1">
                       {searchQuery ? 'Try a different search term' : 'Upload and save your own to start the collection!'}
                     </p>
+                  </div>
+                ) : filteredCommunitySongs.length === 0 ? (
+                  <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
+                    <Music className="w-12 h-12 mb-4 opacity-10" />
+                    <p className="text-sm font-bold uppercase tracking-widest">No matches found</p>
+                    <p className="text-xs mt-1">Try a different search term</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar touch-pan-y">
@@ -1074,7 +1105,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 )}
               </div>
             ) : activeTab === 'GLOBAL' ? (
-              globalScores.length === 0 ? (
+              !globalScores || globalScores.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
                   <Trophy className="w-12 h-12 mb-4 opacity-10" />
                   <p className="text-sm font-bold uppercase tracking-widest">No scores yet</p>
@@ -1111,7 +1142,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 </div>
               )
             ) : activeTab === 'REPLAYS' ? (
-              savedReplays.length === 0 ? (
+              !savedReplays || savedReplays.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
                   <Play className="w-12 h-12 mb-4 opacity-10" />
                   <p className="text-sm font-bold uppercase tracking-widest">No saved replays</p>
@@ -1333,7 +1364,14 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   </div>
 
                   <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar touch-pan-y">
-                    {communitySongs.map((song) => (
+                    {!communitySongs || communitySongs.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
+                        <Music className="w-12 h-12 mb-4 opacity-10" />
+                        <p className="text-sm font-bold uppercase tracking-widest">No songs in community library</p>
+                        <p className="text-xs mt-1">No songs available to manage</p>
+                      </div>
+                    ) : (
+                      communitySongs.map((song) => (
                       <div key={song.id} className="p-4 rounded-2xl bg-white/5 border border-white/5 flex flex-col gap-3">
                         {editingSong === song.id ? (
                           <div className="flex flex-col gap-3">
@@ -1472,7 +1510,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                           </div>
                         )}
                       </div>
-                    ))}
+                      ))
+                    )}
                   </div>
                 </div>
               )

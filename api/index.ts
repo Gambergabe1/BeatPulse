@@ -363,44 +363,67 @@ function parseEventsArray(raw: Json): unknown[] {
 }
 
 function normalizeSongRow(row: any): CommunitySongRecord {
-  const id = toText(row.id, crypto.randomUUID());
-  const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
-  const difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
-  const density = clampNumber(row.density, difficulty);
-  const laneVariety = clampNumber(row.lane_variety ?? row.laneVariety, difficulty);
-  const sliderProbability = clampNumber(row.slider_probability ?? row.sliderProbability, 0.3);
-  const stamina = clampNumber(row.stamina, 0.5);
-  const scores = sortScoresDesc(parseScoreArray(row.scores as Json, createdAt));
-  const audioPath = canonicalizeSongAssetPath(
-    id,
-    extractRelativeAssetPath(row.audio_path ?? row.audioPath ?? row.audio_url ?? row.audioUrl),
-    "audio.mp3"
-  );
-  const notesPath = canonicalizeSongAssetPath(
-    id,
-    extractRelativeAssetPath(row.notes_path ?? row.notesPath ?? row.notes_url ?? row.notesUrl),
-    "notes.json"
-  );
-  const topScore = Math.max(clampNumber(row.top_score ?? row.topScore, 0), toTopScoreFromScores(scores));
-  return {
-    id,
-    name: toText(row.name, "Untitled"),
-    artist: toText(row.artist, "Unknown Artist"),
-    audioUrl: toText(row.audio_url ?? row.audioUrl, ""),
-    audioPath,
-    notesUrl: toText(row.notes_url ?? row.notesUrl, ""),
-    notesPath,
-    difficulty,
-    density,
-    laneVariety,
-    sliderProbability,
-    stamina,
-    topScore,
-    scores,
-    authorName: toText(row.author_name ?? row.authorName, "Anonymous"),
-    createdAt,
-    status: "ready",
-  };
+  try {
+    const id = toText(row.id, crypto.randomUUID());
+    const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+    const difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
+    const density = clampNumber(row.density, difficulty);
+    const laneVariety = clampNumber(row.lane_variety ?? row.laneVariety, difficulty);
+    const sliderProbability = clampNumber(row.slider_probability ?? row.sliderProbability, 0.3);
+    const stamina = clampNumber(row.stamina, 0.5);
+    
+    // Handle scores as array or JSONB object
+    let scoresParsed = [];
+    try {
+      if (Array.isArray(row.scores)) {
+        scoresParsed = parseScoreArray(row.scores, createdAt);
+      } else if (typeof row.scores === 'string') {
+        const parsed = JSON.parse(row.scores);
+        scoresParsed = parseScoreArray(parsed, createdAt);
+      } else if (row.scores && typeof row.scores === 'object') {
+        scoresParsed = parseScoreArray(row.scores, createdAt);
+      }
+    } catch (scoreError) {
+      console.error("Error parsing scores:", scoreError instanceof Error ? scoreError.message : scoreError);
+      scoresParsed = [];
+    }
+    
+    const scores = sortScoresDesc(scoresParsed);
+    
+    const audioPath = canonicalizeSongAssetPath(
+      id,
+      extractRelativeAssetPath(row.audio_path ?? row.audioPath ?? row.audio_url ?? row.audioUrl),
+      "audio.mp3"
+    );
+    const notesPath = canonicalizeSongAssetPath(
+      id,
+      extractRelativeAssetPath(row.notes_path ?? row.notesPath ?? row.notes_url ?? row.notesUrl),
+      "notes.json"
+    );
+    const topScore = Math.max(clampNumber(row.top_score ?? row.topScore, 0), toTopScoreFromScores(scores));
+    return {
+      id,
+      name: toText(row.name, "Untitled"),
+      artist: toText(row.artist, "Unknown Artist"),
+      audioUrl: toText(row.audio_url ?? row.audioUrl, ""),
+      audioPath,
+      notesUrl: toText(row.notes_url ?? row.notesUrl, ""),
+      notesPath,
+      difficulty,
+      density,
+      laneVariety,
+      sliderProbability,
+      stamina,
+      topScore,
+      scores,
+      authorName: toText(row.author_name ?? row.authorName, "Anonymous"),
+      createdAt,
+      status: "ready",
+    };
+  } catch (error) {
+    console.error("Error normalizing song row:", error instanceof Error ? error.message : error);
+    throw error; // Re-throw so readSongs can catch and return fallback
+  }
 }
 
 function normalizeReplayRow(row: any): ReplayRecord {
@@ -541,14 +564,51 @@ async function writeAdminState(state: PersistedAdminState) {
 }
 
 async function readSongs(): Promise<CommunitySongRecord[]> {
-  const { rows } = await sql`SELECT * FROM songs ORDER BY created_at DESC`;
-  return rows.map(normalizeSongRow);
+  try {
+    const { rows } = await sql`SELECT * FROM songs ORDER BY created_at DESC`;
+    return rows
+      .map((row) => {
+        try {
+          return normalizeSongRow(row);
+        } catch (error) {
+          console.error("Error normalizing song row:", error instanceof Error ? error.message : error);
+          // Return a fallback CommunitySongRecord with minimal data
+          return {
+            id: row.id || crypto.randomUUID(),
+            name: row.name || "Untitled",
+            artist: row.artist || "Unknown Artist",
+            audioUrl: row.audio_url || row.audioUrl || "",
+            audioPath: row.audio_path || row.audioPath || "",
+            notesUrl: row.notes_url || row.notesUrl || "",
+            notesPath: row.notes_path || row.notesPath || "",
+            difficulty: 0.5,
+            density: 0.5,
+            laneVariety: 0.5,
+            sliderProbability: 0.3,
+            stamina: 0.5,
+            topScore: 0,
+            scores: [],
+            authorName: row.author_name || row.authorName || "Anonymous",
+            createdAt: row.created_at || new Date().toISOString(),
+            status: "ready",
+          } as CommunitySongRecord;
+        }
+      });
+  } catch (error) {
+    console.error("Error reading songs from database:", error instanceof Error ? error.message : error);
+    return [];
+  }
 }
 
 async function readSong(id: string): Promise<CommunitySongRecord | null> {
-  const { rows } = await sql`SELECT * FROM songs WHERE id = ${id} LIMIT 1`;
-  if (rows.length === 0) return null;
-  return normalizeSongRow(rows[0]);
+  try {
+    const { rows } = await sql`SELECT * FROM songs WHERE id = ${id} LIMIT 1`;
+    if (rows.length === 0) return null;
+    return normalizeSongRow(rows[0]);
+  } catch (error) {
+    console.error("Error reading song:", error instanceof Error ? error.message : error);
+    return null;
+  }
 }
 
 async function getStoredSchemaVersion() {

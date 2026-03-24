@@ -476,17 +476,22 @@ function normalizeReplayRow(row: any): ReplayRecord {
 }
 
 function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
-  const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
-  return {
-    id: toText(row.id, crypto.randomUUID()),
-    score: clampNumber(row.score, 0),
-    accuracy: clampNumber(row.accuracy, 0),
-    date: toDisplayDate(row.date, createdAt),
-    username: toText(row.username, "Anonymous"),
-    createdAt,
-    songName: toText(row.song_name ?? row.songName, "Unknown Song"),
-    artist: toText(row.artist, "Unknown Artist"),
-  };
+  try {
+    const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+    return {
+      id: toText(row.id, crypto.randomUUID()),
+      score: clampNumber(row.score, 0),
+      accuracy: clampNumber(row.accuracy, 0),
+      date: toDisplayDate(row.date, createdAt),
+      username: toText(row.username, "Anonymous"),
+      createdAt,
+      songName: toText(row.song_name ?? row.songName, "Unknown Song"),
+      artist: toText(row.artist, "Unknown Artist"),
+    };
+  } catch (error) {
+    console.error("Error normalizing global score row:", error instanceof Error ? error.message : error);
+    throw error; // Re-throw so the endpoint handler can catch and return fallback
+  }
 }
 
 function sortScoresDesc(scores: ScoreRecord[]) {
@@ -1189,12 +1194,34 @@ app.get("/api/global-scores", async (req, res) => {
     const { rows } = await sql`
       SELECT * FROM global_scores ORDER BY score DESC, created_at DESC LIMIT ${limit + 1} OFFSET ${offset}
     `;
-    const scores = rows.map(normalizeGlobalScoreRow);
+    
+    // Map with per-row error recovery
+    const scores = rows
+      .map((row) => {
+        try {
+          return normalizeGlobalScoreRow(row);
+        } catch (error) {
+          console.error("Error normalizing global score row:", error instanceof Error ? error.message : error);
+          // Return fallback GlobalScoreRecord with minimal data
+          return {
+            id: row.id || crypto.randomUUID(),
+            score: row.score || 0,
+            accuracy: row.accuracy || 0,
+            date: row.date || new Date().toLocaleDateString(),
+            username: row.username || "Anonymous",
+            createdAt: row.created_at || new Date().toISOString(),
+            songName: row.song_name || row.songName || "Unknown Song",
+            artist: row.artist || "Unknown Artist",
+          } as GlobalScoreRecord;
+        }
+      });
+    
     const chunk = scores.slice(0, limit);
     const nextOffset = scores.length > limit ? offset + limit : null;
     return ok(res, { scores: chunk, nextOffset });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load global scores.";
+    console.error("Global scores query error:", message);
     return fail(res, 500, message);
   }
 });

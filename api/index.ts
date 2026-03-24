@@ -428,29 +428,47 @@ function normalizeSongRow(row: any): CommunitySongRecord {
 
 function normalizeReplayRow(row: any): ReplayRecord {
   try {
-    const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
-    const difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
+    // Safely get createdAt with fallback
+    let createdAt = new Date().toISOString();
+    try {
+      createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+    } catch (err) {
+      console.error("Error parsing createdAt:", err);
+    }
+    
+    // Safely get difficulty with fallback
+    let difficulty = 0.5;
+    try {
+      difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
+    } catch (err) {
+      console.error("Error parsing difficulty:", err);
+    }
     
     // Safely handle events - could be array, object, or string
     let events: unknown[] = [];
-    if (row.events) {
-      if (Array.isArray(row.events)) {
-        events = row.events;
-      } else if (typeof row.events === 'object') {
-        // If JSONB returns as parsed object, try to convert
-        try {
-          events = Array.isArray(row.events) ? row.events : [];
-        } catch {
-          events = [];
-        }
-      } else if (typeof row.events === 'string') {
-        try {
-          const parsed = JSON.parse(row.events);
-          events = Array.isArray(parsed) ? parsed : [];
-        } catch {
-          events = [];
+    try {
+      if (row.events) {
+        if (Array.isArray(row.events)) {
+          events = row.events;
+        } else if (typeof row.events === 'object') {
+          // If JSONB returns as parsed object, try to convert
+          try {
+            events = Array.isArray(row.events) ? row.events : [];
+          } catch {
+            events = [];
+          }
+        } else if (typeof row.events === 'string') {
+          try {
+            const parsed = JSON.parse(row.events);
+            events = Array.isArray(parsed) ? parsed : [];
+          } catch {
+            events = [];
+          }
         }
       }
+    } catch (err) {
+      console.error("Error parsing events:", err);
+      events = [];
     }
     
     return {
@@ -470,8 +488,8 @@ function normalizeReplayRow(row: any): ReplayRecord {
       events: events,
     };
   } catch (error) {
-    console.error('Error normalizing replay row:', error);
-    throw error;
+    console.error('Error normalizing replay row:', error instanceof Error ? error.message : error);
+    throw error; // Re-throw so endpoint handler can catch and return fallback
   }
 }
 
@@ -1266,34 +1284,46 @@ app.post("/api/global-scores", async (req, res) => {
 app.get("/api/replays", async (_req, res) => {
   try {
     await ensureStorageReady();
-    const { rows } = await sql`SELECT * FROM replays ORDER BY created_at DESC`;
-    const replays = rows.map((row) => {
-      try {
-        return normalizeReplayRow(row);
-      } catch (err) {
-        console.error('Failed to normalize replay row:', row, err);
-        // Return a minimal replay object to prevent the entire request from failing
-        return {
-          id: row?.id || 'unknown',
-          songId: row?.song_id || '',
-          songName: row?.song_name || 'Unknown Song',
-          artist: row?.artist || 'Unknown Artist',
-          difficulty: 0.5,
-          density: 0.5,
-          laneVariety: 0.5,
-          sliderProbability: 0.3,
-          stamina: 0.5,
-          score: 0,
-          accuracy: 0,
-          date: new Date().toLocaleDateString(),
-          createdAt: new Date().toISOString(),
-          events: [],
-        } as ReplayRecord;
-      }
-    });
+    
+    let rows = [];
+    try {
+      const result = await sql`SELECT * FROM replays ORDER BY created_at DESC`;
+      rows = result.rows || [];
+    } catch (queryError) {
+      console.error('Database query error in GET /api/replays:', queryError instanceof Error ? queryError.message : queryError);
+      return ok(res, []); // Return empty array if query fails
+    }
+    
+    const replays = rows
+      .map((row, index) => {
+        try {
+          return normalizeReplayRow(row);
+        } catch (err) {
+          console.error(`Failed to normalize replay row at index ${index}:`, err instanceof Error ? err.message : err, row);
+          // Return a minimal replay object to prevent the entire request from failing
+          return {
+            id: row?.id || `fallback-${index}`,
+            songId: row?.song_id || '',
+            songName: row?.song_name || 'Unknown Song',
+            artist: row?.artist || 'Unknown Artist',
+            difficulty: 0.5,
+            density: 0.5,
+            laneVariety: 0.5,
+            sliderProbability: 0.3,
+            stamina: 0.5,
+            score: 0,
+            accuracy: 0,
+            date: new Date().toLocaleDateString(),
+            createdAt: new Date().toISOString(),
+            events: [],
+          } as ReplayRecord;
+        }
+      })
+      .filter((replay): replay is ReplayRecord => replay !== null && replay !== undefined);
+    
     return ok(res, replays);
   } catch (error) {
-    console.error('Error in GET /api/replays:', error);
+    console.error('Error in GET /api/replays:', error instanceof Error ? error.message : error, error);
     const message = error instanceof Error ? error.message : "Failed to load replays.";
     return fail(res, 500, message);
   }

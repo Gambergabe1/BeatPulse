@@ -495,12 +495,27 @@ function normalizeReplayRow(row: any): ReplayRecord {
 
 function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
   try {
-    const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+    // Safely get createdAt with fallback
+    let createdAt = new Date().toISOString();
+    try {
+      createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+    } catch (err) {
+      console.error("Error parsing createdAt in global score row:", err);
+    }
+    
+    // Safely get date with fallback
+    let date = new Date().toLocaleDateString();
+    try {
+      date = toDisplayDate(row.date, createdAt);
+    } catch (err) {
+      console.error("Error parsing date in global score row:", err);
+    }
+    
     return {
       id: toText(row.id, crypto.randomUUID()),
       score: clampNumber(row.score, 0),
       accuracy: clampNumber(row.accuracy, 0),
-      date: toDisplayDate(row.date, createdAt),
+      date,
       username: toText(row.username, "Anonymous"),
       createdAt,
       songName: toText(row.song_name ?? row.songName, "Unknown Song"),
@@ -508,6 +523,9 @@ function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
     };
   } catch (error) {
     console.error("Error normalizing global score row:", error instanceof Error ? error.message : error);
+    throw error; // Re-throw so endpoint handler can catch and return fallback
+  }
+}
     throw error; // Re-throw so the endpoint handler can catch and return fallback
   }
 }
@@ -1209,37 +1227,45 @@ app.get("/api/global-scores", async (req, res) => {
     const limit = Math.max(1, Math.min(500, clampNumber(req.query.limit, 100)));
     const offset = Math.max(0, clampNumber(req.query.offset, 0));
 
-    const { rows } = await sql`
-      SELECT * FROM global_scores ORDER BY score DESC, created_at DESC LIMIT ${limit + 1} OFFSET ${offset}
-    `;
+    let rows = [];
+    try {
+      const result = await sql`
+        SELECT * FROM global_scores ORDER BY score DESC, created_at DESC LIMIT ${limit + 1} OFFSET ${offset}
+      `;
+      rows = result.rows || [];
+    } catch (queryError) {
+      console.error('Database query error in GET /api/global-scores:', queryError instanceof Error ? queryError.message : queryError);
+      return ok(res, { scores: [], nextOffset: null }); // Return empty scores if query fails
+    }
     
     // Map with per-row error recovery
     const scores = rows
-      .map((row) => {
+      .map((row, index) => {
         try {
           return normalizeGlobalScoreRow(row);
         } catch (error) {
-          console.error("Error normalizing global score row:", error instanceof Error ? error.message : error);
+          console.error(`Error normalizing global score row at index ${index}:`, error instanceof Error ? error.message : error, row);
           // Return fallback GlobalScoreRecord with minimal data
           return {
-            id: row.id || crypto.randomUUID(),
-            score: row.score || 0,
-            accuracy: row.accuracy || 0,
-            date: row.date || new Date().toLocaleDateString(),
-            username: row.username || "Anonymous",
-            createdAt: row.created_at || new Date().toISOString(),
-            songName: row.song_name || row.songName || "Unknown Song",
-            artist: row.artist || "Unknown Artist",
+            id: row?.id || `fallback-${index}`,
+            score: row?.score || 0,
+            accuracy: row?.accuracy || 0,
+            date: row?.date || new Date().toLocaleDateString(),
+            username: row?.username || "Anonymous",
+            createdAt: row?.created_at || new Date().toISOString(),
+            songName: row?.song_name || row?.songName || "Unknown Song",
+            artist: row?.artist || "Unknown Artist",
           } as GlobalScoreRecord;
         }
-      });
+      })
+      .filter((score): score is GlobalScoreRecord => score !== null && score !== undefined);
     
     const chunk = scores.slice(0, limit);
     const nextOffset = scores.length > limit ? offset + limit : null;
     return ok(res, { scores: chunk, nextOffset });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load global scores.";
-    console.error("Global scores query error:", message);
+    console.error("Global scores endpoint error:", message, error);
     return fail(res, 500, message);
   }
 });

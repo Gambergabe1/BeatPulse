@@ -404,24 +404,52 @@ function normalizeSongRow(row: any): CommunitySongRecord {
 }
 
 function normalizeReplayRow(row: any): ReplayRecord {
-  const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
-  const difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
-  return {
-    id: toText(row.id, crypto.randomUUID()),
-    songId: toText(row.song_id ?? row.songId, ""),
-    songName: toText(row.song_name ?? row.songName, "Unknown Song"),
-    artist: toText(row.artist, "Unknown Artist"),
-    difficulty,
-    density: clampNumber(row.density, difficulty),
-    laneVariety: clampNumber(row.lane_variety ?? row.laneVariety, difficulty),
-    sliderProbability: clampNumber(row.slider_probability ?? row.sliderProbability, 0.3),
-    stamina: clampNumber(row.stamina, 0.5),
-    score: clampNumber(row.score, 0),
-    accuracy: clampNumber(row.accuracy, 0),
-    date: toDisplayDate(row.date, createdAt),
-    createdAt,
-    events: parseEventsArray(row.events as Json),
-  };
+  try {
+    const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+    const difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
+    
+    // Safely handle events - could be array, object, or string
+    let events: unknown[] = [];
+    if (row.events) {
+      if (Array.isArray(row.events)) {
+        events = row.events;
+      } else if (typeof row.events === 'object') {
+        // If JSONB returns as parsed object, try to convert
+        try {
+          events = Array.isArray(row.events) ? row.events : [];
+        } catch {
+          events = [];
+        }
+      } else if (typeof row.events === 'string') {
+        try {
+          const parsed = JSON.parse(row.events);
+          events = Array.isArray(parsed) ? parsed : [];
+        } catch {
+          events = [];
+        }
+      }
+    }
+    
+    return {
+      id: toText(row.id, crypto.randomUUID()),
+      songId: toText(row.song_id ?? row.songId, ""),
+      songName: toText(row.song_name ?? row.songName, "Unknown Song"),
+      artist: toText(row.artist, "Unknown Artist"),
+      difficulty,
+      density: clampNumber(row.density, difficulty),
+      laneVariety: clampNumber(row.lane_variety ?? row.laneVariety, difficulty),
+      sliderProbability: clampNumber(row.slider_probability ?? row.sliderProbability, 0.3),
+      stamina: clampNumber(row.stamina, 0.5),
+      score: clampNumber(row.score, 0),
+      accuracy: clampNumber(row.accuracy, 0),
+      date: toDisplayDate(row.date, createdAt),
+      createdAt,
+      events: events,
+    };
+  } catch (error) {
+    console.error('Error normalizing replay row:', error);
+    throw error;
+  }
 }
 
 function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
@@ -1152,9 +1180,33 @@ app.get("/api/replays", async (_req, res) => {
   try {
     await ensureStorageReady();
     const { rows } = await sql`SELECT * FROM replays ORDER BY created_at DESC`;
-    const replays = rows.map(normalizeReplayRow);
+    const replays = rows.map((row) => {
+      try {
+        return normalizeReplayRow(row);
+      } catch (err) {
+        console.error('Failed to normalize replay row:', row, err);
+        // Return a minimal replay object to prevent the entire request from failing
+        return {
+          id: row?.id || 'unknown',
+          songId: row?.song_id || '',
+          songName: row?.song_name || 'Unknown Song',
+          artist: row?.artist || 'Unknown Artist',
+          difficulty: 0.5,
+          density: 0.5,
+          laneVariety: 0.5,
+          sliderProbability: 0.3,
+          stamina: 0.5,
+          score: 0,
+          accuracy: 0,
+          date: new Date().toLocaleDateString(),
+          createdAt: new Date().toISOString(),
+          events: [],
+        } as ReplayRecord;
+      }
+    });
     return ok(res, replays);
   } catch (error) {
+    console.error('Error in GET /api/replays:', error);
     const message = error instanceof Error ? error.message : "Failed to load replays.";
     return fail(res, 500, message);
   }
@@ -1172,6 +1224,20 @@ app.post("/api/replays", async (req, res) => {
       return fail(res, 400, "songId, songName, score and accuracy are required.");
     }
 
+    let events: unknown[] = [];
+    if (body.events) {
+      if (Array.isArray(body.events)) {
+        events = body.events;
+      } else if (typeof body.events === 'string') {
+        try {
+          const parsed = JSON.parse(body.events);
+          events = Array.isArray(parsed) ? parsed : [];
+        } catch {
+          events = [];
+        }
+      }
+    }
+
     const newReplay: ReplayRecord = {
       id: crypto.randomUUID(),
       songId,
@@ -1186,7 +1252,7 @@ app.post("/api/replays", async (req, res) => {
       accuracy,
       date: (typeof body.date === "string" && body.date.trim()) || new Date().toLocaleDateString(),
       createdAt: new Date().toISOString(),
-      events: parseEventsArray(body.events as Json),
+      events: events,
     };
 
     await sql`
@@ -1204,6 +1270,7 @@ app.post("/api/replays", async (req, res) => {
 
     return ok(res, newReplay);
   } catch (error) {
+    console.error('Error in POST /api/replays:', error);
     const message = error instanceof Error ? error.message : "Failed to save replay.";
     return fail(res, 500, message);
   }

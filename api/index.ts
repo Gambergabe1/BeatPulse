@@ -428,6 +428,35 @@ function normalizeSongRow(row: any): CommunitySongRecord {
 
 function normalizeReplayRow(row: any): ReplayRecord {
   try {
+    // Safely get each field with individual error handling
+    let id = crypto.randomUUID();
+    try {
+      id = toText(row.id, crypto.randomUUID());
+    } catch (err) {
+      console.error("Error parsing id:", err);
+    }
+    
+    let songId = "";
+    try {
+      songId = toText(row.song_id ?? row.songId, "");
+    } catch (err) {
+      console.error("Error parsing songId:", err);
+    }
+    
+    let songName = "Unknown Song";
+    try {
+      songName = toText(row.song_name ?? row.songName, "Unknown Song");
+    } catch (err) {
+      console.error("Error parsing songName:", err);
+    }
+    
+    let artist = "Unknown Artist";
+    try {
+      artist = toText(row.artist, "Unknown Artist");
+    } catch (err) {
+      console.error("Error parsing artist:", err);
+    }
+    
     // Safely get createdAt with fallback
     let createdAt = new Date().toISOString();
     try {
@@ -442,6 +471,62 @@ function normalizeReplayRow(row: any): ReplayRecord {
       difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
     } catch (err) {
       console.error("Error parsing difficulty:", err);
+    }
+    
+    // Safely get density
+    let density = 0.5;
+    try {
+      density = clampNumber(row.density, difficulty);
+    } catch (err) {
+      console.error("Error parsing density:", err);
+    }
+    
+    // Safely get laneVariety
+    let laneVariety = 0.5;
+    try {
+      laneVariety = clampNumber(row.lane_variety ?? row.laneVariety, difficulty);
+    } catch (err) {
+      console.error("Error parsing laneVariety:", err);
+    }
+    
+    // Safely get sliderProbability
+    let sliderProbability = 0.3;
+    try {
+      sliderProbability = clampNumber(row.slider_probability ?? row.sliderProbability, 0.3);
+    } catch (err) {
+      console.error("Error parsing sliderProbability:", err);
+    }
+    
+    // Safely get stamina
+    let stamina = 0.5;
+    try {
+      stamina = clampNumber(row.stamina, 0.5);
+    } catch (err) {
+      console.error("Error parsing stamina:", err);
+    }
+    
+    // Safely get score
+    let score = 0;
+    try {
+      score = clampNumber(row.score, 0);
+    } catch (err) {
+      console.error("Error parsing score:", err);
+    }
+    
+    // Safely get accuracy
+    let accuracy = 0;
+    try {
+      accuracy = clampNumber(row.accuracy, 0);
+    } catch (err) {
+      console.error("Error parsing accuracy:", err);
+    }
+    
+    // Safely get date
+    let date = new Date().toLocaleDateString();
+    try {
+      date = toDisplayDate(row.date, createdAt);
+    } catch (err) {
+      console.error("Error parsing date:", err);
     }
     
     // Safely handle events - could be array, object, or string
@@ -472,23 +557,23 @@ function normalizeReplayRow(row: any): ReplayRecord {
     }
     
     return {
-      id: toText(row.id, crypto.randomUUID()),
-      songId: toText(row.song_id ?? row.songId, ""),
-      songName: toText(row.song_name ?? row.songName, "Unknown Song"),
-      artist: toText(row.artist, "Unknown Artist"),
+      id,
+      songId,
+      songName,
+      artist,
       difficulty,
-      density: clampNumber(row.density, difficulty),
-      laneVariety: clampNumber(row.lane_variety ?? row.laneVariety, difficulty),
-      sliderProbability: clampNumber(row.slider_probability ?? row.sliderProbability, 0.3),
-      stamina: clampNumber(row.stamina, 0.5),
-      score: clampNumber(row.score, 0),
-      accuracy: clampNumber(row.accuracy, 0),
-      date: toDisplayDate(row.date, createdAt),
+      density,
+      laneVariety,
+      sliderProbability,
+      stamina,
+      score,
+      accuracy,
+      date,
       createdAt,
-      events: events,
+      events,
     };
   } catch (error) {
-    console.error('Error normalizing replay row:', error instanceof Error ? error.message : error);
+    console.error('Critical error normalizing replay row:', error instanceof Error ? error.message : error);
     throw error; // Re-throw so endpoint handler can catch and return fallback
   }
 }

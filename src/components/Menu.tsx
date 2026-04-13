@@ -38,6 +38,23 @@ const LEADERBOARD_REMOVAL_REASONS = [
   'Requested removal',
 ];
 
+const DEFAULT_CHART_SETTINGS = {
+  complexity: 0.5,
+  density: 0.5,
+  laneVariety: 0.5,
+  sliderProbability: 0.3,
+  stamina: 0.5,
+};
+
+const formatPercentLabel = (value: number) => `${Math.round(value * 100)}%`;
+
+const getSettingTier = (value: number, labels: [string, string, string, string]) => {
+  if (value < 0.25) return labels[0];
+  if (value < 0.5) return labels[1];
+  if (value < 0.75) return labels[2];
+  return labels[3];
+};
+
 const normalizeUsername = (value: string) => value.trim().toLowerCase();
 
 const getTopScoreFromEntries = (entries: Array<{ score: number }>) =>
@@ -116,6 +133,85 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewTimeoutRef = useRef<any>(null);
   const isAdminPage = activeTab === 'ADMIN';
+  const generationControls = [
+    {
+      id: 'complexity',
+      label: 'Difficulty',
+      hint: 'Overall chart intensity.',
+      value: complexity,
+      onChange: (value: number) => setComplexity(value),
+      accentClass: 'accent-neon-purple',
+      valueClass: 'text-neon-purple',
+      badgeClass: 'border-neon-purple/20 bg-neon-purple/10 text-neon-purple',
+      minLabel: 'Easy',
+      maxLabel: 'Expert',
+      summary: getSettingTier(complexity, ['Easy', 'Balanced', 'Challenging', 'Expert'] as const),
+    },
+    {
+      id: 'density',
+      label: 'Density',
+      hint: 'How many notes show up.',
+      value: density,
+      onChange: (value: number) => setDensity(value),
+      accentClass: 'accent-neon-green',
+      valueClass: 'text-neon-green',
+      badgeClass: 'border-neon-green/20 bg-neon-green/10 text-neon-green',
+      minLabel: 'Light',
+      maxLabel: 'Dense',
+      summary: getSettingTier(density, ['Light', 'Steady', 'Busy', 'Dense'] as const),
+    },
+    {
+      id: 'laneVariety',
+      label: 'Lane Variety',
+      hint: 'How often patterns move around.',
+      value: laneVariety,
+      onChange: (value: number) => setLaneVariety(value),
+      accentClass: 'accent-neon-pink',
+      valueClass: 'text-neon-pink',
+      badgeClass: 'border-neon-pink/20 bg-neon-pink/10 text-neon-pink',
+      minLabel: 'Stable',
+      maxLabel: 'Wild',
+      summary: getSettingTier(laneVariety, ['Stable', 'Mixed', 'Active', 'Wild'] as const),
+    },
+    {
+      id: 'sliderProbability',
+      label: 'Sliders',
+      hint: 'How often hold notes appear.',
+      value: sliderProbability,
+      onChange: (value: number) => setSliderProbability(value),
+      accentClass: 'accent-neon-blue',
+      valueClass: 'text-neon-blue',
+      badgeClass: 'border-neon-blue/20 bg-neon-blue/10 text-neon-blue',
+      minLabel: 'Rare',
+      maxLabel: 'Frequent',
+      summary: getSettingTier(sliderProbability, ['Rare', 'Occasional', 'Frequent', 'Flowing'] as const),
+    },
+    {
+      id: 'stamina',
+      label: 'Stamina',
+      hint: 'How hard long bursts can push.',
+      value: stamina,
+      onChange: (value: number) => setStamina(value),
+      accentClass: 'accent-neon-orange',
+      valueClass: 'text-neon-orange',
+      badgeClass: 'border-neon-orange/20 bg-neon-orange/10 text-neon-orange',
+      minLabel: 'Relaxed',
+      maxLabel: 'Demanding',
+      summary: getSettingTier(stamina, ['Relaxed', 'Standard', 'Demanding', 'Endurance'] as const),
+    },
+  ];
+  const keybindingPrompt =
+    activeKeybindIndex !== null
+      ? `Press a key for Lane ${activeKeybindIndex + 1}.`
+      : 'Click a lane to change its key.';
+
+  const resetChartSettings = () => {
+    setComplexity(DEFAULT_CHART_SETTINGS.complexity);
+    setDensity(DEFAULT_CHART_SETTINGS.density);
+    setLaneVariety(DEFAULT_CHART_SETTINGS.laneVariety);
+    setSliderProbability(DEFAULT_CHART_SETTINGS.sliderProbability);
+    setStamina(DEFAULT_CHART_SETTINGS.stamina);
+  };
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1571,218 +1667,169 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 </div>
               )
             ) : activeTab === 'SETTINGS' ? (
-              <div className="flex flex-col gap-6 py-4">
-                {/* Profile */}
-                <div className="bg-white/5 border border-white/5 p-6 rounded-2xl flex items-center gap-6">
-                  <div className="p-4 rounded-2xl bg-neon-purple/10 text-neon-purple">
-                    <User className="w-8 h-8" />
-                  </div>
-                  <div className="flex-1">
-                    <h4 className="font-display font-bold text-white mb-1">Username</h4>
-                    <input 
-                      type="text"
-                      value={username}
-                      onChange={(e) => setUsername(e.target.value)}
-                      className="w-full bg-black/30 border border-white/10 rounded-xl p-3 text-white focus:border-neon-purple outline-none transition-all"
-                      placeholder="Enter username"
-                    />
-                  </div>
-                </div>
-
-                {/* Generation Settings */}
-                <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">
-                  <h4 className="font-display font-bold text-white mb-6 flex items-center gap-2">
-                    <Disc className="w-5 h-5 text-neon-blue" />
-                    Generation Settings
-                  </h4>
-                  
-                  <div className="space-y-8">
-                    {/* Difficulty */}
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-end">
+              <div className="py-4">
+                <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(280px,0.9fr)]">
+                  <div className="space-y-6">
+                    <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">
+                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between mb-6">
                         <div>
-                          <p className="text-white font-bold text-sm">Difficulty</p>
-                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Base complexity</p>
+                          <h4 className="font-display font-bold text-white flex items-center gap-2">
+                            <Activity className="w-5 h-5 text-neon-blue" />
+                            Chart Feel
+                          </h4>
+                          <p className="text-white/50 text-sm mt-2">
+                            Keep the generator easy to tune. These shape newly generated charts and replay-friendly regenerations.
+                          </p>
                         </div>
-                        <span className="text-neon-purple font-mono text-xs">{Math.round(complexity * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Easy</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.1" 
-                          value={complexity} 
-                          onChange={(e) => setComplexity(parseFloat(e.target.value))}
-                          className="flex-1 accent-neon-purple h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                        />
-                        <span className="text-[10px] font-black text-neon-purple uppercase tracking-widest w-16">Expert</span>
-                      </div>
-                    </div>
-
-                    {/* Density */}
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-end">
-                        <div>
-                          <p className="text-white font-bold text-sm">Density</p>
-                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Note frequency</p>
-                        </div>
-                        <span className="text-neon-green font-mono text-xs">{Math.round(density * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.1" 
-                          value={density} 
-                          onChange={(e) => setDensity(parseFloat(e.target.value))}
-                          className="flex-1 accent-neon-green h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                        />
-                        <span className="text-[10px] font-black text-neon-green uppercase tracking-widest w-16">High</span>
-                      </div>
-                    </div>
-
-                    {/* Lane Variety */}
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-end">
-                        <div>
-                          <p className="text-white font-bold text-sm">Lane Variety</p>
-                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Lane changes</p>
-                        </div>
-                        <span className="text-neon-pink font-mono text-xs">{Math.round(laneVariety * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.1" 
-                          value={laneVariety} 
-                          onChange={(e) => setLaneVariety(parseFloat(e.target.value))}
-                          className="flex-1 accent-neon-pink h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                        />
-                        <span className="text-[10px] font-black text-neon-pink uppercase tracking-widest w-16">High</span>
-                      </div>
-                    </div>
-
-                    {/* Sliders */}
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-end">
-                        <div>
-                          <p className="text-white font-bold text-sm">Sliders</p>
-                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Slider probability</p>
-                        </div>
-                        <span className="text-neon-blue font-mono text-xs">{Math.round(sliderProbability * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.1" 
-                          value={sliderProbability} 
-                          onChange={(e) => setSliderProbability(parseFloat(e.target.value))}
-                          className="flex-1 accent-neon-blue h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                        />
-                        <span className="text-[10px] font-black text-neon-blue uppercase tracking-widest w-16">High</span>
-                      </div>
-                    </div>
-
-                    {/* Stamina */}
-                    <div className="space-y-4">
-                      <div className="flex justify-between items-end">
-                        <div>
-                          <p className="text-white font-bold text-sm">Stamina</p>
-                          <p className="text-white/40 text-[10px] uppercase tracking-widest">Burst capacity</p>
-                        </div>
-                        <span className="text-neon-orange font-mono text-xs">{Math.round(stamina * 100)}%</span>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <span className="text-[10px] font-black text-white/20 uppercase tracking-widest w-8 text-right">Low</span>
-                        <input 
-                          type="range" 
-                          min="0" 
-                          max="1" 
-                          step="0.1" 
-                          value={stamina} 
-                          onChange={(e) => setStamina(parseFloat(e.target.value))}
-                          className="flex-1 accent-neon-orange h-1.5 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                        />
-                        <span className="text-[10px] font-black text-neon-orange uppercase tracking-widest w-16">High</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Volume */}
-                <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">
-                  <div className="flex justify-between items-center mb-4">
-                    <div>
-                      <h4 className="font-display font-bold text-white">Master Volume</h4>
-                      <p className="text-white/40 text-xs">Adjust the overall game volume</p>
-                    </div>
-                    <span className="text-neon-blue font-mono">{Math.round(localSettings.volume * 100)}%</span>
-                  </div>
-                  <input 
-                    type="range" 
-                    min="0" 
-                    max="1" 
-                    step="0.05" 
-                    value={localSettings.volume} 
-                    onChange={(e) => {
-                      const newSettings = { ...localSettings, volume: parseFloat(e.target.value) };
-                      setLocalSettings(newSettings);
-                      onSaveSettings(newSettings);
-                    }}
-                    className="w-full accent-neon-blue h-2 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                  />
-                </div>
-
-                {/* Visual Effects */}
-                <div className="bg-white/5 border border-white/5 p-6 rounded-2xl flex justify-between items-center">
-                  <div>
-                    <h4 className="font-display font-bold text-white">Visual Effects</h4>
-                    <p className="text-white/40 text-xs">Enable hit flashes and particles</p>
-                  </div>
-                  <button 
-                    onClick={() => {
-                      const newSettings = { ...localSettings, visualEffects: !localSettings.visualEffects };
-                      setLocalSettings(newSettings);
-                      onSaveSettings(newSettings);
-                    }}
-                    className={`w-14 h-8 rounded-full transition-colors relative ${localSettings.visualEffects ? 'bg-neon-green' : 'bg-white/20'}`}
-                  >
-                    <div className={`absolute top-1 w-6 h-6 rounded-full bg-white transition-all ${localSettings.visualEffects ? 'left-7' : 'left-1'}`} />
-                  </button>
-                </div>
-
-                {/* Keybindings */}
-                <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">
-                  <div className="mb-4">
-                    <h4 className="font-display font-bold text-white">Keybindings</h4>
-                    <p className="text-white/40 text-xs">Click a key to rebind it</p>
-                  </div>
-                  <div className="grid grid-cols-4 gap-4">
-                    {localSettings.keybindings.map((key, index) => (
-                      <div key={index} className="flex flex-col items-center gap-2">
-                        <span className="text-xs text-white/40 uppercase tracking-widest">Lane {index + 1}</span>
                         <button
-                          onClick={() => setActiveKeybindIndex(index)}
-                          className={`w-full aspect-square rounded-xl font-display font-black text-2xl transition-all flex items-center justify-center ${
-                            activeKeybindIndex === index 
-                              ? 'bg-neon-pink text-white animate-pulse' 
-                              : 'bg-white/10 text-white hover:bg-white/20 border border-white/10'
-                          }`}
+                          onClick={resetChartSettings}
+                          className="px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-xs font-bold uppercase tracking-widest text-white/70 hover:bg-white/10 hover:text-white transition-all"
                         >
-                          {activeKeybindIndex === index ? '?' : key.toUpperCase()}
+                          Reset to Balanced
                         </button>
                       </div>
-                    ))}
+
+                      <div className="grid gap-4 lg:grid-cols-2">
+                        {generationControls.map((control) => (
+                          <div key={control.id} className="rounded-2xl border border-white/8 bg-black/20 p-4">
+                            <div className="flex items-start justify-between gap-3 mb-4">
+                              <div>
+                                <p className="text-sm font-bold text-white">{control.label}</p>
+                                <p className="text-xs text-white/45 mt-1">{control.hint}</p>
+                              </div>
+                              <div className="text-right">
+                                <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.2em] ${control.badgeClass}`}>
+                                  {control.summary}
+                                </span>
+                                <p className={`mt-2 text-[11px] font-mono ${control.valueClass}`}>{formatPercentLabel(control.value)}</p>
+                              </div>
+                            </div>
+
+                            <input
+                              type="range"
+                              min="0"
+                              max="1"
+                              step="0.1"
+                              value={control.value}
+                              onChange={(e) => control.onChange(parseFloat(e.target.value))}
+                              className={`w-full ${control.accentClass} h-2 bg-white/10 rounded-lg appearance-none cursor-pointer`}
+                            />
+
+                            <div className="mt-3 flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-white/25">
+                              <span>{control.minLabel}</span>
+                              <span>{control.maxLabel}</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-5">
+                        <div>
+                          <h4 className="font-display font-bold text-white">Keybindings</h4>
+                          <p className={`text-xs mt-1 ${activeKeybindIndex !== null ? 'text-neon-pink' : 'text-white/40'}`}>
+                            {keybindingPrompt}
+                          </p>
+                        </div>
+                        <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/30">
+                          {activeKeybindIndex !== null ? 'Listening' : '4 Lanes'}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                        {localSettings.keybindings.map((key, index) => (
+                          <button
+                            key={index}
+                            onClick={() => setActiveKeybindIndex(index)}
+                            className={`rounded-2xl border p-4 text-left transition-all ${
+                              activeKeybindIndex === index
+                                ? 'border-neon-pink bg-neon-pink/10 text-white shadow-[0_0_24px_rgba(255,0,153,0.15)]'
+                                : 'border-white/10 bg-black/20 text-white hover:bg-white/10'
+                            }`}
+                          >
+                            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/40">Lane {index + 1}</p>
+                            <p className="mt-3 font-display text-3xl font-black">
+                              {activeKeybindIndex === index ? '?' : key.toUpperCase()}
+                            </p>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-6">
+                    <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">
+                      <div className="mb-5">
+                        <h4 className="font-display font-bold text-white flex items-center gap-2">
+                          <SettingsIcon className="w-5 h-5 text-neon-purple" />
+                          Quick Settings
+                        </h4>
+                        <p className="text-white/50 text-sm mt-2">
+                          The everyday controls in one spot.
+                        </p>
+                      </div>
+
+                      <div className="space-y-4">
+                        <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
+                          <label className="block text-[10px] font-bold uppercase tracking-[0.2em] text-white/40 mb-3">
+                            Username
+                          </label>
+                          <input
+                            type="text"
+                            value={username}
+                            onChange={(e) => setUsername(e.target.value)}
+                            className="w-full bg-black/30 border border-white/10 rounded-xl p-3 text-white focus:border-neon-purple outline-none transition-all"
+                            placeholder="Enter username"
+                          />
+                        </div>
+
+                        <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
+                          <div className="flex items-center justify-between gap-3 mb-4">
+                            <div>
+                              <h5 className="text-sm font-bold text-white">Master Volume</h5>
+                              <p className="text-xs text-white/40 mt-1">Adjust the overall game volume.</p>
+                            </div>
+                            <span className="text-neon-blue font-mono text-sm">{formatPercentLabel(localSettings.volume)}</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={localSettings.volume}
+                            onChange={(e) => {
+                              const newSettings = { ...localSettings, volume: parseFloat(e.target.value) };
+                              setLocalSettings(newSettings);
+                              onSaveSettings(newSettings);
+                            }}
+                            className="w-full accent-neon-blue h-2 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                          />
+                        </div>
+
+                        <div className="rounded-2xl border border-white/8 bg-black/20 p-4 flex items-center justify-between gap-4">
+                          <div>
+                            <h5 className="text-sm font-bold text-white">Visual Effects</h5>
+                            <p className="text-xs text-white/40 mt-1">Hit flashes and particles.</p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${localSettings.visualEffects ? 'text-neon-green' : 'text-white/30'}`}>
+                              {localSettings.visualEffects ? 'On' : 'Off'}
+                            </span>
+                            <button
+                              onClick={() => {
+                                const newSettings = { ...localSettings, visualEffects: !localSettings.visualEffects };
+                                setLocalSettings(newSettings);
+                                onSaveSettings(newSettings);
+                              }}
+                              className={`w-14 h-8 rounded-full transition-colors relative ${localSettings.visualEffects ? 'bg-neon-green' : 'bg-white/20'}`}
+                            >
+                              <div className={`absolute top-1 w-6 h-6 rounded-full bg-white transition-all ${localSettings.visualEffects ? 'left-7' : 'left-1'}`} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>

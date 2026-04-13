@@ -242,7 +242,16 @@ export const getCommunitySongs = async (): Promise<CommunitySongRecord[]> => {
 };
 
 export const getSongById = async (id: string): Promise<CommunitySongRecord> => {
-  return parseApiResponse<CommunitySongRecord>(await fetch(`/api/songs/${encodeURIComponent(id)}`));
+  try {
+    return await parseApiResponse<CommunitySongRecord>(await fetch(`/api/songs/${encodeURIComponent(id)}`));
+  } catch (error) {
+    const songs = await getCommunitySongs();
+    const match = songs.find((song) => song.id === id);
+    if (match) {
+      return match;
+    }
+    throw error;
+  }
 };
 
 export const saveCommunitySong = async (payload: {

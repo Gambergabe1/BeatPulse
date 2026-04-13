@@ -136,22 +136,65 @@ const chooseSingleLane = (
   availableLanes: number[],
   lastLane: number,
   laneVariety: number,
-  tempoFactor: number
+  tempoFactor: number,
+  laneHistory: number[] = []
 ) => {
   if (availableLanes.length <= 1) return availableLanes[0] ?? 0;
   if (lastLane < 0) return availableLanes[Math.floor(Math.random() * availableLanes.length)];
+
+  const recentWindow = laneHistory.slice(-4);
+  const previousLane = laneHistory[laneHistory.length - 2] ?? -1;
+  let recentDirection = 0;
+  let recentDirectionRun = 0;
+
+  for (let i = laneHistory.length - 1; i > 0; i--) {
+    const diff = laneHistory[i] - laneHistory[i - 1];
+    const direction = Math.sign(diff);
+    if (direction === 0) break;
+
+    if (recentDirection === 0) {
+      recentDirection = direction;
+      recentDirectionRun = 1;
+      continue;
+    }
+
+    if (direction !== recentDirection) break;
+    recentDirectionRun += 1;
+  }
 
   let bestLane = availableLanes[0];
   let bestScore = -Infinity;
 
   availableLanes.forEach((lane) => {
     const distance = Math.abs(lane - lastLane);
-    const movementScore = distance * (0.6 + laneVariety * 0.8 + tempoFactor * 0.5);
+    const direction = Math.sign(lane - lastLane);
+    const movementScore = Math.min(distance, 2) * (0.55 + laneVariety * 0.45 + tempoFactor * 0.18);
     const repeatPenalty = lane === lastLane ? 1.15 + tempoFactor * 0.55 : 0;
+    const recentUsePenalty = recentWindow.filter((recentLane) => recentLane === lane).length * (0.16 + (1 - laneVariety) * 0.12);
     const centerBias = (lane === 1 || lane === 2) ? (1 - laneVariety) * 0.18 : 0;
     const edgeBias = (lane === 0 || lane === 3) ? laneVariety * 0.16 : 0;
+    const bounceBonus = previousLane >= 0 && lane === previousLane ? 0.18 + (1 - laneVariety) * 0.12 : 0;
+    const freshnessBonus = !recentWindow.includes(lane) ? 0.08 + laneVariety * 0.1 : 0;
+    const staircasePenalty =
+      recentDirectionRun >= 2 && direction !== 0 && direction === recentDirection
+        ? 0.8 + recentDirectionRun * 0.28 + tempoFactor * 0.18
+        : 0;
+    const reversalBonus =
+      recentDirectionRun >= 2 && direction !== 0 && direction === -recentDirection
+        ? 0.45 + laneVariety * 0.22
+        : 0;
     const randomBias = Math.random() * (0.25 + laneVariety * 0.2);
-    const laneScore = movementScore + centerBias + edgeBias + randomBias - repeatPenalty;
+    const laneScore =
+      movementScore +
+      centerBias +
+      edgeBias +
+      bounceBonus +
+      freshnessBonus +
+      reversalBonus +
+      randomBias -
+      repeatPenalty -
+      recentUsePenalty -
+      staircasePenalty;
 
     if (laneScore > bestScore) {
       bestScore = laneScore;
@@ -297,6 +340,7 @@ export async function generateNotesFromAudio(
   const laneOccupancy = [0, 0, 0, 0];
   const laneLastTime = [-Infinity, -Infinity, -Infinity, -Infinity];
   const recentNoteTimes: number[] = [];
+  const recentLaneHistory: number[] = [];
 
   let lastNoteTime = -Infinity;
   let lastLane = -1;
@@ -361,13 +405,30 @@ export async function generateNotesFromAudio(
       continue;
     }
 
+    let recentDirection = 0;
+    let recentDirectionRun = 0;
+    for (let i = recentLaneHistory.length - 1; i > 0; i--) {
+      const diff = recentLaneHistory[i] - recentLaneHistory[i - 1];
+      const direction = Math.sign(diff);
+      if (direction === 0) break;
+
+      if (recentDirection === 0) {
+        recentDirection = direction;
+        recentDirectionRun = 1;
+        continue;
+      }
+
+      if (direction !== recentDirection) break;
+      recentDirectionRun += 1;
+    }
+
     const strongPeak = candidate.score >= roughThreshold + 0.55;
     const streamChance = clamp(
-      0.12 + density * 0.2 + complexity * 0.12 + tempoFactor * 0.2 + fastSectionFactor * 0.22,
-      0.1,
-      0.78
+      0.12 + density * 0.2 + complexity * 0.12 + tempoFactor * 0.2 + fastSectionFactor * 0.22 - recentDirectionRun * 0.08,
+      0.08,
+      0.7
     );
-    const jumpChance = clamp(0.06 + laneVariety * 0.18 + complexity * 0.08, 0.05, 0.42);
+    const jumpChance = clamp(0.06 + laneVariety * 0.18 + complexity * 0.08 + recentDirectionRun * 0.04, 0.05, 0.48);
     const chordChance = clamp(
       (0.05 + complexity * 0.1) * (1 - tempoFactor * 0.55) * (1 - fastSectionFactor * 0.35),
       0.02,
@@ -381,24 +442,44 @@ export async function generateNotesFromAudio(
         if (lastLane <= 0) streamDirection = 1;
         if (lastLane >= 3) streamDirection = -1;
 
+        const shouldBreakStairPattern =
+          recentDirectionRun >= 2 ||
+          (recentDirectionRun >= 1 && fastSectionFactor > 0.45 && Math.random() < 0.35);
         let desiredLane = lastLane + streamDirection;
-        if (desiredLane < 0 || desiredLane > 3) {
+
+        if (shouldBreakStairPattern) {
+          const antiStairLanes = availableLanes.filter((lane) => {
+            const direction = Math.sign(lane - lastLane);
+            return lane !== lastLane && direction !== 0 && direction !== recentDirection;
+          });
+
+          if (antiStairLanes.length > 0) {
+            lanesToCreate = [chooseSingleLane(antiStairLanes, lastLane, laneVariety, tempoFactor, recentLaneHistory)];
+            currentPattern = 'none';
+            patternRemaining = 0;
+          } else {
+            streamDirection *= -1;
+            desiredLane = clamp(lastLane + streamDirection, 0, 3);
+          }
+        } else if (desiredLane < 0 || desiredLane > 3) {
           streamDirection *= -1;
           desiredLane = clamp(lastLane + streamDirection, 0, 3);
         }
 
-        if (!availableLanes.includes(desiredLane)) {
+        if (lanesToCreate.length === 0 && !availableLanes.includes(desiredLane)) {
           const alternatives = [...availableLanes].sort(
             (a, b) => Math.abs(a - desiredLane) - Math.abs(b - desiredLane)
           );
-          desiredLane = alternatives[0] ?? chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor);
+          desiredLane = alternatives[0] ?? chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor, recentLaneHistory);
         }
 
-        lanesToCreate = [desiredLane];
+        if (lanesToCreate.length === 0) {
+          lanesToCreate = [desiredLane];
+        }
       } else if (currentPattern === 'jump') {
         const jumpLane = [...availableLanes].sort(
           (a, b) => Math.abs(b - lastLane) - Math.abs(a - lastLane)
-        )[0] ?? chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor);
+        )[0] ?? chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor, recentLaneHistory);
         lanesToCreate = [jumpLane];
       }
 
@@ -416,32 +497,32 @@ export async function generateNotesFromAudio(
         (strongPeak || currentTime - lastNoteTime <= beatInterval * 0.85)
       ) {
         currentPattern = 'stream';
-        patternRemaining = Math.min(maxConsecutive, 2 + Math.floor(1 + density * 3 + tempoFactor * 2));
+        patternRemaining = Math.min(maxConsecutive, 1 + Math.floor(density * 2 + tempoFactor * 1.5));
 
         if (lastLane < 0) {
-          lanesToCreate = [chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor)];
+          lanesToCreate = [chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor, recentLaneHistory)];
         } else {
           if (lastLane <= 0) streamDirection = 1;
           if (lastLane >= 3) streamDirection = -1;
-          if (Math.random() < 0.08 + laneVariety * 0.2) {
+          if (recentDirectionRun >= 2 || Math.random() < 0.12 + laneVariety * 0.18) {
             streamDirection *= -1;
           }
 
           const desiredLane = clamp(lastLane + streamDirection, 0, 3);
           lanesToCreate = [availableLanes.includes(desiredLane)
             ? desiredLane
-            : chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor)];
+            : chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor, recentLaneHistory)];
         }
       } else if (strongPeak && randomRoll < streamChance + jumpChance && currentTime - lastNoteTime > beatInterval * 0.65) {
         currentPattern = 'jump';
         patternRemaining = 1 + Math.floor(laneVariety * 2);
         lanesToCreate = [[...availableLanes].sort(
           (a, b) => Math.abs(b - lastLane) - Math.abs(a - lastLane)
-        )[0] ?? chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor)];
+        )[0] ?? chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor, recentLaneHistory)];
       } else {
         currentPattern = 'none';
         patternRemaining = 0;
-        lanesToCreate = [chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor)];
+        lanesToCreate = [chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor, recentLaneHistory)];
       }
     }
 
@@ -488,6 +569,10 @@ export async function generateNotesFromAudio(
         laneOccupancy[lane] = currentTime + duration;
       }
       lastLane = lane;
+      recentLaneHistory.push(lane);
+      if (recentLaneHistory.length > 8) {
+        recentLaneHistory.shift();
+      }
       noteCreated = true;
       recentNoteTimes.push(currentTime);
     }

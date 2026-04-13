@@ -46,6 +46,7 @@ export interface ReplayRecord {
 
 export interface GlobalScoreRecord {
   id: string;
+  songId?: string;
   score: number;
   accuracy: number;
   date: string;
@@ -71,6 +72,38 @@ export interface SongStorageIssue {
   missingNotes: boolean;
 }
 
+export interface ReplayLinkIssue {
+  id: string;
+  songId: string;
+  songName: string;
+  artist: string;
+  issue: 'missing-song' | 'metadata-mismatch';
+  expectedSongId?: string;
+  expectedSongName?: string;
+  expectedArtist?: string;
+}
+
+export interface GlobalScoreLinkIssue {
+  id: string;
+  songId?: string;
+  songName: string;
+  artist: string;
+  issue: 'missing-song' | 'missing-song-link' | 'metadata-mismatch';
+  expectedSongId?: string;
+  expectedSongName?: string;
+  expectedArtist?: string;
+}
+
+export interface DataRelationshipMaintenance {
+  linkedGlobalScores: number;
+  updatedGlobalScoreMetadata: number;
+  linkedReplays: number;
+  updatedReplayMetadata: number;
+  removedOrphanReplays: number;
+  unresolvedGlobalScores: number;
+  unresolvedReplays: number;
+}
+
 export interface ForcedStorageUpdateResult {
   schemaVersion: number;
   checkedCollections: string[];
@@ -84,6 +117,20 @@ export interface ForcedStorageUpdateResult {
   replaysCount: number;
   rewrittenCollections?: string[];
   backups?: string[];
+  relationshipActions?: DataRelationshipMaintenance;
+}
+
+export interface IntegrityReport {
+  songsCount: number;
+  scoresCount: number;
+  replaysCount: number;
+  missingAssetSongsCount: number;
+  missingAssetSongs: SongStorageIssue[];
+  replayLinkIssuesCount: number;
+  replayLinkIssues: ReplayLinkIssue[];
+  globalScoreLinkIssuesCount: number;
+  globalScoreLinkIssues: GlobalScoreLinkIssue[];
+  configurationIssues: string[];
 }
 
 interface ApiErrorResponse {
@@ -310,6 +357,7 @@ export const getGlobalScores = async (options?: { limit?: number; offset?: numbe
 };
 
 export const saveGlobalScore = async (payload: {
+  songId?: string;
   score: number;
   accuracy: number;
   date: string;
@@ -387,20 +435,6 @@ export const forceStorageUpdate = async (token: string): Promise<ForcedStorageUp
   return parseApiResponse<ForcedStorageUpdateResult>(res);
 };
 
-export const getIntegrityReport = async (): Promise<{
-  songsCount: number;
-  scoresCount: number;
-  replaysCount: number;
-  missingAssetSongsCount: number;
-  missingAssetSongs: SongStorageIssue[];
-  configurationIssues: string[];
-}> => {
-  return parseApiResponse<{
-    songsCount: number;
-    scoresCount: number;
-    replaysCount: number;
-    missingAssetSongsCount: number;
-    missingAssetSongs: SongStorageIssue[];
-    configurationIssues: string[];
-  }>(await fetch('/api/integrity'));
+export const getIntegrityReport = async (): Promise<IntegrityReport> => {
+  return parseApiResponse<IntegrityReport>(await fetch('/api/integrity'));
 };

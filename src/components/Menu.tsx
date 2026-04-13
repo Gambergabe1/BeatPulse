@@ -7,13 +7,16 @@ import {
   changeAdminPassword,
   deleteCommunitySong,
   forceStorageUpdate,
+  GlobalScoreLinkIssue,
   getCommunitySongs,
   getGlobalScores,
   GlobalScoreRecord,
   getIntegrityReport,
+  IntegrityReport,
   getReplays,
   loginAdmin,
   removeLeaderboardPlayer,
+  ReplayLinkIssue,
   saveCommunitySong,
   updateCommunitySong
 } from '../services/pulseApi';
@@ -37,9 +40,33 @@ const LEADERBOARD_REMOVAL_REASONS = [
 
 const normalizeUsername = (value: string) => value.trim().toLowerCase();
 
-const getTopScoreFromEntries = (entries: Array<{ score: number }>) => {
-  if (!entries || entries.length === 0) return 0;
-  return entries.reduce((max, entry) => Math.max(max, Number(entry.score) || 0), 0);
+const getTopScoreFromEntries = (entries: Array<{ score: number }>) =>
+  entries.reduce((max, entry) => Math.max(max, Number(entry.score) || 0), 0);
+
+type IntegrityResultRow = {
+  name: string;
+  status: 'OK' | 'WARN' | 'ERROR';
+  details: string;
+};
+
+const describeReplayLinkIssue = (issue: ReplayLinkIssue) => {
+  if (issue.issue === 'missing-song') {
+    return `Replay references a missing song (${issue.songId || 'no song id'}).`;
+  }
+
+  return `Replay metadata is out of sync. Expected ${issue.expectedSongName || 'unknown'} by ${issue.expectedArtist || 'unknown'}.`;
+};
+
+const describeGlobalScoreLinkIssue = (issue: GlobalScoreLinkIssue) => {
+  if (issue.issue === 'missing-song') {
+    return `Leaderboard entry references a missing song id (${issue.songId || 'none'}).`;
+  }
+
+  if (issue.issue === 'missing-song-link') {
+    return `Leaderboard entry can be linked to ${issue.expectedSongName || 'a song'} but is missing its song id.`;
+  }
+
+  return `Leaderboard metadata is out of sync. Expected ${issue.expectedSongName || 'unknown'} by ${issue.expectedArtist || 'unknown'}.`;
 };
 
 export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings, onSaveSettings }) => {
@@ -72,7 +99,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [isChangingPassword, setIsChangingPassword] = useState(false);
   const [editingSong, setEditingSong] = useState<any | null>(null);
   const [editForm, setEditForm] = useState({ name: '', artist: '', difficulty: 0.5, density: 0.5, laneVariety: 0.5, sliderProbability: 0.3, stamina: 0.5 });
-  const [integrityResults, setIntegrityResults] = useState<any[] | null>(null);
+  const [integrityResults, setIntegrityResults] = useState<IntegrityResultRow[] | null>(null);
   const [isCheckingIntegrity, setIsCheckingIntegrity] = useState(false);
   const [isAdminLoading, setIsAdminLoading] = useState(false);
   const [isForcingStorageUpdate, setIsForcingStorageUpdate] = useState(false);
@@ -130,62 +157,44 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const loadCommunitySongs = useCallback(async () => {
     try {
       const songs = await getCommunitySongs();
-      setCommunitySongs(songs || []);
+      setCommunitySongs(songs);
     } catch (err) {
       console.error('Failed to fetch songs:', err);
       const message = err instanceof Error ? err.message : 'Unknown error';
       setError(`Failed to load community songs: ${message}`);
-      setCommunitySongs([]); // Set to empty array on error
     }
   }, []);
 
   const loadGlobalScores = useCallback(async () => {
     try {
       const { scores, nextOffset } = await getGlobalScores({ limit: 100, offset: 0 });
-      setGlobalScores(scores || []);
+      setGlobalScores(scores);
       setGlobalScoresOffset(nextOffset || 0);
       setHasMoreScores(nextOffset !== null);
     } catch (err) {
       console.error('Failed to fetch global scores:', err);
       const message = err instanceof Error ? err.message : 'Unknown error';
       setError(`Failed to load global scores: ${message}`);
-      setGlobalScores([]); // Set to empty array on error
     }
   }, []);
 
   const loadReplays = useCallback(async () => {
     try {
       const replays = await getReplays();
-      setSavedReplays(replays || []);
+      setSavedReplays(replays);
     } catch (err) {
       console.error('Failed to fetch replays:', err);
       const message = err instanceof Error ? err.message : 'Unknown error';
       setError(`Failed to load replays: ${message}`);
-      setSavedReplays([]); // Set to empty array on error
     }
   }, []);
 
   const refreshStoredCollections = useCallback(async () => {
-    try {
-      await Promise.all([loadCommunitySongs(), loadGlobalScores(), loadReplays()]);
-    } catch (err) {
-      console.error('Failed to refresh collections:', err);
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      setError(`Failed to refresh data: ${message}`);
-    }
+    await Promise.all([loadCommunitySongs(), loadGlobalScores(), loadReplays()]);
   }, [loadCommunitySongs, loadGlobalScores, loadReplays]);
 
   useEffect(() => {
-    // Load collections on mount with error handling
-    const initializeCollections = async () => {
-      try {
-        await refreshStoredCollections();
-      } catch (err) {
-        console.error('Failed to initialize collections:', err);
-      }
-    };
-    
-    initializeCollections();
+    refreshStoredCollections();
   }, [refreshStoredCollections]);
 
   // Dynamic note scaling when complexity changes
@@ -226,72 +235,67 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     }
 
     const proxyAssetUrl = (assetUrl: string) => `/api/audio-proxy?url=${encodeURIComponent(assetUrl)}`;
-    try {
-      const response = await fetch(proxyAssetUrl(song.audioUrl));
-      if (!response.ok) {
-        throw new Error(`Failed to load audio: ${response.statusText}`);
+    const response = await fetch(proxyAssetUrl(song.audioUrl));
+    if (!response.ok) {
+      throw new Error(`Failed to load audio: ${response.statusText}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+    const difficulty = chartOverrides?.difficulty ?? song.difficulty;
+    const densityValue = chartOverrides?.density ?? song.density ?? difficulty;
+    const laneVarietyValue = chartOverrides?.laneVariety ?? song.laneVariety ?? difficulty;
+    const sliderProbabilityValue = chartOverrides?.sliderProbability ?? song.sliderProbability ?? 0.3;
+    const staminaValue = chartOverrides?.stamina ?? song.stamina ?? 0.5;
+
+    let notes = [];
+    if (Array.isArray(song.notes)) {
+      notes = song.notes;
+    } else if (typeof song.notes === 'string') {
+      try {
+        const parsedNotes = JSON.parse(song.notes);
+        notes = Array.isArray(parsedNotes) ? parsedNotes : [];
+      } catch (error) {
+        console.warn('Failed to parse embedded notes, retrying with stored chart.', error);
       }
+    }
 
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-
-      const difficulty = chartOverrides?.difficulty ?? song.difficulty;
-      const densityValue = chartOverrides?.density ?? song.density ?? difficulty;
-      const laneVarietyValue = chartOverrides?.laneVariety ?? song.laneVariety ?? difficulty;
-      const sliderProbabilityValue = chartOverrides?.sliderProbability ?? song.sliderProbability ?? 0.3;
-      const staminaValue = chartOverrides?.stamina ?? song.stamina ?? 0.5;
-
-      let notes = [];
-      if (Array.isArray(song.notes)) {
-        notes = song.notes;
-      } else if (typeof song.notes === 'string') {
-        try {
-          const parsedNotes = JSON.parse(song.notes);
-          notes = Array.isArray(parsedNotes) ? parsedNotes : [];
-        } catch (error) {
-          console.warn('Failed to parse embedded notes, retrying with stored chart.', error);
+    if (notes.length === 0 && song.notesUrl) {
+      try {
+        const notesResponse = await fetch(proxyAssetUrl(song.notesUrl));
+        if (!notesResponse.ok) {
+          throw new Error('Failed to fetch notes');
         }
+        const parsedNotes = await notesResponse.json();
+        notes = Array.isArray(parsedNotes) ? parsedNotes : [];
+      } catch (error) {
+        console.warn('Failed to fetch stored notes, regenerating chart.', error);
       }
+    }
 
-      if (notes.length === 0 && song.notesUrl) {
-        try {
-          const notesResponse = await fetch(proxyAssetUrl(song.notesUrl));
-          if (!notesResponse.ok) {
-            throw new Error('Failed to fetch notes');
-          }
-          const parsedNotes = await notesResponse.json();
-          notes = Array.isArray(parsedNotes) ? parsedNotes : [];
-        } catch (error) {
-          console.warn('Failed to fetch stored notes, regenerating chart.', error);
-        }
-      }
-
-      if (notes.length === 0) {
-        notes = await generateNotesFromAudio(audioBuffer, {
-          complexity: difficulty,
-          density: densityValue,
-          laneVariety: laneVarietyValue,
-          sliderProbability: sliderProbabilityValue,
-          stamina: staminaValue
-        });
-      }
-
-      return {
-        id: song.id,
-        name: song.name,
-        artist: song.artist,
-        audioBuffer,
-        notes,
-        difficulty,
+    if (notes.length === 0) {
+      notes = await generateNotesFromAudio(audioBuffer, {
+        complexity: difficulty,
         density: densityValue,
         laneVariety: laneVarietyValue,
         sliderProbability: sliderProbabilityValue,
         stamina: staminaValue
-      };
-    } catch (error) {
-      console.error('Failed to load stored song data:', error);
-      throw error;
+      });
     }
+
+    return {
+      id: song.id,
+      name: song.name,
+      artist: song.artist,
+      audioBuffer,
+      notes,
+      difficulty,
+      density: densityValue,
+      laneVariety: laneVarietyValue,
+      sliderProbability: sliderProbabilityValue,
+      stamina: staminaValue
+    };
   }, [audioContext]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -508,7 +512,13 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         throw new Error('Admin login required.');
       }
       await deleteCommunitySong(id, adminToken);
+      await refreshStoredCollections();
       setCommunitySongs(prev => prev.filter(s => s.id !== id));
+      if (readySong?.id === id) {
+        setReadySong(null);
+        setLastUploadedFile(null);
+        setMetadata({ name: '', artist: '' });
+      }
     } catch (err) {
       console.error(err);
       setError('Failed to delete song');
@@ -605,8 +615,22 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       if (!adminToken) {
         throw new Error('Admin login required.');
       }
-      await updateCommunitySong(id, editForm, adminToken);
-      setCommunitySongs(prev => prev.map(s => s.id === id ? { ...s, ...editForm } : s));
+      const updatedSong = await updateCommunitySong(id, editForm, adminToken);
+      await refreshStoredCollections();
+      setCommunitySongs(prev => prev.map(s => s.id === id ? updatedSong : s));
+      if (readySong?.id === id) {
+        setReadySong(prev => prev ? {
+          ...prev,
+          name: updatedSong.name,
+          artist: updatedSong.artist,
+          difficulty: updatedSong.difficulty,
+          density: updatedSong.density ?? prev.density,
+          laneVariety: updatedSong.laneVariety ?? prev.laneVariety,
+          sliderProbability: updatedSong.sliderProbability ?? prev.sliderProbability,
+          stamina: updatedSong.stamina ?? prev.stamina
+        } : null);
+        setMetadata({ name: updatedSong.name, artist: updatedSong.artist });
+      }
       setEditingSong(null);
       setError(null);
     } catch (err: any) {
@@ -622,24 +646,40 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     setIntegrityResults([]);
     setError(null);
     try {
-      const report = await getIntegrityReport();
+      const report: IntegrityReport = await getIntegrityReport();
       const hasConfigurationIssues = (report.configurationIssues?.length ?? 0) > 0;
-      const results = [
+      const results: IntegrityResultRow[] = [
         ...(report.configurationIssues || []).map((issue) => ({
           name: 'Integrity Environment',
-          status: 'WARN',
+          status: 'WARN' as const,
           details: issue,
         })),
-        { name: 'Songs Collection', status: hasConfigurationIssues ? 'WARN' : 'OK', details: `${report.songsCount} songs found` },
-        { name: 'Global Scores Collection', status: hasConfigurationIssues ? 'WARN' : 'OK', details: `${report.scoresCount} scores found` },
-        { name: 'Replays Collection', status: hasConfigurationIssues ? 'WARN' : 'OK', details: `${report.replaysCount} replays found` },
+        { name: 'Songs Collection', status: hasConfigurationIssues ? 'WARN' as const : 'OK' as const, details: `${report.songsCount} songs found` },
+        { name: 'Global Scores Collection', status: hasConfigurationIssues ? 'WARN' as const : 'OK' as const, details: `${report.scoresCount} scores found` },
+        { name: 'Replays Collection', status: hasConfigurationIssues ? 'WARN' as const : 'OK' as const, details: `${report.replaysCount} replays found` },
         {
           name: 'Song Storage Files',
-          status: report.missingAssetSongsCount > 0 ? 'WARN' : 'OK',
+          status: report.missingAssetSongsCount > 0 ? 'WARN' as const : 'OK' as const,
           details:
             report.missingAssetSongsCount > 0
               ? `${report.missingAssetSongsCount} songs have missing audio/notes files`
               : 'Song audio + notes files are present for all stored songs',
+        },
+        {
+          name: 'Replay Links',
+          status: report.replayLinkIssuesCount > 0 ? 'WARN' as const : 'OK' as const,
+          details:
+            report.replayLinkIssuesCount > 0
+              ? `${report.replayLinkIssuesCount} replays need repair or cleanup`
+              : 'Replay records are linked to valid songs',
+        },
+        {
+          name: 'Leaderboard Links',
+          status: report.globalScoreLinkIssuesCount > 0 ? 'WARN' as const : 'OK' as const,
+          details:
+            report.globalScoreLinkIssuesCount > 0
+              ? `${report.globalScoreLinkIssuesCount} leaderboard entries need linking or metadata repair`
+              : 'Leaderboard entries are linked to valid song metadata',
         },
       ];
 
@@ -650,8 +690,28 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
           if (entry.missingNotes) missing.push("notes");
           results.push({
             name: `Missing Files: ${entry.name} (${entry.artist})`,
-            status: 'ERROR',
+            status: 'ERROR' as const,
             details: `Missing: ${missing.join(", ") || "unknown"}`,
+          });
+        });
+      }
+
+      if (report.replayLinkIssuesCount > 0) {
+        report.replayLinkIssues.forEach((issue) => {
+          results.push({
+            name: `Replay Issue: ${issue.songName} (${issue.artist})`,
+            status: issue.issue === 'missing-song' ? 'ERROR' as const : 'WARN' as const,
+            details: describeReplayLinkIssue(issue),
+          });
+        });
+      }
+
+      if (report.globalScoreLinkIssuesCount > 0) {
+        report.globalScoreLinkIssues.forEach((issue) => {
+          results.push({
+            name: `Leaderboard Issue: ${issue.songName} (${issue.artist})`,
+            status: issue.issue === 'missing-song-link' ? 'WARN' as const : 'ERROR' as const,
+            details: describeGlobalScoreLinkIssue(issue),
           });
         });
       }
@@ -660,7 +720,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     } catch (err: any) {
       console.error("Integrity check failed:", err);
       setError(`Integrity check failed: ${err.message || 'Unknown error'}`);
-      setIntegrityResults([{ name: 'Integrity Check', status: 'ERROR', details: err.message || 'Unknown error' }]);
+      setIntegrityResults([{ name: 'Integrity Check', status: 'ERROR' as const, details: err.message || 'Unknown error' }]);
     } finally {
       setIsCheckingIntegrity(false);
     }
@@ -684,9 +744,12 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         result.rewrittenCollections && result.rewrittenCollections.length > 0
           ? ` Rewrote: ${result.rewrittenCollections.join(', ')}.`
           : '';
+      const relationshipMessage = result.relationshipActions
+        ? ` Linked ${result.relationshipActions.linkedGlobalScores} leaderboard rows and ${result.relationshipActions.linkedReplays} replays. Repaired ${result.relationshipActions.updatedGlobalScoreMetadata} leaderboard labels and ${result.relationshipActions.updatedReplayMetadata} replay labels. Removed ${result.relationshipActions.removedOrphanReplays} orphan replays.`
+        : '';
 
       alert(
-        `Forced update complete. Normalized ${result.normalizedRows.songs} songs, ${result.normalizedRows.globalScores} leaderboard entries, and ${result.normalizedRows.replays} replays.${rewrittenMessage}`
+        `Forced update complete. Normalized ${result.normalizedRows.songs} songs, ${result.normalizedRows.globalScores} leaderboard entries, and ${result.normalizedRows.replays} replays.${rewrittenMessage}${relationshipMessage}`
       );
     } catch (err: any) {
       console.error('Forced storage update failed:', err);
@@ -715,7 +778,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const handleGlobalScoresScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget;
     const isAtBottom = target.scrollHeight - target.scrollTop <= target.clientHeight + 50;
-    if (isAtBottom && globalScores.length > 0) {
+    if (isAtBottom) {
       fetchMoreGlobalScores();
     }
   };
@@ -763,7 +826,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     return () => handlePreviewStop();
   }, []);
 
-  const filteredCommunitySongs = (communitySongs || []).filter(song => 
+  const filteredCommunitySongs = communitySongs.filter(song => 
     song.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
     song.artist.toLowerCase().includes(searchQuery.toLowerCase())
   );
@@ -1059,7 +1122,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   />
                 </div>
 
-                {!communitySongs || communitySongs.length === 0 ? (
+                {filteredCommunitySongs.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
                     <Music className="w-12 h-12 mb-4 opacity-10" />
                     <p className="text-sm font-bold uppercase tracking-widest">
@@ -1068,12 +1131,6 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                     <p className="text-xs mt-1">
                       {searchQuery ? 'Try a different search term' : 'Upload and save your own to start the collection!'}
                     </p>
-                  </div>
-                ) : filteredCommunitySongs.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
-                    <Music className="w-12 h-12 mb-4 opacity-10" />
-                    <p className="text-sm font-bold uppercase tracking-widest">No matches found</p>
-                    <p className="text-xs mt-1">Try a different search term</p>
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar touch-pan-y">
@@ -1105,7 +1162,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 )}
               </div>
             ) : activeTab === 'GLOBAL' ? (
-              !globalScores || globalScores.length === 0 ? (
+              globalScores.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
                   <Trophy className="w-12 h-12 mb-4 opacity-10" />
                   <p className="text-sm font-bold uppercase tracking-widest">No scores yet</p>
@@ -1142,7 +1199,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 </div>
               )
             ) : activeTab === 'REPLAYS' ? (
-              !savedReplays || savedReplays.length === 0 ? (
+              savedReplays.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
                   <Play className="w-12 h-12 mb-4 opacity-10" />
                   <p className="text-sm font-bold uppercase tracking-widest">No saved replays</p>
@@ -1300,7 +1357,13 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                           <div key={`${res.name}-${res.status}`} className="rounded bg-white/5 p-2 space-y-1">
                             <div className="flex justify-between items-center text-[10px] font-mono">
                               <span className="text-white truncate max-w-[200px]">{res.name}</span>
-                              <span className={res.status === 'OK' ? 'text-neon-green' : 'text-neon-pink'}>
+                              <span className={
+                                res.status === 'OK'
+                                  ? 'text-neon-green'
+                                  : res.status === 'WARN'
+                                  ? 'text-yellow-400'
+                                  : 'text-neon-pink'
+                              }>
                                 {res.status}
                               </span>
                             </div>
@@ -1364,14 +1427,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   </div>
 
                   <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar touch-pan-y">
-                    {!communitySongs || communitySongs.length === 0 ? (
-                      <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
-                        <Music className="w-12 h-12 mb-4 opacity-10" />
-                        <p className="text-sm font-bold uppercase tracking-widest">No songs in community library</p>
-                        <p className="text-xs mt-1">No songs available to manage</p>
-                      </div>
-                    ) : (
-                      communitySongs.map((song) => (
+                    {communitySongs.map((song) => (
                       <div key={song.id} className="p-4 rounded-2xl bg-white/5 border border-white/5 flex flex-col gap-3">
                         {editingSong === song.id ? (
                           <div className="flex flex-col gap-3">
@@ -1510,8 +1566,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                           </div>
                         )}
                       </div>
-                      ))
-                    )}
+                    ))}
                   </div>
                 </div>
               )
@@ -1780,7 +1835,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
               className="relative w-full max-w-sm bg-zinc-900 border border-white/10 rounded-[32px] p-8 shadow-2xl"
             >
               <h3 className="text-xl font-display font-black text-white mb-4">Delete Song?</h3>
-              <p className="text-white/60 text-sm mb-8">This action cannot be undone. Are you sure you want to remove this song from the community library?</p>
+              <p className="text-white/60 text-sm mb-8">This action cannot be undone. This will also remove linked replays and leaderboard data for this community song.</p>
               <div className="flex gap-4">
                 <button 
                   onClick={() => setDeleteTargetId(null)}

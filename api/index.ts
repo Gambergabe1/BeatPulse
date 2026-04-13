@@ -10,7 +10,7 @@ const uploader = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const BLOB_WRITE_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
-const STORAGE_SCHEMA_VERSION = 2;
+const STORAGE_SCHEMA_VERSION = 3;
 
 let storageReadyPromise: Promise<void> | null = null;
 
@@ -72,6 +72,7 @@ interface ReplayRecord {
 
 interface GlobalScoreRecord {
   id: string;
+  songId?: string;
   score: number;
   accuracy: number;
   date: string;
@@ -93,6 +94,38 @@ interface StorageNormalizedRows {
   songs: number;
   globalScores: number;
   replays: number;
+}
+
+interface ReplayLinkIssue {
+  id: string;
+  songId: string;
+  songName: string;
+  artist: string;
+  issue: "missing-song" | "metadata-mismatch";
+  expectedSongId?: string;
+  expectedSongName?: string;
+  expectedArtist?: string;
+}
+
+interface GlobalScoreLinkIssue {
+  id: string;
+  songId?: string;
+  songName: string;
+  artist: string;
+  issue: "missing-song" | "missing-song-link" | "metadata-mismatch";
+  expectedSongId?: string;
+  expectedSongName?: string;
+  expectedArtist?: string;
+}
+
+interface DataRelationshipMaintenance {
+  linkedGlobalScores: number;
+  updatedGlobalScoreMetadata: number;
+  linkedReplays: number;
+  updatedReplayMetadata: number;
+  removedOrphanReplays: number;
+  unresolvedGlobalScores: number;
+  unresolvedReplays: number;
 }
 
 function ensureDatabaseEnvironment() {
@@ -142,6 +175,7 @@ async function prepareStorageSchema() {
   await sql`
     CREATE TABLE IF NOT EXISTS global_scores (
       id TEXT PRIMARY KEY,
+      song_id TEXT,
       score REAL NOT NULL,
       accuracy REAL NOT NULL,
       date TEXT NOT NULL,
@@ -192,6 +226,7 @@ async function prepareStorageSchema() {
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS status TEXT`;
 
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS id TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS song_id TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS song_name TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS artist TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
@@ -302,6 +337,58 @@ function isAbsoluteHttpUrl(value: string) {
   return /^https?:\/\//i.test(value);
 }
 
+function toLookupKey(name: string, artist: string) {
+  return `${name.trim().toLowerCase()}::${artist.trim().toLowerCase()}`;
+}
+
+function buildSongLookup(songs: CommunitySongRecord[]) {
+  const byId = new Map<string, CommunitySongRecord>();
+  const byMetadata = new Map<string, CommunitySongRecord[]>();
+
+  songs.forEach((song) => {
+    byId.set(song.id, song);
+    const key = toLookupKey(song.name, song.artist);
+    const bucket = byMetadata.get(key) || [];
+    bucket.push(song);
+    byMetadata.set(key, bucket);
+  });
+
+  return { byId, byMetadata };
+}
+
+function getUniqueSongMatch(
+  lookup: ReturnType<typeof buildSongLookup>,
+  name: string,
+  artist: string
+) {
+  const matches = lookup.byMetadata.get(toLookupKey(name, artist)) || [];
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function resolveSongForReplay(
+  replay: Pick<ReplayRecord, "songId" | "songName" | "artist">,
+  lookup: ReturnType<typeof buildSongLookup>
+) {
+  if (replay.songId) {
+    const byId = lookup.byId.get(replay.songId);
+    if (byId) return byId;
+  }
+
+  return getUniqueSongMatch(lookup, replay.songName, replay.artist);
+}
+
+function resolveSongForGlobalScore(
+  score: Pick<GlobalScoreRecord, "songId" | "songName" | "artist">,
+  lookup: ReturnType<typeof buildSongLookup>
+) {
+  if (score.songId) {
+    const byId = lookup.byId.get(score.songId);
+    if (byId) return byId;
+  }
+
+  return getUniqueSongMatch(lookup, score.songName, score.artist);
+}
+
 function isSafeSongId(value: string) {
   return /^[A-Za-z0-9-]{8,64}$/.test(value);
 }
@@ -363,256 +450,80 @@ function parseEventsArray(raw: Json): unknown[] {
 }
 
 function normalizeSongRow(row: any): CommunitySongRecord {
-  try {
-    const id = toText(row.id, crypto.randomUUID());
-    const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
-    const difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
-    const density = clampNumber(row.density, difficulty);
-    const laneVariety = clampNumber(row.lane_variety ?? row.laneVariety, difficulty);
-    const sliderProbability = clampNumber(row.slider_probability ?? row.sliderProbability, 0.3);
-    const stamina = clampNumber(row.stamina, 0.5);
-    
-    // Handle scores as array or JSONB object
-    let scoresParsed = [];
-    try {
-      if (Array.isArray(row.scores)) {
-        scoresParsed = parseScoreArray(row.scores, createdAt);
-      } else if (typeof row.scores === 'string') {
-        const parsed = JSON.parse(row.scores);
-        scoresParsed = parseScoreArray(parsed, createdAt);
-      } else if (row.scores && typeof row.scores === 'object') {
-        scoresParsed = parseScoreArray(row.scores, createdAt);
-      }
-    } catch (scoreError) {
-      console.error("Error parsing scores:", scoreError instanceof Error ? scoreError.message : scoreError);
-      scoresParsed = [];
-    }
-    
-    const scores = sortScoresDesc(scoresParsed);
-    
-    const audioPath = canonicalizeSongAssetPath(
-      id,
-      extractRelativeAssetPath(row.audio_path ?? row.audioPath ?? row.audio_url ?? row.audioUrl),
-      "audio.mp3"
-    );
-    const notesPath = canonicalizeSongAssetPath(
-      id,
-      extractRelativeAssetPath(row.notes_path ?? row.notesPath ?? row.notes_url ?? row.notesUrl),
-      "notes.json"
-    );
-    const topScore = Math.max(clampNumber(row.top_score ?? row.topScore, 0), toTopScoreFromScores(scores));
-    return {
-      id,
-      name: toText(row.name, "Untitled"),
-      artist: toText(row.artist, "Unknown Artist"),
-      audioUrl: toText(row.audio_url ?? row.audioUrl, ""),
-      audioPath,
-      notesUrl: toText(row.notes_url ?? row.notesUrl, ""),
-      notesPath,
-      difficulty,
-      density,
-      laneVariety,
-      sliderProbability,
-      stamina,
-      topScore,
-      scores,
-      authorName: toText(row.author_name ?? row.authorName, "Anonymous"),
-      createdAt,
-      status: "ready",
-    };
-  } catch (error) {
-    console.error("Error normalizing song row:", error instanceof Error ? error.message : error);
-    throw error; // Re-throw so readSongs can catch and return fallback
-  }
+  const id = toText(row.id, crypto.randomUUID());
+  const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+  const difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
+  const density = clampNumber(row.density, difficulty);
+  const laneVariety = clampNumber(row.lane_variety ?? row.laneVariety, difficulty);
+  const sliderProbability = clampNumber(row.slider_probability ?? row.sliderProbability, 0.3);
+  const stamina = clampNumber(row.stamina, 0.5);
+  const scores = sortScoresDesc(parseScoreArray(row.scores as Json, createdAt));
+  const audioPath = canonicalizeSongAssetPath(
+    id,
+    extractRelativeAssetPath(row.audio_path ?? row.audioPath ?? row.audio_url ?? row.audioUrl),
+    "audio.mp3"
+  );
+  const notesPath = canonicalizeSongAssetPath(
+    id,
+    extractRelativeAssetPath(row.notes_path ?? row.notesPath ?? row.notes_url ?? row.notesUrl),
+    "notes.json"
+  );
+  const topScore = Math.max(clampNumber(row.top_score ?? row.topScore, 0), toTopScoreFromScores(scores));
+  return {
+    id,
+    name: toText(row.name, "Untitled"),
+    artist: toText(row.artist, "Unknown Artist"),
+    audioUrl: toText(row.audio_url ?? row.audioUrl, ""),
+    audioPath,
+    notesUrl: toText(row.notes_url ?? row.notesUrl, ""),
+    notesPath,
+    difficulty,
+    density,
+    laneVariety,
+    sliderProbability,
+    stamina,
+    topScore,
+    scores,
+    authorName: toText(row.author_name ?? row.authorName, "Anonymous"),
+    createdAt,
+    status: "ready",
+  };
 }
 
 function normalizeReplayRow(row: any): ReplayRecord {
-  try {
-    // Safely get each field with individual error handling
-    let id = crypto.randomUUID();
-    try {
-      id = toText(row.id, crypto.randomUUID());
-    } catch (err) {
-      console.error("Error parsing id:", err);
-    }
-    
-    let songId = "";
-    try {
-      songId = toText(row.song_id ?? row.songId, "");
-    } catch (err) {
-      console.error("Error parsing songId:", err);
-    }
-    
-    let songName = "Unknown Song";
-    try {
-      songName = toText(row.song_name ?? row.songName, "Unknown Song");
-    } catch (err) {
-      console.error("Error parsing songName:", err);
-    }
-    
-    let artist = "Unknown Artist";
-    try {
-      artist = toText(row.artist, "Unknown Artist");
-    } catch (err) {
-      console.error("Error parsing artist:", err);
-    }
-    
-    // Safely get createdAt with fallback
-    let createdAt = new Date().toISOString();
-    try {
-      createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
-    } catch (err) {
-      console.error("Error parsing createdAt:", err);
-    }
-    
-    // Safely get difficulty with fallback
-    let difficulty = 0.5;
-    try {
-      difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
-    } catch (err) {
-      console.error("Error parsing difficulty:", err);
-    }
-    
-    // Safely get density
-    let density = 0.5;
-    try {
-      density = clampNumber(row.density, difficulty);
-    } catch (err) {
-      console.error("Error parsing density:", err);
-    }
-    
-    // Safely get laneVariety
-    let laneVariety = 0.5;
-    try {
-      laneVariety = clampNumber(row.lane_variety ?? row.laneVariety, difficulty);
-    } catch (err) {
-      console.error("Error parsing laneVariety:", err);
-    }
-    
-    // Safely get sliderProbability
-    let sliderProbability = 0.3;
-    try {
-      sliderProbability = clampNumber(row.slider_probability ?? row.sliderProbability, 0.3);
-    } catch (err) {
-      console.error("Error parsing sliderProbability:", err);
-    }
-    
-    // Safely get stamina
-    let stamina = 0.5;
-    try {
-      stamina = clampNumber(row.stamina, 0.5);
-    } catch (err) {
-      console.error("Error parsing stamina:", err);
-    }
-    
-    // Safely get score
-    let score = 0;
-    try {
-      score = clampNumber(row.score, 0);
-    } catch (err) {
-      console.error("Error parsing score:", err);
-    }
-    
-    // Safely get accuracy
-    let accuracy = 0;
-    try {
-      accuracy = clampNumber(row.accuracy, 0);
-    } catch (err) {
-      console.error("Error parsing accuracy:", err);
-    }
-    
-    // Safely get date
-    let date = new Date().toLocaleDateString();
-    try {
-      date = toDisplayDate(row.date, createdAt);
-    } catch (err) {
-      console.error("Error parsing date:", err);
-    }
-    
-    // Safely handle events - could be array, object, or string
-    let events: unknown[] = [];
-    try {
-      if (row.events) {
-        if (Array.isArray(row.events)) {
-          events = row.events;
-        } else if (typeof row.events === 'object') {
-          // If JSONB returns as parsed object, try to convert
-          try {
-            events = Array.isArray(row.events) ? row.events : [];
-          } catch {
-            events = [];
-          }
-        } else if (typeof row.events === 'string') {
-          try {
-            const parsed = JSON.parse(row.events);
-            events = Array.isArray(parsed) ? parsed : [];
-          } catch {
-            events = [];
-          }
-        }
-      }
-    } catch (err) {
-      console.error("Error parsing events:", err);
-      events = [];
-    }
-    
-    return {
-      id,
-      songId,
-      songName,
-      artist,
-      difficulty,
-      density,
-      laneVariety,
-      sliderProbability,
-      stamina,
-      score,
-      accuracy,
-      date,
-      createdAt,
-      events,
-    };
-  } catch (error) {
-    console.error('Critical error normalizing replay row:', error instanceof Error ? error.message : error);
-    throw error; // Re-throw so endpoint handler can catch and return fallback
-  }
+  const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+  const difficulty = clampNumber(row.difficulty ?? row.complexity, 0.5);
+  return {
+    id: toText(row.id, crypto.randomUUID()),
+    songId: toText(row.song_id ?? row.songId, ""),
+    songName: toText(row.song_name ?? row.songName, "Unknown Song"),
+    artist: toText(row.artist, "Unknown Artist"),
+    difficulty,
+    density: clampNumber(row.density, difficulty),
+    laneVariety: clampNumber(row.lane_variety ?? row.laneVariety, difficulty),
+    sliderProbability: clampNumber(row.slider_probability ?? row.sliderProbability, 0.3),
+    stamina: clampNumber(row.stamina, 0.5),
+    score: clampNumber(row.score, 0),
+    accuracy: clampNumber(row.accuracy, 0),
+    date: toDisplayDate(row.date, createdAt),
+    createdAt,
+    events: parseEventsArray(row.events as Json),
+  };
 }
 
 function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
-  try {
-    // Safely get createdAt with fallback
-    let createdAt = new Date().toISOString();
-    try {
-      createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
-    } catch (err) {
-      console.error("Error parsing createdAt in global score row:", err);
-    }
-    
-    // Safely get date with fallback
-    let date = new Date().toLocaleDateString();
-    try {
-      date = toDisplayDate(row.date, createdAt);
-    } catch (err) {
-      console.error("Error parsing date in global score row:", err);
-    }
-    
-    return {
-      id: toText(row.id, crypto.randomUUID()),
-      score: clampNumber(row.score, 0),
-      accuracy: clampNumber(row.accuracy, 0),
-      date,
-      username: toText(row.username, "Anonymous"),
-      createdAt,
-      songName: toText(row.song_name ?? row.songName, "Unknown Song"),
-      artist: toText(row.artist, "Unknown Artist"),
-    };
-  } catch (error) {
-    console.error("Error normalizing global score row:", error instanceof Error ? error.message : error);
-    throw error; // Re-throw so endpoint handler can catch and return fallback
-  }
-}
-    throw error; // Re-throw so the endpoint handler can catch and return fallback
-  }
+  const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+  return {
+    id: toText(row.id, crypto.randomUUID()),
+    songId: toText(row.song_id ?? row.songId, ""),
+    score: clampNumber(row.score, 0),
+    accuracy: clampNumber(row.accuracy, 0),
+    date: toDisplayDate(row.date, createdAt),
+    username: toText(row.username, "Anonymous"),
+    createdAt,
+    songName: toText(row.song_name ?? row.songName, "Unknown Song"),
+    artist: toText(row.artist, "Unknown Artist"),
+  };
 }
 
 function sortScoresDesc(scores: ScoreRecord[]) {
@@ -690,51 +601,195 @@ async function writeAdminState(state: PersistedAdminState) {
 }
 
 async function readSongs(): Promise<CommunitySongRecord[]> {
-  try {
-    const { rows } = await sql`SELECT * FROM songs ORDER BY created_at DESC`;
-    return rows
-      .map((row) => {
-        try {
-          return normalizeSongRow(row);
-        } catch (error) {
-          console.error("Error normalizing song row:", error instanceof Error ? error.message : error);
-          // Return a fallback CommunitySongRecord with minimal data
-          return {
-            id: row.id || crypto.randomUUID(),
-            name: row.name || "Untitled",
-            artist: row.artist || "Unknown Artist",
-            audioUrl: row.audio_url || row.audioUrl || "",
-            audioPath: row.audio_path || row.audioPath || "",
-            notesUrl: row.notes_url || row.notesUrl || "",
-            notesPath: row.notes_path || row.notesPath || "",
-            difficulty: 0.5,
-            density: 0.5,
-            laneVariety: 0.5,
-            sliderProbability: 0.3,
-            stamina: 0.5,
-            topScore: 0,
-            scores: [],
-            authorName: row.author_name || row.authorName || "Anonymous",
-            createdAt: row.created_at || new Date().toISOString(),
-            status: "ready",
-          } as CommunitySongRecord;
-        }
-      });
-  } catch (error) {
-    console.error("Error reading songs from database:", error instanceof Error ? error.message : error);
-    return [];
-  }
+  const { rows } = await sql`SELECT * FROM songs ORDER BY created_at DESC`;
+  return rows.map(normalizeSongRow);
 }
 
 async function readSong(id: string): Promise<CommunitySongRecord | null> {
-  try {
-    const { rows } = await sql`SELECT * FROM songs WHERE id = ${id} LIMIT 1`;
-    if (rows.length === 0) return null;
-    return normalizeSongRow(rows[0]);
-  } catch (error) {
-    console.error("Error reading song:", error instanceof Error ? error.message : error);
-    return null;
+  const { rows } = await sql`SELECT * FROM songs WHERE id = ${id} LIMIT 1`;
+  if (rows.length === 0) return null;
+  return normalizeSongRow(rows[0]);
+}
+
+async function readGlobalScores(): Promise<GlobalScoreRecord[]> {
+  const { rows } = await sql`SELECT * FROM global_scores ORDER BY score DESC, created_at DESC`;
+  return rows.map(normalizeGlobalScoreRow);
+}
+
+async function readReplays(): Promise<ReplayRecord[]> {
+  const { rows } = await sql`SELECT * FROM replays ORDER BY created_at DESC`;
+  return rows.map(normalizeReplayRow);
+}
+
+async function reconcileDataRelationships(options?: { pruneOrphanReplays?: boolean }) {
+  const [songs, globalScores, replays] = await Promise.all([
+    readSongs(),
+    readGlobalScores(),
+    readReplays(),
+  ]);
+  const lookup = buildSongLookup(songs);
+  const pruneOrphanReplays = options?.pruneOrphanReplays ?? false;
+
+  const summary: DataRelationshipMaintenance = {
+    linkedGlobalScores: 0,
+    updatedGlobalScoreMetadata: 0,
+    linkedReplays: 0,
+    updatedReplayMetadata: 0,
+    removedOrphanReplays: 0,
+    unresolvedGlobalScores: 0,
+    unresolvedReplays: 0,
+  };
+
+  const { rows: globalRows } = await sql`SELECT ctid::text AS ctid, * FROM global_scores`;
+  for (const row of globalRows) {
+    const normalized = normalizeGlobalScoreRow(row);
+    const linkedSong = resolveSongForGlobalScore(normalized, lookup);
+    if (!linkedSong) {
+      if (normalized.songId) {
+        summary.unresolvedGlobalScores += 1;
+      }
+      continue;
+    }
+
+    const needsSongLink = normalized.songId !== linkedSong.id;
+    const needsMetadata = normalized.songName !== linkedSong.name || normalized.artist !== linkedSong.artist;
+    if (!needsSongLink && !needsMetadata) {
+      continue;
+    }
+
+    if (needsSongLink) summary.linkedGlobalScores += 1;
+    if (needsMetadata) summary.updatedGlobalScoreMetadata += 1;
+
+    await sql`
+      UPDATE global_scores
+      SET song_id = ${linkedSong.id}, song_name = ${linkedSong.name}, artist = ${linkedSong.artist}
+      WHERE ctid::text = ${row.ctid}
+    `;
   }
+
+  const { rows: replayRows } = await sql`SELECT ctid::text AS ctid, * FROM replays`;
+  for (const row of replayRows) {
+    const normalized = normalizeReplayRow(row);
+    const linkedSong = resolveSongForReplay(normalized, lookup);
+    if (!linkedSong) {
+      summary.unresolvedReplays += 1;
+      if (pruneOrphanReplays) {
+        await sql`DELETE FROM replays WHERE ctid::text = ${row.ctid}`;
+        summary.removedOrphanReplays += 1;
+      }
+      continue;
+    }
+
+    const needsSongLink = normalized.songId !== linkedSong.id;
+    const needsMetadata = normalized.songName !== linkedSong.name || normalized.artist !== linkedSong.artist;
+    if (!needsSongLink && !needsMetadata) {
+      continue;
+    }
+
+    if (needsSongLink) summary.linkedReplays += 1;
+    if (needsMetadata) summary.updatedReplayMetadata += 1;
+
+    await sql`
+      UPDATE replays
+      SET song_id = ${linkedSong.id}, song_name = ${linkedSong.name}, artist = ${linkedSong.artist}
+      WHERE ctid::text = ${row.ctid}
+    `;
+  }
+
+  return summary;
+}
+
+async function collectIntegrityIssues() {
+  const [songs, globalScores, replays] = await Promise.all([
+    readSongs(),
+    readGlobalScores(),
+    readReplays(),
+  ]);
+  const lookup = buildSongLookup(songs);
+
+  const replayLinkIssues: ReplayLinkIssue[] = [];
+  replays.forEach((replay) => {
+    const linkedSong = resolveSongForReplay(replay, lookup);
+    if (!linkedSong) {
+      replayLinkIssues.push({
+        id: replay.id,
+        songId: replay.songId,
+        songName: replay.songName,
+        artist: replay.artist,
+        issue: "missing-song",
+      });
+      return;
+    }
+
+    if (
+      replay.songId !== linkedSong.id ||
+      replay.songName !== linkedSong.name ||
+      replay.artist !== linkedSong.artist
+    ) {
+      replayLinkIssues.push({
+        id: replay.id,
+        songId: replay.songId,
+        songName: replay.songName,
+        artist: replay.artist,
+        issue: "metadata-mismatch",
+        expectedSongId: linkedSong.id,
+        expectedSongName: linkedSong.name,
+        expectedArtist: linkedSong.artist,
+      });
+    }
+  });
+
+  const globalScoreLinkIssues: GlobalScoreLinkIssue[] = [];
+  globalScores.forEach((score) => {
+    const linkedSong = resolveSongForGlobalScore(score, lookup);
+    if (!linkedSong) {
+      if (score.songId) {
+        globalScoreLinkIssues.push({
+            id: score.id,
+            songId: score.songId,
+            songName: score.songName,
+            artist: score.artist,
+            issue: "missing-song",
+          });
+      }
+      return;
+    }
+
+    if (!score.songId) {
+      globalScoreLinkIssues.push({
+        id: score.id,
+        songId: score.songId,
+        songName: score.songName,
+        artist: score.artist,
+        issue: "missing-song-link",
+        expectedSongId: linkedSong.id,
+        expectedSongName: linkedSong.name,
+        expectedArtist: linkedSong.artist,
+      });
+      return;
+    }
+
+    if (score.songName !== linkedSong.name || score.artist !== linkedSong.artist) {
+      globalScoreLinkIssues.push({
+        id: score.id,
+        songId: score.songId,
+        songName: score.songName,
+        artist: score.artist,
+        issue: "metadata-mismatch",
+        expectedSongId: linkedSong.id,
+        expectedSongName: linkedSong.name,
+        expectedArtist: linkedSong.artist,
+      });
+    }
+  });
+
+  return {
+    songs,
+    globalScores,
+    replays,
+    replayLinkIssues,
+    globalScoreLinkIssues,
+  };
 }
 
 async function getStoredSchemaVersion() {
@@ -815,6 +870,7 @@ async function migrateGlobalScoreRows() {
       UPDATE global_scores
       SET
         id = ${normalized.id},
+        song_id = ${normalized.songId || null},
         score = ${normalized.score},
         accuracy = ${normalized.accuracy},
         date = ${normalized.date},
@@ -866,10 +922,12 @@ async function migratePersistedStorage(force = false) {
   const checkedCollections = ["songs", "global-scores", "replays"];
 
   if (!force && currentVersion >= STORAGE_SCHEMA_VERSION) {
+    const relationshipActions = await reconcileDataRelationships();
     return {
       schemaVersion: STORAGE_SCHEMA_VERSION,
       checkedCollections,
       normalizedRows: await getStorageCollectionCounts(),
+      relationshipActions,
     };
   }
 
@@ -878,11 +936,17 @@ async function migratePersistedStorage(force = false) {
     migrateGlobalScoreRows(),
     migrateReplayRows(),
   ]);
+  const relationshipActions = await reconcileDataRelationships({ pruneOrphanReplays: force });
 
   await setStoredSchemaVersion({
     songsMigrated,
     globalScoresMigrated,
     replaysMigrated,
+    linkedGlobalScores: relationshipActions.linkedGlobalScores,
+    updatedGlobalScoreMetadata: relationshipActions.updatedGlobalScoreMetadata,
+    linkedReplays: relationshipActions.linkedReplays,
+    updatedReplayMetadata: relationshipActions.updatedReplayMetadata,
+    removedOrphanReplays: relationshipActions.removedOrphanReplays,
   });
 
   return {
@@ -893,6 +957,7 @@ async function migratePersistedStorage(force = false) {
       globalScores: globalScoresMigrated,
       replays: replaysMigrated,
     },
+    relationshipActions,
   };
 }
 
@@ -1245,6 +1310,20 @@ app.patch("/api/songs/:id", requireAdmin, async (req, res) => {
       WHERE id = ${req.params.id}
     `;
 
+    await sql`
+      UPDATE global_scores
+      SET song_id = ${song.id}, song_name = ${next.name}, artist = ${next.artist}
+      WHERE song_id = ${song.id}
+         OR ((song_id IS NULL OR song_id = '') AND song_name = ${song.name} AND artist = ${song.artist})
+    `;
+
+    await sql`
+      UPDATE replays
+      SET song_id = ${song.id}, song_name = ${next.name}, artist = ${next.artist}
+      WHERE song_id = ${song.id}
+         OR ((song_id IS NULL OR song_id = '') AND song_name = ${song.name} AND artist = ${song.artist})
+    `;
+
     return ok(res, next);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to update song.";
@@ -1297,6 +1376,16 @@ app.delete("/api/songs/:id", requireAdmin, async (req, res) => {
     if (!song) return fail(res, 404, "Song not found");
 
     await sql`DELETE FROM songs WHERE id = ${req.params.id}`;
+    await sql`
+      DELETE FROM replays
+      WHERE song_id = ${song.id}
+         OR ((song_id IS NULL OR song_id = '') AND song_name = ${song.name} AND artist = ${song.artist})
+    `;
+    await sql`
+      DELETE FROM global_scores
+      WHERE song_id = ${song.id}
+         OR ((song_id IS NULL OR song_id = '') AND song_name = ${song.name} AND artist = ${song.artist})
+    `;
 
     await deleteBlob([song.audioPath, song.notesPath], { token: BLOB_WRITE_TOKEN });
     return ok(res, { message: "Song deleted." });
@@ -1312,45 +1401,15 @@ app.get("/api/global-scores", async (req, res) => {
     const limit = Math.max(1, Math.min(500, clampNumber(req.query.limit, 100)));
     const offset = Math.max(0, clampNumber(req.query.offset, 0));
 
-    let rows = [];
-    try {
-      const result = await sql`
-        SELECT * FROM global_scores ORDER BY score DESC, created_at DESC LIMIT ${limit + 1} OFFSET ${offset}
-      `;
-      rows = result.rows || [];
-    } catch (queryError) {
-      console.error('Database query error in GET /api/global-scores:', queryError instanceof Error ? queryError.message : queryError);
-      return ok(res, { scores: [], nextOffset: null }); // Return empty scores if query fails
-    }
-    
-    // Map with per-row error recovery
-    const scores = rows
-      .map((row, index) => {
-        try {
-          return normalizeGlobalScoreRow(row);
-        } catch (error) {
-          console.error(`Error normalizing global score row at index ${index}:`, error instanceof Error ? error.message : error, row);
-          // Return fallback GlobalScoreRecord with minimal data
-          return {
-            id: row?.id || `fallback-${index}`,
-            score: row?.score || 0,
-            accuracy: row?.accuracy || 0,
-            date: row?.date || new Date().toLocaleDateString(),
-            username: row?.username || "Anonymous",
-            createdAt: row?.created_at || new Date().toISOString(),
-            songName: row?.song_name || row?.songName || "Unknown Song",
-            artist: row?.artist || "Unknown Artist",
-          } as GlobalScoreRecord;
-        }
-      })
-      .filter((score): score is GlobalScoreRecord => score !== null && score !== undefined);
-    
+    const { rows } = await sql`
+      SELECT * FROM global_scores ORDER BY score DESC, created_at DESC LIMIT ${limit + 1} OFFSET ${offset}
+    `;
+    const scores = rows.map(normalizeGlobalScoreRow);
     const chunk = scores.slice(0, limit);
     const nextOffset = scores.length > limit ? offset + limit : null;
     return ok(res, { scores: chunk, nextOffset });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to load global scores.";
-    console.error("Global scores endpoint error:", message, error);
     return fail(res, 500, message);
   }
 });
@@ -1360,8 +1419,7 @@ app.post("/api/global-scores", async (req, res) => {
     await ensureStorageReady();
     const score = clampNumber(req.body?.score, Number.NaN);
     const accuracy = clampNumber(req.body?.accuracy, Number.NaN);
-    const songName = (typeof req.body?.songName === "string" && req.body.songName.trim()) || "Unknown Song";
-    const artist = (typeof req.body?.artist === "string" && req.body.artist.trim()) || "Unknown Artist";
+    const requestedSongId = (typeof req.body?.songId === "string" && req.body.songId.trim()) || "";
     const username = (typeof req.body?.username === "string" && req.body.username.trim()) || "Anonymous";
     const date = (typeof req.body?.date === "string" && req.body.date.trim()) || new Date().toLocaleDateString();
 
@@ -1369,8 +1427,21 @@ app.post("/api/global-scores", async (req, res) => {
       return fail(res, 400, "Score and accuracy must be numbers.");
     }
 
+    const linkedSong = requestedSongId ? await readSong(requestedSongId) : null;
+    if (requestedSongId && !linkedSong) {
+      return fail(res, 404, "Song not found.");
+    }
+
+    const songName = linkedSong
+      ? linkedSong.name
+      : (typeof req.body?.songName === "string" && req.body.songName.trim()) || "Unknown Song";
+    const artist = linkedSong
+      ? linkedSong.artist
+      : (typeof req.body?.artist === "string" && req.body.artist.trim()) || "Unknown Artist";
+
     const newScore: GlobalScoreRecord = {
       id: crypto.randomUUID(),
+      songId: linkedSong?.id || requestedSongId || undefined,
       score,
       accuracy,
       date,
@@ -1381,8 +1452,8 @@ app.post("/api/global-scores", async (req, res) => {
     };
 
     await sql`
-      INSERT INTO global_scores (id, score, accuracy, date, username, song_name, artist, created_at)
-      VALUES (${newScore.id}, ${newScore.score}, ${newScore.accuracy}, ${newScore.date}, ${newScore.username}, ${newScore.songName}, ${newScore.artist}, ${newScore.createdAt})
+      INSERT INTO global_scores (id, song_id, score, accuracy, date, username, song_name, artist, created_at)
+      VALUES (${newScore.id}, ${newScore.songId || null}, ${newScore.score}, ${newScore.accuracy}, ${newScore.date}, ${newScore.username}, ${newScore.songName}, ${newScore.artist}, ${newScore.createdAt})
     `;
 
     return ok(res, { id: newScore.id });
@@ -1395,46 +1466,10 @@ app.post("/api/global-scores", async (req, res) => {
 app.get("/api/replays", async (_req, res) => {
   try {
     await ensureStorageReady();
-    
-    let rows = [];
-    try {
-      const result = await sql`SELECT * FROM replays ORDER BY created_at DESC`;
-      rows = result.rows || [];
-    } catch (queryError) {
-      console.error('Database query error in GET /api/replays:', queryError instanceof Error ? queryError.message : queryError);
-      return ok(res, []); // Return empty array if query fails
-    }
-    
-    const replays = rows
-      .map((row, index) => {
-        try {
-          return normalizeReplayRow(row);
-        } catch (err) {
-          console.error(`Failed to normalize replay row at index ${index}:`, err instanceof Error ? err.message : err, row);
-          // Return a minimal replay object to prevent the entire request from failing
-          return {
-            id: row?.id || `fallback-${index}`,
-            songId: row?.song_id || '',
-            songName: row?.song_name || 'Unknown Song',
-            artist: row?.artist || 'Unknown Artist',
-            difficulty: 0.5,
-            density: 0.5,
-            laneVariety: 0.5,
-            sliderProbability: 0.3,
-            stamina: 0.5,
-            score: 0,
-            accuracy: 0,
-            date: new Date().toLocaleDateString(),
-            createdAt: new Date().toISOString(),
-            events: [],
-          } as ReplayRecord;
-        }
-      })
-      .filter((replay): replay is ReplayRecord => replay !== null && replay !== undefined);
-    
+    const { rows } = await sql`SELECT * FROM replays ORDER BY created_at DESC`;
+    const replays = rows.map(normalizeReplayRow);
     return ok(res, replays);
   } catch (error) {
-    console.error('Error in GET /api/replays:', error instanceof Error ? error.message : error, error);
     const message = error instanceof Error ? error.message : "Failed to load replays.";
     return fail(res, 500, message);
   }
@@ -1452,25 +1487,16 @@ app.post("/api/replays", async (req, res) => {
       return fail(res, 400, "songId, songName, score and accuracy are required.");
     }
 
-    let events: unknown[] = [];
-    if (body.events) {
-      if (Array.isArray(body.events)) {
-        events = body.events;
-      } else if (typeof body.events === 'string') {
-        try {
-          const parsed = JSON.parse(body.events);
-          events = Array.isArray(parsed) ? parsed : [];
-        } catch {
-          events = [];
-        }
-      }
+    const linkedSong = await readSong(songId);
+    if (!linkedSong) {
+      return fail(res, 404, "Song not found.");
     }
 
     const newReplay: ReplayRecord = {
       id: crypto.randomUUID(),
-      songId,
-      songName,
-      artist: (typeof body.artist === "string" && body.artist.trim()) || "Unknown Artist",
+      songId: linkedSong.id,
+      songName: linkedSong.name,
+      artist: linkedSong.artist,
       difficulty: clampNumber(body.difficulty, 0.5),
       density: clampNumber(body.density, 0.5),
       laneVariety: clampNumber(body.laneVariety, 0.5),
@@ -1480,7 +1506,7 @@ app.post("/api/replays", async (req, res) => {
       accuracy,
       date: (typeof body.date === "string" && body.date.trim()) || new Date().toLocaleDateString(),
       createdAt: new Date().toISOString(),
-      events: events,
+      events: parseEventsArray(body.events as Json),
     };
 
     await sql`
@@ -1498,7 +1524,6 @@ app.post("/api/replays", async (req, res) => {
 
     return ok(res, newReplay);
   } catch (error) {
-    console.error('Error in POST /api/replays:', error);
     const message = error instanceof Error ? error.message : "Failed to save replay.";
     return fail(res, 500, message);
   }
@@ -1507,9 +1532,7 @@ app.post("/api/replays", async (req, res) => {
 app.get("/api/integrity", async (_req, res) => {
   try {
     await ensureStorageReady();
-    const songs = await readSongs();
-    const { rows: globalRows } = await sql`SELECT COUNT(*) AS c FROM global_scores`;
-    const { rows: replayRows } = await sql`SELECT COUNT(*) AS c FROM replays`;
+    const { songs, globalScores, replays, replayLinkIssues, globalScoreLinkIssues } = await collectIntegrityIssues();
 
     const missingAssetSongs = (await Promise.all(
       songs.map(async (song) => {
@@ -1528,10 +1551,15 @@ app.get("/api/integrity", async (_req, res) => {
 
     return ok(res, {
       songsCount: songs.length,
-      scoresCount: Number(globalRows?.[0]?.c ?? 0),
-      replaysCount: Number(replayRows?.[0]?.c ?? 0),
+      scoresCount: globalScores.length,
+      replaysCount: replays.length,
       missingAssetSongsCount: missingAssetSongs.length,
       missingAssetSongs,
+      replayLinkIssuesCount: replayLinkIssues.length,
+      replayLinkIssues,
+      globalScoreLinkIssuesCount: globalScoreLinkIssues.length,
+      globalScoreLinkIssues,
+      configurationIssues: [],
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to run integrity check.";

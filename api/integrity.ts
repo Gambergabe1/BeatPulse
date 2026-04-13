@@ -17,7 +17,55 @@ interface IntegrityReport {
   replaysCount: number;
   missingAssetSongsCount: number;
   missingAssetSongs: SongStorageIssue[];
+  replayLinkIssuesCount: number;
+  replayLinkIssues: ReplayLinkIssue[];
+  globalScoreLinkIssuesCount: number;
+  globalScoreLinkIssues: GlobalScoreLinkIssue[];
   configurationIssues: string[];
+}
+
+interface ReplayLinkIssue {
+  id: string;
+  songId: string;
+  songName: string;
+  artist: string;
+  issue: "missing-song" | "metadata-mismatch";
+  expectedSongId?: string;
+  expectedSongName?: string;
+  expectedArtist?: string;
+}
+
+interface GlobalScoreLinkIssue {
+  id: string;
+  songId?: string;
+  songName: string;
+  artist: string;
+  issue: "missing-song" | "missing-song-link" | "metadata-mismatch";
+  expectedSongId?: string;
+  expectedSongName?: string;
+  expectedArtist?: string;
+}
+
+interface SongRow {
+  id: string;
+  name: string;
+  artist: string;
+  audio_url: string;
+  notes_url: string;
+}
+
+interface GlobalScoreRow {
+  id: string;
+  song_id?: string;
+  song_name: string;
+  artist: string;
+}
+
+interface ReplayRow {
+  id: string;
+  song_id: string;
+  song_name: string;
+  artist: string;
 }
 
 function ok(res: any, data: IntegrityReport) {
@@ -51,6 +99,84 @@ async function ensureSongColumns() {
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS notes_url TEXT`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS notes_path TEXT`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
+}
+
+async function ensureGlobalScoreColumns() {
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS id TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS song_id TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS song_name TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS artist TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
+}
+
+async function ensureReplayColumns() {
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS id TEXT`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS song_id TEXT`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS song_name TEXT`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS artist TEXT`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
+}
+
+function toLookupKey(name: string, artist: string) {
+  return `${name.trim().toLowerCase()}::${artist.trim().toLowerCase()}`;
+}
+
+function buildSongLookup(songRows: SongRow[]) {
+  const byId = new Map<string, SongRow>();
+  const byMetadata = new Map<string, SongRow[]>();
+
+  songRows.forEach((song) => {
+    const normalizedSong: SongRow = {
+      id: toText(song.id, ""),
+      name: toText(song.name, "Untitled"),
+      artist: toText(song.artist, "Unknown Artist"),
+      audio_url: toText(song.audio_url, ""),
+      notes_url: toText(song.notes_url, ""),
+    };
+
+    byId.set(normalizedSong.id, normalizedSong);
+    const key = toLookupKey(normalizedSong.name, normalizedSong.artist);
+    const bucket = byMetadata.get(key) || [];
+    bucket.push(normalizedSong);
+    byMetadata.set(key, bucket);
+  });
+
+  return { byId, byMetadata };
+}
+
+function getUniqueSongMatch(
+  lookup: ReturnType<typeof buildSongLookup>,
+  songName: string,
+  artist: string
+) {
+  const matches = lookup.byMetadata.get(toLookupKey(songName, artist)) || [];
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function resolveSongForReplay(
+  replay: ReplayRow,
+  lookup: ReturnType<typeof buildSongLookup>
+) {
+  const replaySongId = toText(replay.song_id, "");
+  if (replaySongId) {
+    const linked = lookup.byId.get(replaySongId);
+    if (linked) return linked;
+  }
+
+  return getUniqueSongMatch(lookup, toText(replay.song_name, ""), toText(replay.artist, ""));
+}
+
+function resolveSongForGlobalScore(
+  score: GlobalScoreRow,
+  lookup: ReturnType<typeof buildSongLookup>
+) {
+  const scoreSongId = toText(score.song_id, "");
+  if (scoreSongId) {
+    const linked = lookup.byId.get(scoreSongId);
+    if (linked) return linked;
+  }
+
+  return getUniqueSongMatch(lookup, toText(score.song_name, ""), toText(score.artist, ""));
 }
 
 function isAbsoluteHttpUrl(value: string) {
@@ -119,6 +245,10 @@ export default async function handler(_req: any, res: any) {
     replaysCount: 0,
     missingAssetSongsCount: 0,
     missingAssetSongs: [],
+    replayLinkIssuesCount: 0,
+    replayLinkIssues: [],
+    globalScoreLinkIssuesCount: 0,
+    globalScoreLinkIssues: [],
     configurationIssues: [],
   };
 
@@ -140,8 +270,14 @@ export default async function handler(_req: any, res: any) {
     }
 
     await ensureSongColumns();
+    if (globalScoresTablePresent) {
+      await ensureGlobalScoreColumns();
+    }
+    if (replaysTablePresent) {
+      await ensureReplayColumns();
+    }
 
-    const [{ rows: songRows }, { rows: globalRows }, { rows: replayRows }] = await Promise.all([
+    const [{ rows: songRows }, { rows: globalRows }, { rows: replayRows }, { rows: globalScoreRows }, { rows: replayDataRows }] = await Promise.all([
       sql`
         SELECT id, name, artist, audio_url, audio_path, notes_url, notes_path
         FROM songs
@@ -153,6 +289,12 @@ export default async function handler(_req: any, res: any) {
       replaysTablePresent
         ? sql`SELECT COUNT(*) AS c FROM replays`
         : Promise.resolve({ rows: [{ c: 0 }] }),
+      globalScoresTablePresent
+        ? sql`SELECT id, song_id, song_name, artist FROM global_scores`
+        : Promise.resolve({ rows: [] }),
+      replaysTablePresent
+        ? sql`SELECT id, song_id, song_name, artist FROM replays`
+        : Promise.resolve({ rows: [] }),
     ]);
 
     report.songsCount = songRows.length;
@@ -179,6 +321,93 @@ export default async function handler(_req: any, res: any) {
 
     report.missingAssetSongs = missingAssetSongs.filter((song) => song.missingAudio || song.missingNotes);
     report.missingAssetSongsCount = report.missingAssetSongs.length;
+
+    const lookup = buildSongLookup(songRows as SongRow[]);
+    report.globalScoreLinkIssues = [];
+    (globalScoreRows as GlobalScoreRow[]).forEach((score) => {
+      const linkedSong = resolveSongForGlobalScore(score, lookup);
+      const scoreSongId = toText(score.song_id, "");
+      const scoreSongName = toText(score.song_name, "Unknown Song");
+      const scoreArtist = toText(score.artist, "Unknown Artist");
+
+      if (!linkedSong) {
+        if (scoreSongId) {
+          report.globalScoreLinkIssues.push({
+              id: toText(score.id, ""),
+              songId: scoreSongId,
+              songName: scoreSongName,
+              artist: scoreArtist,
+              issue: "missing-song" as const,
+            });
+        }
+        return;
+      }
+
+      if (!scoreSongId) {
+        report.globalScoreLinkIssues.push({
+          id: toText(score.id, ""),
+          songId: scoreSongId,
+          songName: scoreSongName,
+          artist: scoreArtist,
+          issue: "missing-song-link" as const,
+          expectedSongId: linkedSong.id,
+          expectedSongName: linkedSong.name,
+          expectedArtist: linkedSong.artist,
+        });
+        return;
+      }
+
+      if (scoreSongName !== linkedSong.name || scoreArtist !== linkedSong.artist) {
+        report.globalScoreLinkIssues.push({
+          id: toText(score.id, ""),
+          songId: scoreSongId,
+          songName: scoreSongName,
+          artist: scoreArtist,
+          issue: "metadata-mismatch" as const,
+          expectedSongId: linkedSong.id,
+          expectedSongName: linkedSong.name,
+          expectedArtist: linkedSong.artist,
+        });
+      }
+    });
+    report.globalScoreLinkIssuesCount = report.globalScoreLinkIssues.length;
+
+    report.replayLinkIssues = [];
+    (replayDataRows as ReplayRow[]).forEach((replay) => {
+      const linkedSong = resolveSongForReplay(replay, lookup);
+      const replaySongId = toText(replay.song_id, "");
+      const replaySongName = toText(replay.song_name, "Unknown Song");
+      const replayArtist = toText(replay.artist, "Unknown Artist");
+
+      if (!linkedSong) {
+        report.replayLinkIssues.push({
+          id: toText(replay.id, ""),
+          songId: replaySongId,
+          songName: replaySongName,
+          artist: replayArtist,
+          issue: "missing-song" as const,
+        });
+        return;
+      }
+
+      if (
+        replaySongId !== linkedSong.id ||
+        replaySongName !== linkedSong.name ||
+        replayArtist !== linkedSong.artist
+      ) {
+        report.replayLinkIssues.push({
+          id: toText(replay.id, ""),
+          songId: replaySongId,
+          songName: replaySongName,
+          artist: replayArtist,
+          issue: "metadata-mismatch" as const,
+          expectedSongId: linkedSong.id,
+          expectedSongName: linkedSong.name,
+          expectedArtist: linkedSong.artist,
+        });
+      }
+    });
+    report.replayLinkIssuesCount = report.replayLinkIssues.length;
 
     if (!globalScoresTablePresent) {
       report.configurationIssues.push("Global scores table was not found in the configured database.");

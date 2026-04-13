@@ -3,7 +3,7 @@ import { sql } from "@vercel/postgres";
 
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7;
-const STORAGE_SCHEMA_VERSION = 2;
+const STORAGE_SCHEMA_VERSION = 3;
 
 type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
@@ -63,6 +63,7 @@ interface ReplayRecord {
 
 interface GlobalScoreRecord {
   id: string;
+  songId?: string;
   score: number;
   accuracy: number;
   date: string;
@@ -76,6 +77,16 @@ interface StorageNormalizedRows {
   songs: number;
   globalScores: number;
   replays: number;
+}
+
+interface DataRelationshipMaintenance {
+  linkedGlobalScores: number;
+  updatedGlobalScoreMetadata: number;
+  linkedReplays: number;
+  updatedReplayMetadata: number;
+  removedOrphanReplays: number;
+  unresolvedGlobalScores: number;
+  unresolvedReplays: number;
 }
 
 function ok(res: any, data: unknown) {
@@ -159,6 +170,58 @@ function canonicalizeSongAssetPath(id: string, candidate: string | null, fallbac
   if (!candidate) return `songs/${id}/${fallbackFileName}`;
   if (candidate.startsWith("songs/")) return candidate;
   return `songs/${id}/${fileName}`;
+}
+
+function toLookupKey(name: string, artist: string) {
+  return `${name.trim().toLowerCase()}::${artist.trim().toLowerCase()}`;
+}
+
+function buildSongLookup(songs: CommunitySongRecord[]) {
+  const byId = new Map<string, CommunitySongRecord>();
+  const byMetadata = new Map<string, CommunitySongRecord[]>();
+
+  songs.forEach((song) => {
+    byId.set(song.id, song);
+    const key = toLookupKey(song.name, song.artist);
+    const bucket = byMetadata.get(key) || [];
+    bucket.push(song);
+    byMetadata.set(key, bucket);
+  });
+
+  return { byId, byMetadata };
+}
+
+function getUniqueSongMatch(
+  lookup: ReturnType<typeof buildSongLookup>,
+  name: string,
+  artist: string
+) {
+  const matches = lookup.byMetadata.get(toLookupKey(name, artist)) || [];
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function resolveSongForReplay(
+  replay: Pick<ReplayRecord, "songId" | "songName" | "artist">,
+  lookup: ReturnType<typeof buildSongLookup>
+) {
+  if (replay.songId) {
+    const linked = lookup.byId.get(replay.songId);
+    if (linked) return linked;
+  }
+
+  return getUniqueSongMatch(lookup, replay.songName, replay.artist);
+}
+
+function resolveSongForGlobalScore(
+  score: Pick<GlobalScoreRecord, "songId" | "songName" | "artist">,
+  lookup: ReturnType<typeof buildSongLookup>
+) {
+  if (score.songId) {
+    const linked = lookup.byId.get(score.songId);
+    if (linked) return linked;
+  }
+
+  return getUniqueSongMatch(lookup, score.songName, score.artist);
 }
 
 function sortScoresDesc(scores: ScoreRecord[]) {
@@ -254,6 +317,7 @@ function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
   const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
   return {
     id: toText(row.id, crypto.randomUUID()),
+    songId: toText(row.song_id ?? row.songId, ""),
     score: clampNumber(row.score, 0),
     accuracy: clampNumber(row.accuracy, 0),
     date: toDisplayDate(row.date, createdAt),
@@ -343,6 +407,7 @@ async function prepareStorageSchema() {
   await sql`
     CREATE TABLE IF NOT EXISTS global_scores (
       id TEXT PRIMARY KEY,
+      song_id TEXT,
       score REAL NOT NULL,
       accuracy REAL NOT NULL,
       date TEXT NOT NULL,
@@ -393,6 +458,7 @@ async function prepareStorageSchema() {
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS status TEXT`;
 
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS id TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS song_id TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS song_name TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS artist TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
@@ -496,6 +562,89 @@ async function getStorageCollectionCounts(): Promise<StorageNormalizedRows> {
   };
 }
 
+async function readSongs(): Promise<CommunitySongRecord[]> {
+  const { rows } = await sql`SELECT * FROM songs ORDER BY created_at DESC`;
+  return rows.map(normalizeSongRow);
+}
+
+async function readGlobalScores(): Promise<GlobalScoreRecord[]> {
+  const { rows } = await sql`SELECT * FROM global_scores ORDER BY score DESC, created_at DESC`;
+  return rows.map(normalizeGlobalScoreRow);
+}
+
+async function readReplays(): Promise<ReplayRecord[]> {
+  const { rows } = await sql`SELECT * FROM replays ORDER BY created_at DESC`;
+  return rows.map(normalizeReplayRow);
+}
+
+async function reconcileDataRelationships(options?: { pruneOrphanReplays?: boolean }) {
+  const [songs, globalScores, replays] = await Promise.all([readSongs(), readGlobalScores(), readReplays()]);
+  const lookup = buildSongLookup(songs);
+  const pruneOrphanReplays = options?.pruneOrphanReplays ?? false;
+
+  const summary: DataRelationshipMaintenance = {
+    linkedGlobalScores: 0,
+    updatedGlobalScoreMetadata: 0,
+    linkedReplays: 0,
+    updatedReplayMetadata: 0,
+    removedOrphanReplays: 0,
+    unresolvedGlobalScores: 0,
+    unresolvedReplays: 0,
+  };
+
+  const { rows: globalRows } = await sql`SELECT ctid::text AS ctid, * FROM global_scores`;
+  for (const row of globalRows) {
+    const normalized = normalizeGlobalScoreRow(row);
+    const linkedSong = resolveSongForGlobalScore(normalized, lookup);
+    if (!linkedSong) {
+      if (normalized.songId) summary.unresolvedGlobalScores += 1;
+      continue;
+    }
+
+    const needsSongLink = normalized.songId !== linkedSong.id;
+    const needsMetadata = normalized.songName !== linkedSong.name || normalized.artist !== linkedSong.artist;
+    if (!needsSongLink && !needsMetadata) continue;
+
+    if (needsSongLink) summary.linkedGlobalScores += 1;
+    if (needsMetadata) summary.updatedGlobalScoreMetadata += 1;
+
+    await sql`
+      UPDATE global_scores
+      SET song_id = ${linkedSong.id}, song_name = ${linkedSong.name}, artist = ${linkedSong.artist}
+      WHERE ctid::text = ${row.ctid}
+    `;
+  }
+
+  const { rows: replayRows } = await sql`SELECT ctid::text AS ctid, * FROM replays`;
+  for (const row of replayRows) {
+    const normalized = normalizeReplayRow(row);
+    const linkedSong = resolveSongForReplay(normalized, lookup);
+    if (!linkedSong) {
+      summary.unresolvedReplays += 1;
+      if (pruneOrphanReplays) {
+        await sql`DELETE FROM replays WHERE ctid::text = ${row.ctid}`;
+        summary.removedOrphanReplays += 1;
+      }
+      continue;
+    }
+
+    const needsSongLink = normalized.songId !== linkedSong.id;
+    const needsMetadata = normalized.songName !== linkedSong.name || normalized.artist !== linkedSong.artist;
+    if (!needsSongLink && !needsMetadata) continue;
+
+    if (needsSongLink) summary.linkedReplays += 1;
+    if (needsMetadata) summary.updatedReplayMetadata += 1;
+
+    await sql`
+      UPDATE replays
+      SET song_id = ${linkedSong.id}, song_name = ${linkedSong.name}, artist = ${linkedSong.artist}
+      WHERE ctid::text = ${row.ctid}
+    `;
+  }
+
+  return summary;
+}
+
 async function migrateSongRows() {
   const { rows } = await sql`SELECT ctid::text AS ctid, * FROM songs`;
   let migrated = 0;
@@ -540,6 +689,7 @@ async function migrateGlobalScoreRows() {
       UPDATE global_scores
       SET
         id = ${normalized.id},
+        song_id = ${normalized.songId || null},
         score = ${normalized.score},
         accuracy = ${normalized.accuracy},
         date = ${normalized.date},
@@ -592,11 +742,17 @@ async function migratePersistedStorage() {
     migrateGlobalScoreRows(),
     migrateReplayRows(),
   ]);
+  const relationshipActions = await reconcileDataRelationships({ pruneOrphanReplays: true });
 
   await setStoredSchemaVersion({
     songsMigrated,
     globalScoresMigrated,
     replaysMigrated,
+    linkedGlobalScores: relationshipActions.linkedGlobalScores,
+    updatedGlobalScoreMetadata: relationshipActions.updatedGlobalScoreMetadata,
+    linkedReplays: relationshipActions.linkedReplays,
+    updatedReplayMetadata: relationshipActions.updatedReplayMetadata,
+    removedOrphanReplays: relationshipActions.removedOrphanReplays,
   });
 
   return {
@@ -607,6 +763,7 @@ async function migratePersistedStorage() {
       globalScores: globalScoresMigrated,
       replays: replaysMigrated,
     },
+    relationshipActions,
   };
 }
 

@@ -105,6 +105,7 @@ export default function App() {
 
       try {
         await saveGlobalScore({
+          songId: songData.id,
           score,
           accuracy,
           date: new Date().toLocaleDateString(),

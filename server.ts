@@ -21,7 +21,7 @@ const REPLAYS_FILE = path.join(DATA_DIR, "replays.json");
 const STORAGE_META_FILE = path.join(DATA_DIR, "storage-meta.json");
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
-const STORAGE_SCHEMA_VERSION = 2;
+const STORAGE_SCHEMA_VERSION = 3;
 
 interface AdminState {
   passwordHash: string;
@@ -75,6 +75,7 @@ interface ReplayRecord {
 
 interface GlobalScoreRecord {
   id: string;
+  songId?: string;
   score: number;
   accuracy: number;
   date: string;
@@ -106,6 +107,38 @@ interface StorageNormalizedRows {
   replays: number;
 }
 
+interface ReplayLinkIssue {
+  id: string;
+  songId: string;
+  songName: string;
+  artist: string;
+  issue: "missing-song" | "metadata-mismatch";
+  expectedSongId?: string;
+  expectedSongName?: string;
+  expectedArtist?: string;
+}
+
+interface GlobalScoreLinkIssue {
+  id: string;
+  songId?: string;
+  songName: string;
+  artist: string;
+  issue: "missing-song" | "missing-song-link" | "metadata-mismatch";
+  expectedSongId?: string;
+  expectedSongName?: string;
+  expectedArtist?: string;
+}
+
+interface DataRelationshipMaintenance {
+  linkedGlobalScores: number;
+  updatedGlobalScoreMetadata: number;
+  linkedReplays: number;
+  updatedReplayMetadata: number;
+  removedOrphanReplays: number;
+  unresolvedGlobalScores: number;
+  unresolvedReplays: number;
+}
+
 interface StorageMetaRecord {
   schemaVersion: number;
   updatedAt: string;
@@ -113,6 +146,7 @@ interface StorageMetaRecord {
   backups: string[];
   checkedCollections: string[];
   normalizedRows: StorageNormalizedRows;
+  relationshipActions?: DataRelationshipMaintenance;
 }
 
 function ensureDirectories() {
@@ -253,6 +287,58 @@ function toLocalUploadUrl(relativePath: string) {
   return `/api/uploads/${relativePath.replace(/\\/g, "/")}`;
 }
 
+function toLookupKey(name: string, artist: string) {
+  return `${name.trim().toLowerCase()}::${artist.trim().toLowerCase()}`;
+}
+
+function buildSongLookup(songs: CommunitySongRecord[]) {
+  const byId = new Map<string, CommunitySongRecord>();
+  const byMetadata = new Map<string, CommunitySongRecord[]>();
+
+  songs.forEach((song) => {
+    byId.set(song.id, song);
+    const key = toLookupKey(song.name, song.artist);
+    const bucket = byMetadata.get(key) || [];
+    bucket.push(song);
+    byMetadata.set(key, bucket);
+  });
+
+  return { byId, byMetadata };
+}
+
+function getUniqueSongMatch(
+  lookup: ReturnType<typeof buildSongLookup>,
+  name: string,
+  artist: string
+) {
+  const matches = lookup.byMetadata.get(toLookupKey(name, artist)) || [];
+  return matches.length === 1 ? matches[0] : null;
+}
+
+function resolveSongForReplay(
+  replay: Pick<ReplayRecord, "songId" | "songName" | "artist">,
+  lookup: ReturnType<typeof buildSongLookup>
+) {
+  if (replay.songId) {
+    const byId = lookup.byId.get(replay.songId);
+    if (byId) return byId;
+  }
+
+  return getUniqueSongMatch(lookup, replay.songName, replay.artist);
+}
+
+function resolveSongForGlobalScore(
+  score: Pick<GlobalScoreRecord, "songId" | "songName" | "artist">,
+  lookup: ReturnType<typeof buildSongLookup>
+) {
+  if (score.songId) {
+    const byId = lookup.byId.get(score.songId);
+    if (byId) return byId;
+  }
+
+  return getUniqueSongMatch(lookup, score.songName, score.artist);
+}
+
 function normalizeScoreRecord(raw: any, createdAt: string): ScoreRecord {
   return {
     score: clampNumber(raw?.score, 0),
@@ -308,6 +394,7 @@ function normalizeGlobalScoreRecord(raw: any): GlobalScoreRecord {
   const createdAt = toIsoTimestamp(raw?.createdAt ?? raw?.created_at);
   return {
     id: toText(raw?.id, crypto.randomUUID()),
+    songId: toText(raw?.songId ?? raw?.song_id, ""),
     score: clampNumber(raw?.score, 0),
     accuracy: clampNumber(raw?.accuracy, 0),
     date: toDisplayDate(raw?.date, createdAt),
@@ -366,7 +453,210 @@ function writeReplays(replays: ReplayRecord[]) {
   writeCollection(REPLAYS_FILE, replays);
 }
 
-function migrateLocalStorage(): StorageMetaRecord {
+function reconcileLocalDataRelationships(options?: { pruneOrphanReplays?: boolean }): DataRelationshipMaintenance {
+  const songs = readSongs();
+  const globalScores = readGlobalScores();
+  const replays = readReplays();
+  const lookup = buildSongLookup(songs);
+  const pruneOrphanReplays = options?.pruneOrphanReplays ?? false;
+
+  const summary: DataRelationshipMaintenance = {
+    linkedGlobalScores: 0,
+    updatedGlobalScoreMetadata: 0,
+    linkedReplays: 0,
+    updatedReplayMetadata: 0,
+    removedOrphanReplays: 0,
+    unresolvedGlobalScores: 0,
+    unresolvedReplays: 0,
+  };
+
+  let globalScoresChanged = false;
+  const nextGlobalScores = globalScores.map((score) => {
+    const linkedSong = resolveSongForGlobalScore(score, lookup);
+    if (!linkedSong) {
+      if (score.songId) {
+        summary.unresolvedGlobalScores += 1;
+      }
+      return score;
+    }
+
+    const nextSongId = linkedSong.id;
+    const nextSongName = linkedSong.name;
+    const nextArtist = linkedSong.artist;
+    const needsSongLink = score.songId !== nextSongId;
+    const needsMetadata = score.songName !== nextSongName || score.artist !== nextArtist;
+
+    if (!needsSongLink && !needsMetadata) {
+      return score;
+    }
+
+    if (needsSongLink) summary.linkedGlobalScores += 1;
+    if (needsMetadata) summary.updatedGlobalScoreMetadata += 1;
+    globalScoresChanged = true;
+
+    return {
+      ...score,
+      songId: nextSongId,
+      songName: nextSongName,
+      artist: nextArtist,
+    };
+  });
+
+  let replayChanged = false;
+  const nextReplays: ReplayRecord[] = [];
+  for (const replay of replays) {
+    const linkedSong = resolveSongForReplay(replay, lookup);
+    if (!linkedSong) {
+      summary.unresolvedReplays += 1;
+      if (pruneOrphanReplays) {
+        summary.removedOrphanReplays += 1;
+        replayChanged = true;
+        continue;
+      }
+
+      nextReplays.push(replay);
+      continue;
+    }
+
+    const needsSongLink = replay.songId !== linkedSong.id;
+    const needsMetadata = replay.songName !== linkedSong.name || replay.artist !== linkedSong.artist;
+    if (!needsSongLink && !needsMetadata) {
+      nextReplays.push(replay);
+      continue;
+    }
+
+    if (needsSongLink) summary.linkedReplays += 1;
+    if (needsMetadata) summary.updatedReplayMetadata += 1;
+    replayChanged = true;
+    nextReplays.push({
+      ...replay,
+      songId: linkedSong.id,
+      songName: linkedSong.name,
+      artist: linkedSong.artist,
+    });
+  }
+
+  if (globalScoresChanged) {
+    writeGlobalScores(sortGlobalScoresDesc(nextGlobalScores));
+  }
+
+  if (replayChanged) {
+    writeReplays(sortReplaysDesc(nextReplays));
+  }
+
+  return summary;
+}
+
+function collectLocalIntegrityReport() {
+  const songs = readSongs();
+  const scores = readGlobalScores();
+  const replays = readReplays();
+  const lookup = buildSongLookup(songs);
+
+  const missingAssetSongs = songs
+    .map((song) => {
+      const { missingAudio, missingNotes } = hasSongAssets(song);
+      return {
+        id: song.id,
+        name: song.name,
+        artist: song.artist,
+        missingAudio,
+        missingNotes,
+      } as SongStorageIssue;
+    })
+    .filter((issue) => issue.missingAudio || issue.missingNotes);
+
+  const replayLinkIssues: ReplayLinkIssue[] = [];
+  replays.forEach((replay) => {
+    const linkedSong = resolveSongForReplay(replay, lookup);
+    if (!linkedSong) {
+      replayLinkIssues.push({
+        id: replay.id,
+        songId: replay.songId,
+        songName: replay.songName,
+        artist: replay.artist,
+        issue: "missing-song" as const,
+      });
+      return;
+    }
+
+    if (
+      replay.songId !== linkedSong.id ||
+      replay.songName !== linkedSong.name ||
+      replay.artist !== linkedSong.artist
+    ) {
+      replayLinkIssues.push({
+        id: replay.id,
+        songId: replay.songId,
+        songName: replay.songName,
+        artist: replay.artist,
+        issue: "metadata-mismatch" as const,
+        expectedSongId: linkedSong.id,
+        expectedSongName: linkedSong.name,
+        expectedArtist: linkedSong.artist,
+      });
+    }
+  });
+
+  const globalScoreLinkIssues: GlobalScoreLinkIssue[] = [];
+  scores.forEach((score) => {
+    const linkedSong = resolveSongForGlobalScore(score, lookup);
+    if (!linkedSong) {
+      if (score.songId) {
+        globalScoreLinkIssues.push({
+            id: score.id,
+            songId: score.songId,
+            songName: score.songName,
+            artist: score.artist,
+            issue: "missing-song" as const,
+          });
+      }
+      return;
+    }
+
+    if (!score.songId) {
+      globalScoreLinkIssues.push({
+        id: score.id,
+        songId: score.songId,
+        songName: score.songName,
+        artist: score.artist,
+        issue: "missing-song-link" as const,
+        expectedSongId: linkedSong.id,
+        expectedSongName: linkedSong.name,
+        expectedArtist: linkedSong.artist,
+      });
+      return;
+    }
+
+    if (score.songName !== linkedSong.name || score.artist !== linkedSong.artist) {
+      globalScoreLinkIssues.push({
+        id: score.id,
+        songId: score.songId,
+        songName: score.songName,
+        artist: score.artist,
+        issue: "metadata-mismatch" as const,
+        expectedSongId: linkedSong.id,
+        expectedSongName: linkedSong.name,
+        expectedArtist: linkedSong.artist,
+      });
+    }
+  });
+
+  return {
+    songsCount: songs.length,
+    scoresCount: scores.length,
+    replaysCount: replays.length,
+    missingAssetSongsCount: missingAssetSongs.length,
+    missingAssetSongs,
+    replayLinkIssuesCount: replayLinkIssues.length,
+    replayLinkIssues,
+    globalScoreLinkIssuesCount: globalScoreLinkIssues.length,
+    globalScoreLinkIssues,
+    configurationIssues: [] as string[],
+  };
+}
+
+function migrateLocalStorage(options?: { pruneOrphanReplays?: boolean }): StorageMetaRecord {
   const migratedCollections: string[] = [];
   const backups: string[] = [];
   const checkedCollections = ["songs", "global-scores", "replays"];
@@ -404,6 +694,10 @@ function migrateLocalStorage(): StorageMetaRecord {
     migratedCollections.push("replays");
   }
 
+  const relationshipActions = reconcileLocalDataRelationships({
+    pruneOrphanReplays: options?.pruneOrphanReplays,
+  });
+
   const meta: StorageMetaRecord = {
     schemaVersion: STORAGE_SCHEMA_VERSION,
     updatedAt: new Date().toISOString(),
@@ -411,6 +705,7 @@ function migrateLocalStorage(): StorageMetaRecord {
     backups,
     checkedCollections,
     normalizedRows,
+    relationshipActions,
   };
 
   writeCollection(STORAGE_META_FILE, meta);
@@ -621,7 +916,7 @@ async function startServer() {
   app.post("/api/admin/storage/force-update", requireAdmin, (_req, res) => {
     try {
       ensureDirectories();
-      const meta = migrateLocalStorage();
+      const meta = migrateLocalStorage({ pruneOrphanReplays: true });
       const songs = readSongs();
       const globalScores = readGlobalScores();
       const replays = readReplays();
@@ -635,6 +930,7 @@ async function startServer() {
         songsCount: songs.length,
         globalScoresCount: globalScores.length,
         replaysCount: replays.length,
+        relationshipActions: meta.relationshipActions,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Failed to force storage update.";
@@ -799,6 +1095,45 @@ async function startServer() {
     };
     songs[index] = next as CommunitySongRecord;
     writeSongs(songs);
+
+    const currentGlobalScores = readGlobalScores();
+    const nextGlobalScores = currentGlobalScores.map((score) => {
+      const matchesSong =
+        score.songId === current.id ||
+        ((!score.songId || score.songId.trim() === "") &&
+          score.songName === current.name &&
+          score.artist === current.artist);
+
+      return matchesSong
+        ? {
+            ...score,
+            songId: current.id,
+            songName: next.name,
+            artist: next.artist,
+          }
+        : score;
+    });
+    writeGlobalScores(sortGlobalScoresDesc(nextGlobalScores));
+
+    const currentReplays = readReplays();
+    const nextReplays = currentReplays.map((replay) => {
+      const matchesSong =
+        replay.songId === current.id ||
+        ((!replay.songId || replay.songId.trim() === "") &&
+          replay.songName === current.name &&
+          replay.artist === current.artist);
+
+      return matchesSong
+        ? {
+            ...replay,
+            songId: current.id,
+            songName: next.name,
+            artist: next.artist,
+          }
+        : replay;
+    });
+    writeReplays(sortReplaysDesc(nextReplays));
+
     return ok(res, next as CommunitySongRecord);
   });
 
@@ -837,6 +1172,18 @@ async function startServer() {
     const nextSongs = songs.filter((entry) => entry.id !== req.params.id);
     writeSongs(nextSongs);
 
+    const nextGlobalScores = readGlobalScores().filter((score) => {
+      if (score.songId === song.id) return false;
+      if ((!score.songId || score.songId.trim() === "") && score.songName === song.name && score.artist === song.artist) {
+        return false;
+      }
+      return true;
+    });
+    writeGlobalScores(sortGlobalScoresDesc(nextGlobalScores));
+
+    const nextReplays = readReplays().filter((replay) => replay.songId !== song.id);
+    writeReplays(sortReplaysDesc(nextReplays));
+
     const songDir = path.join(UPLOAD_DIR, "songs", req.params.id);
     const legacySongDir = path.join(UPLOAD_DIR, req.params.id);
     if (fs.existsSync(songDir)) {
@@ -863,8 +1210,7 @@ async function startServer() {
   app.post("/api/global-scores", (req, res) => {
     const score = clampNumber(req.body?.score, Number.NaN);
     const accuracy = clampNumber(req.body?.accuracy, Number.NaN);
-    const songName = (typeof req.body?.songName === "string" && req.body.songName.trim()) || "Unknown Song";
-    const artist = (typeof req.body?.artist === "string" && req.body.artist.trim()) || "Unknown Artist";
+    const requestedSongId = (typeof req.body?.songId === "string" && req.body.songId.trim()) || "";
     const username = (typeof req.body?.username === "string" && req.body.username.trim()) || "Anonymous";
     const date = (typeof req.body?.date === "string" && req.body.date.trim()) || new Date().toLocaleDateString();
 
@@ -872,9 +1218,21 @@ async function startServer() {
       return fail(res, 400, "Score and accuracy must be numbers.");
     }
 
+    const linkedSong = requestedSongId ? readSongs().find((entry) => entry.id === requestedSongId) || null : null;
+    if (requestedSongId && !linkedSong) {
+      return fail(res, 404, "Song not found.");
+    }
+
+    const songName = linkedSong
+      ? linkedSong.name
+      : (typeof req.body?.songName === "string" && req.body.songName.trim()) || "Unknown Song";
+    const artist = linkedSong
+      ? linkedSong.artist
+      : (typeof req.body?.artist === "string" && req.body.artist.trim()) || "Unknown Artist";
     const scores = readGlobalScores();
     const newScore: GlobalScoreRecord = {
       id: crypto.randomUUID(),
+      songId: linkedSong?.id || requestedSongId || undefined,
       score,
       accuracy,
       date,
@@ -904,12 +1262,17 @@ async function startServer() {
       return fail(res, 400, "songId, songName, score and accuracy are required.");
     }
 
+    const linkedSong = readSongs().find((entry) => entry.id === songId);
+    if (!linkedSong) {
+      return fail(res, 404, "Song not found.");
+    }
+
     const replays = readReplays();
     const newReplay: ReplayRecord = {
       id: crypto.randomUUID(),
-      songId,
-      songName,
-      artist: (typeof body.artist === "string" && body.artist.trim()) || "Unknown Artist",
+      songId: linkedSong.id,
+      songName: linkedSong.name,
+      artist: linkedSong.artist,
       difficulty: clampNumber(body.difficulty, 0.5),
       density: clampNumber(body.density, 0.5),
       laneVariety: clampNumber(body.laneVariety, 0.5),
@@ -927,29 +1290,7 @@ async function startServer() {
   });
 
   app.get("/api/integrity", (_req, res) => {
-    const songs = readSongs();
-    const scores = readGlobalScores();
-    const replays = readReplays();
-    const storageIssues = songs
-      .map((song) => {
-        const { missingAudio, missingNotes } = hasSongAssets(song);
-        return {
-          id: song.id,
-          name: song.name,
-          artist: song.artist,
-          missingAudio,
-          missingNotes,
-        } as SongStorageIssue;
-      })
-      .filter((issue) => issue.missingAudio || issue.missingNotes);
-
-    return ok(res, {
-      songsCount: songs.length,
-      scoresCount: scores.length,
-      replaysCount: replays.length,
-      missingAssetSongsCount: storageIssues.length,
-      missingAssetSongs: storageIssues,
-    });
+    return ok(res, collectLocalIntegrityReport());
   });
 
   app.get("/api/audio-proxy", async (req, res) => {

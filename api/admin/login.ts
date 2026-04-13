@@ -5,7 +5,7 @@ import {
   ok,
   prepareAdminStateSchema,
   verifyPassword,
-} from "./shared";
+} from "./shared.ts";
 
 export default async function handler(req: any, res: any) {
   if (req.method !== "POST") {

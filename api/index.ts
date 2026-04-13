@@ -3,7 +3,7 @@ import { sql } from "@vercel/postgres";
 import multer from "multer";
 import { put, del as deleteBlob } from "@vercel/blob";
 import crypto from "crypto";
-import { handleBlobUploadRequest } from "./blob-upload-handler";
+import { handleBlobUploadRequest } from "./blob-upload-handler.ts";
 
 const app = express();
 const uploader = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 150 } });

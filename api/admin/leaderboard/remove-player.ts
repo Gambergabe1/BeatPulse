@@ -11,7 +11,7 @@ import {
   toIsoTimestamp,
   toText,
   verifyAdminToken,
-} from "../shared";
+} from "../shared.ts";
 
 type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
 

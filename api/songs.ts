@@ -1,5 +1,7 @@
 import * as crypto from "node:crypto";
 import { sql } from "@vercel/postgres";
+import multer from "multer";
+import { put } from "@vercel/blob";
 
 type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
@@ -30,6 +32,9 @@ interface CommunitySongRecord {
   status: "ready";
 }
 
+const uploader = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 150 } });
+const BLOB_WRITE_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
+
 function ok(res: any, data: unknown) {
   return res.status(200).json({ success: true, data });
 }
@@ -41,6 +46,12 @@ function fail(res: any, status: number, error: string) {
 function ensureDatabaseConfig() {
   if (!process.env.POSTGRES_URL && !process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL/POSTGRES_URL is not configured.");
+  }
+}
+
+function ensureBlobConfig() {
+  if (!BLOB_WRITE_TOKEN) {
+    throw new Error("BLOB_READ_WRITE_TOKEN is not configured.");
   }
 }
 
@@ -188,6 +199,41 @@ function parseRequestBody(req: any) {
   return {};
 }
 
+function sanitizeFileName(input: string) {
+  return input.replace(/[^\w.-]/g, "_").replace(/_+/g, "_").slice(0, 120) || "upload";
+}
+
+function isMultipartRequest(req: any) {
+  const contentType = typeof req.headers?.["content-type"] === "string" ? req.headers["content-type"] : "";
+  return contentType.toLowerCase().includes("multipart/form-data");
+}
+
+function runMiddleware(req: any, res: any, middleware: (req: any, res: any, next: (error?: unknown) => void) => void) {
+  return new Promise<void>((resolve, reject) => {
+    middleware(req, res, (error?: unknown) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve();
+    });
+  });
+}
+
+function parseNotesPayload(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
 async function prepareSongsSchema() {
   ensureDatabaseConfig();
 
@@ -247,30 +293,79 @@ async function handleGet(res: any) {
 async function handlePost(req: any, res: any) {
   await prepareSongsSchema();
 
-  const body = parseRequestBody(req);
-  const id = typeof body.id === "string" ? body.id.trim() : "";
-  const audioUrl = typeof body.audioUrl === "string" ? body.audioUrl.trim() : "";
-  const notesUrl = typeof body.notesUrl === "string" ? body.notesUrl.trim() : "";
-  const providedAudioPath = extractRelativeAssetPath(body.audioPath);
-  const providedNotesPath = extractRelativeAssetPath(body.notesPath);
-
-  if (!id || !isSafeSongId(id)) {
-    return fail(res, 400, "A valid song id is required.");
+  if (isMultipartRequest(req)) {
+    await runMiddleware(req, res, uploader.single("audio"));
   }
 
-  if (!audioUrl || !notesUrl || !providedAudioPath || !providedNotesPath) {
-    return fail(res, 400, "Uploaded song asset details are required.");
-  }
+  const body = req.file ? (req.body as Record<string, unknown>) : parseRequestBody(req);
+  const createdAt = new Date().toISOString();
+  const name = typeof body.name === "string" && body.name.trim() ? body.name.trim() : "Untitled";
+  const artist = typeof body.artist === "string" && body.artist.trim() ? body.artist.trim() : "Unknown Artist";
+  const authorName =
+    typeof body.authorName === "string" && body.authorName.trim() ? body.authorName.trim() : "Anonymous";
+  const difficulty = clampNumber(body.difficulty, 0.5);
+  const density = clampNumber(body.density, 0.5);
+  const laneVariety = clampNumber(body.laneVariety, 0.5);
+  const sliderProbability = clampNumber(body.sliderProbability, 0.3);
+  const stamina = clampNumber(body.stamina, 0.5);
 
-  const audioPath = canonicalizeSongAssetPath(id, providedAudioPath, "audio.mp3");
-  const notesPath = canonicalizeSongAssetPath(id, providedNotesPath, "notes.json");
-  if (
-    !isAbsoluteHttpUrl(audioUrl) ||
-    !isAbsoluteHttpUrl(notesUrl) ||
-    !isSafeSongAssetPath(id, audioPath) ||
-    !isSafeSongAssetPath(id, notesPath)
-  ) {
-    return fail(res, 400, "Uploaded asset details are invalid.");
+  let id = "";
+  let audioUrl = "";
+  let audioPath = "";
+  let notesUrl = "";
+  let notesPath = "";
+
+  if (req.file) {
+    ensureBlobConfig();
+    id = crypto.randomUUID();
+
+    const fileExt = (req.file.originalname || ".mp3").match(/\.[0-9a-z]{1,8}$/i)?.[0] || ".mp3";
+    const safeAudioName = sanitizeFileName(
+      req.file.originalname ? req.file.originalname.replace(fileExt, "") : "audio"
+    );
+    audioPath = `songs/${id}/${safeAudioName}${fileExt}`;
+    notesPath = `songs/${id}/notes.json`;
+
+    const [audioUpload, notesUpload] = await Promise.all([
+      put(audioPath, req.file.buffer, {
+        access: "public",
+        token: BLOB_WRITE_TOKEN,
+        contentType: req.file.mimetype || undefined,
+      }),
+      put(notesPath, JSON.stringify(parseNotesPayload(body.notes)), {
+        access: "public",
+        token: BLOB_WRITE_TOKEN,
+        contentType: "application/json",
+      }),
+    ]);
+
+    audioUrl = audioUpload.url;
+    notesUrl = notesUpload.url;
+  } else {
+    id = typeof body.id === "string" ? body.id.trim() : "";
+    audioUrl = typeof body.audioUrl === "string" ? body.audioUrl.trim() : "";
+    notesUrl = typeof body.notesUrl === "string" ? body.notesUrl.trim() : "";
+    const providedAudioPath = extractRelativeAssetPath(body.audioPath);
+    const providedNotesPath = extractRelativeAssetPath(body.notesPath);
+
+    if (!id || !isSafeSongId(id)) {
+      return fail(res, 400, "A valid song id is required.");
+    }
+
+    if (!audioUrl || !notesUrl || !providedAudioPath || !providedNotesPath) {
+      return fail(res, 400, "Uploaded song asset details are required.");
+    }
+
+    audioPath = canonicalizeSongAssetPath(id, providedAudioPath, "audio.mp3");
+    notesPath = canonicalizeSongAssetPath(id, providedNotesPath, "notes.json");
+    if (
+      !isAbsoluteHttpUrl(audioUrl) ||
+      !isAbsoluteHttpUrl(notesUrl) ||
+      !isSafeSongAssetPath(id, audioPath) ||
+      !isSafeSongAssetPath(id, notesPath)
+    ) {
+      return fail(res, 400, "Uploaded asset details are invalid.");
+    }
   }
 
   if (await readSong(id)) {
@@ -279,22 +374,21 @@ async function handlePost(req: any, res: any) {
 
   const song: CommunitySongRecord = {
     id,
-    name: typeof body.name === "string" && body.name.trim() ? body.name.trim() : "Untitled",
-    artist: typeof body.artist === "string" && body.artist.trim() ? body.artist.trim() : "Unknown Artist",
+    name,
+    artist,
     audioUrl,
     audioPath,
     notesUrl,
     notesPath,
-    difficulty: clampNumber(body.difficulty, 0.5),
-    density: clampNumber(body.density, 0.5),
-    laneVariety: clampNumber(body.laneVariety, 0.5),
-    sliderProbability: clampNumber(body.sliderProbability, 0.3),
-    stamina: clampNumber(body.stamina, 0.5),
+    difficulty,
+    density,
+    laneVariety,
+    sliderProbability,
+    stamina,
     topScore: 0,
     scores: [],
-    authorName:
-      typeof body.authorName === "string" && body.authorName.trim() ? body.authorName.trim() : "Anonymous",
-    createdAt: new Date().toISOString(),
+    authorName,
+    createdAt,
     status: "ready",
   };
 

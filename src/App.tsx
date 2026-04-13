@@ -10,7 +10,7 @@ import { GameCanvas } from './components/GameCanvas';
 import { GameOverScreen } from './components/GameOverScreen';
 import { Tutorial } from './components/Tutorial';
 import { SongData, Settings } from './types';
-import { postSongScore, saveGlobalScore } from './services/pulseApi';
+import { saveGlobalScore, ScoreRecord } from './services/pulseApi';
 
 type View = 'INTRO' | 'TUTORIAL' | 'MENU' | 'GAME' | 'RESULTS';
 
@@ -46,6 +46,7 @@ export default function App() {
     accuracy: number;
     maxCombo: number;
     replayEvents: { time: number; lane: number; type: string }[];
+    highScores?: ScoreRecord[];
   } | null>(null);
   const [isReplay, setIsReplay] = useState(false);
 
@@ -79,7 +80,8 @@ export default function App() {
         score: prev?.score || 0,
         accuracy: prev?.accuracy || 0,
         maxCombo: prev?.maxCombo || 0,
-        replayEvents
+        replayEvents,
+        highScores: prev?.highScores,
       }));
     }
     setView('GAME');
@@ -90,31 +92,30 @@ export default function App() {
     setView('RESULTS');
 
     if (songData && !isReplay) {
-      if (songData.id) {
-        try {
-          await postSongScore(
-            songData.id,
-            score,
-            accuracy,
-            localStorage.getItem('username') || 'Anonymous'
-          );
-        } catch (err) {
-          console.error("Failed to save score to song:", err);
-        }
-      }
-
       try {
-        await saveGlobalScore({
+        const username = localStorage.getItem('username') || 'Anonymous';
+        const result = await saveGlobalScore({
           songId: songData.id,
           score,
           accuracy,
           date: new Date().toLocaleDateString(),
-          username: localStorage.getItem('username') || 'Anonymous',
+          username,
           songName: songData.name,
           artist: songData.artist
         });
+
+        if (result.song?.scores) {
+          setLastResult(prev =>
+            prev
+              ? {
+                  ...prev,
+                  highScores: result.song?.scores || prev.highScores,
+                }
+              : prev
+          );
+        }
       } catch (err) {
-        console.error("Failed to save global score:", err);
+        console.error("Failed to save score submission:", err);
       }
     }
   }, [songData, isReplay]);
@@ -186,6 +187,7 @@ export default function App() {
           onHome={handleHome}
           isReplay={isReplay}
           replayEvents={lastResult.replayEvents}
+          initialHighScores={lastResult.highScores}
         />
       )}
     </div>

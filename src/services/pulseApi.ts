@@ -7,6 +7,15 @@ export interface ScoreRecord {
   username: string;
 }
 
+export interface ScoreSubmissionResult {
+  id: string;
+  song?: {
+    id: string;
+    topScore: number;
+    scores: ScoreRecord[];
+  } | null;
+}
+
 export interface CommunitySongRecord {
   id: string;
   name: string;
@@ -373,13 +382,13 @@ export const saveGlobalScore = async (payload: {
   username: string;
   songName: string;
   artist: string;
-}): Promise<void> => {
+}): Promise<ScoreSubmissionResult> => {
   const res = await fetch('/api/global-scores', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
-  await parseApiResponse<{ id: string }>(res);
+  return parseApiResponse<ScoreSubmissionResult>(res);
 };
 
 export const getReplays = async (): Promise<ReplayRecord[]> => {

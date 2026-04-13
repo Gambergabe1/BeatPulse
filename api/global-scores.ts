@@ -13,10 +13,20 @@ interface GlobalScoreRecord {
   artist: string;
 }
 
-interface SongLookupRow {
+interface ScoreRecord {
+  score: number;
+  accuracy: number;
+  date: string;
+  username: string;
+}
+
+interface SongScoreState {
   id: string;
   name: string;
   artist: string;
+  topScore: number;
+  scores: ScoreRecord[];
+  createdAt: string;
 }
 
 function ok(res: any, data: unknown) {
@@ -107,6 +117,37 @@ function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
   };
 }
 
+function parseScoreArray(raw: unknown, createdAt: string) {
+  if (!Array.isArray(raw)) return [] as ScoreRecord[];
+
+  return raw.map((entry) => {
+    const row = entry as Partial<ScoreRecord>;
+    return {
+      score: clampNumber(row.score, 0),
+      accuracy: clampNumber(row.accuracy, 0),
+      date: toDisplayDate(row.date, createdAt),
+      username: toText(row.username, "Anonymous"),
+    };
+  }).sort((a, b) => b.score - a.score);
+}
+
+function toTopScoreFromScores(scores: ScoreRecord[]) {
+  return scores.reduce((max, entry) => Math.max(max, entry.score || 0), 0);
+}
+
+function normalizeSongScoreRow(row: any): SongScoreState {
+  const createdAt = toIsoTimestamp(row.created_at ?? row.createdAt);
+  const scores = parseScoreArray(row.scores, createdAt);
+  return {
+    id: toText(row.id, ""),
+    name: toText(row.name, "Unknown Song"),
+    artist: toText(row.artist, "Unknown Artist"),
+    topScore: Math.max(clampNumber(row.top_score ?? row.topScore, 0), toTopScoreFromScores(scores)),
+    scores,
+    createdAt,
+  };
+}
+
 async function tableExists(tableName: "songs" | "global_scores") {
   const { rows } = await sql`SELECT to_regclass(${`public.${tableName}`}) IS NOT NULL AS present`;
   return Boolean(rows[0]?.present);
@@ -149,11 +190,13 @@ async function prepareSongsLookupSchema() {
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS id TEXT`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS name TEXT`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS artist TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS top_score REAL`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS scores JSONB`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
   return true;
 }
 
-async function readSong(id: string): Promise<SongLookupRow | null> {
+async function readSong(id: string): Promise<SongScoreState | null> {
   if (!id) return null;
 
   const songsPresent = await prepareSongsLookupSchema();
@@ -162,18 +205,14 @@ async function readSong(id: string): Promise<SongLookupRow | null> {
   }
 
   const { rows } = await sql`
-    SELECT id, name, artist
+    SELECT id, name, artist, top_score, scores, created_at
     FROM songs
     WHERE id = ${id}
     LIMIT 1
   `;
 
   if (rows.length === 0) return null;
-  return {
-    id: toText(rows[0]?.id, ""),
-    name: toText(rows[0]?.name, "Unknown Song"),
-    artist: toText(rows[0]?.artist, "Unknown Artist"),
-  };
+  return normalizeSongScoreRow(rows[0]);
 }
 
 async function handleGet(req: any, res: any) {
@@ -246,7 +285,30 @@ async function handlePost(req: any, res: any) {
     )
   `;
 
-  return ok(res, { id: newScore.id });
+  let updatedSong: SongScoreState | null = null;
+  if (linkedSong) {
+    const nextSongScores = [...linkedSong.scores, {
+      score: newScore.score,
+      accuracy: newScore.accuracy,
+      date: newScore.date,
+      username: newScore.username,
+    }].sort((a, b) => b.score - a.score).slice(0, 5);
+    const nextTopScore = toTopScoreFromScores(nextSongScores);
+
+    await sql`
+      UPDATE songs
+      SET scores = ${JSON.stringify(nextSongScores)}::jsonb, top_score = ${nextTopScore}
+      WHERE id = ${linkedSong.id}
+    `;
+
+    updatedSong = {
+      ...linkedSong,
+      scores: nextSongScores,
+      topScore: nextTopScore,
+    };
+  }
+
+  return ok(res, { id: newScore.id, song: updatedSong });
 }
 
 export default async function handler(req: any, res: any) {

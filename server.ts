@@ -738,6 +738,24 @@ function toTopScoreFromScores(scores: ScoreRecord[]) {
   return sortScoresDesc([...scores])[0]?.score ?? 0;
 }
 
+function createSongScoreEntry(score: number, accuracy: number, username: string, date = new Date().toLocaleDateString()): ScoreRecord {
+  return {
+    score,
+    accuracy,
+    date,
+    username,
+  };
+}
+
+function applySongScoreEntry(song: CommunitySongRecord, entry: ScoreRecord): CommunitySongRecord {
+  const nextScores = sortScoresDesc([...(song.scores || []), entry]).slice(0, 5);
+  return {
+    ...song,
+    scores: nextScores,
+    topScore: toTopScoreFromScores(nextScores),
+  };
+}
+
 function sortGlobalScoresDesc(scores: GlobalScoreRecord[]) {
   return scores.sort((a, b) => b.score - a.score || b.createdAt.localeCompare(a.createdAt));
 }
@@ -1149,19 +1167,11 @@ async function startServer() {
       return fail(res, 400, "Score and accuracy must be numbers.");
     }
 
-    const entry: ScoreRecord = {
-      score,
-      accuracy,
-      date: new Date().toLocaleDateString(),
-      username,
-    };
-
     const song = songs[index];
-    const scores = sortScoresDesc([...(song.scores || []), entry]).slice(0, 5);
-    song.scores = scores;
-    song.topScore = Math.max(song.topScore || 0, score);
+    const nextSong = applySongScoreEntry(song, createSongScoreEntry(score, accuracy, username));
+    songs[index] = nextSong;
     writeSongs(songs);
-    return ok(res, song);
+    return ok(res, nextSong);
   });
 
   app.delete("/api/songs/:id", requireAdmin, (req, res) => {
@@ -1243,7 +1253,22 @@ async function startServer() {
     };
     scores.push(newScore);
     writeGlobalScores(sortGlobalScoresDesc(scores));
-    return ok(res, { id: newScore.id });
+
+    let updatedSong: CommunitySongRecord | null = null;
+    if (linkedSong) {
+      const songs = readSongs();
+      const songIndex = songs.findIndex((entry) => entry.id === linkedSong.id);
+      if (songIndex >= 0) {
+        updatedSong = applySongScoreEntry(
+          songs[songIndex],
+          createSongScoreEntry(score, accuracy, username, date)
+        );
+        songs[songIndex] = updatedSong;
+        writeSongs(songs);
+      }
+    }
+
+    return ok(res, { id: newScore.id, song: updatedSong });
   });
 
   app.get("/api/replays", (_req, res) => {

@@ -2,14 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Trophy, RotateCcw, Home, Star, Share2, Activity, List, Music, Save } from 'lucide-react';
 import { ReplayEvent } from '../types';
-import { getSongById, saveReplay } from '../services/pulseApi';
+import { getSongById, saveReplay, ScoreRecord } from '../services/pulseApi';
 
-interface HighScore {
-  score: number;
-  accuracy: number;
-  date: string;
-  username: string;
-}
+type HighScore = ScoreRecord;
 
 interface GameOverScreenProps {
   score: number;
@@ -29,6 +24,7 @@ interface GameOverScreenProps {
   onReplay: () => void;
   isReplay: boolean;
   replayEvents: ReplayEvent[];
+  initialHighScores?: HighScore[];
 }
 
 export const GameOverScreen: React.FC<GameOverScreenProps> = ({
@@ -48,7 +44,8 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   onHome,
   onReplay,
   isReplay,
-  replayEvents
+  replayEvents,
+  initialHighScores = []
 }) => {
   const getGrade = () => {
     if (accuracy >= 95) return { label: 'S', color: 'text-neon-blue', shadow: 'shadow-neon-blue/50' };
@@ -63,9 +60,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isCopied, setIsCopied] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
-  const [highScores, setHighScores] = useState<HighScore[]>([]);
-
-  const hasSavedRef = useRef(false);
+  const [highScores, setHighScores] = useState<HighScore[]>(initialHighScores);
 
   const handleSaveReplay = async () => {
     if (isSaved || !songId) return;
@@ -96,21 +91,34 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   };
 
   useEffect(() => {
-    if (hasSavedRef.current) return;
-    hasSavedRef.current = true;
+    if (initialHighScores.length > 0) {
+      setHighScores(initialHighScores);
+    }
+  }, [initialHighScores]);
+
+  useEffect(() => {
+    let isCancelled = false;
 
     const fetchScores = async () => {
-      if (songId) {
-        try {
-          const song = await getSongById(songId);
+      if (!songId || initialHighScores.length > 0) return;
+
+      try {
+        const song = await getSongById(songId);
+        if (!isCancelled) {
           setHighScores(song.scores || []);
-        } catch (err) {
+        }
+      } catch (err) {
+        if (!isCancelled) {
           console.error("Failed to fetch high scores:", err);
         }
       }
     };
+
     fetchScores();
-  }, [songId]);
+    return () => {
+      isCancelled = true;
+    };
+  }, [songId, initialHighScores]);
 
   const handleShare = async () => {
     const shareText = `I just scored ${score.toLocaleString()} (${accuracy.toFixed(1)}%) with rank ${grade.label} on ${songName} in BeatPulse! 🎵🔥`;

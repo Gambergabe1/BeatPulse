@@ -966,6 +966,32 @@ function toTopScoreFromScores(scores: ScoreRecord[]) {
   return sortScoresDesc([...scores])[0]?.score ?? 0;
 }
 
+function createSongScoreEntry(score: number, accuracy: number, username: string, date = new Date().toLocaleDateString()): ScoreRecord {
+  return {
+    score,
+    accuracy,
+    date,
+    username,
+  };
+}
+
+function applySongScoreEntry(song: CommunitySongRecord, entry: ScoreRecord): CommunitySongRecord {
+  const nextScores = sortScoresDesc([...(song.scores || []), entry]).slice(0, 5);
+  return {
+    ...song,
+    scores: nextScores,
+    topScore: toTopScoreFromScores(nextScores),
+  };
+}
+
+async function persistSongScoreboard(song: CommunitySongRecord) {
+  await sql`
+    UPDATE songs
+    SET scores = ${JSON.stringify(song.scores)}::jsonb, top_score = ${song.topScore}
+    WHERE id = ${song.id}
+  `;
+}
+
 async function hasRemoteBlob(url: string): Promise<boolean> {
   try {
     const response = await fetch(url, { method: "HEAD" });
@@ -1345,23 +1371,10 @@ app.post("/api/songs/:id/scores", async (req, res) => {
       return fail(res, 400, "Score and accuracy must be numbers.");
     }
 
-    const entry: ScoreRecord = {
-      score,
-      accuracy,
-      date: new Date().toLocaleDateString(),
-      username,
-    };
+    const nextSong = applySongScoreEntry(song, createSongScoreEntry(score, accuracy, username));
+    await persistSongScoreboard(nextSong);
 
-    const nextScores = sortScoresDesc([...(song.scores || []), entry]).slice(0, 5);
-    const topScore = toTopScoreFromScores(nextScores);
-
-    await sql`
-      UPDATE songs
-      SET scores = ${JSON.stringify(nextScores)}::jsonb, top_score = ${topScore}
-      WHERE id = ${req.params.id}
-    `;
-
-    return ok(res, { ...song, scores: nextScores, topScore });
+    return ok(res, nextSong);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to save score.";
     return fail(res, 500, message);
@@ -1456,7 +1469,15 @@ app.post("/api/global-scores", async (req, res) => {
       VALUES (${newScore.id}, ${newScore.songId || null}, ${newScore.score}, ${newScore.accuracy}, ${newScore.date}, ${newScore.username}, ${newScore.songName}, ${newScore.artist}, ${newScore.createdAt})
     `;
 
-    return ok(res, { id: newScore.id });
+    const updatedSong = linkedSong
+      ? applySongScoreEntry(linkedSong, createSongScoreEntry(score, accuracy, username, date))
+      : null;
+
+    if (updatedSong) {
+      await persistSongScoreboard(updatedSong);
+    }
+
+    return ok(res, { id: newScore.id, song: updatedSong });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to save global score.";
     return fail(res, 500, message);

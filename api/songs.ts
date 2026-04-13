@@ -1,3 +1,3 @@
-import app from "./index.ts";
+import app from "../serverless/api-app.ts";
 
 export default app;

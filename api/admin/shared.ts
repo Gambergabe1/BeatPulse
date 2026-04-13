@@ -1,4 +1,4 @@
-import crypto from "crypto";
+import * as crypto from "node:crypto";
 import { sql } from "@vercel/postgres";
 
 const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
@@ -80,12 +80,18 @@ export function createAdminToken(secret: string): string {
   const expiresAt = Date.now() + TOKEN_TTL_MS;
   const payload = `${expiresAt}`;
   const signature = crypto.createHmac("sha256", secret).update(payload).digest("hex");
-  return Buffer.from(`${payload}.${signature}`, "utf8").toString("base64url");
+  return Buffer.from(`${payload}.${signature}`, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
 }
 
 export function verifyAdminToken(token: string, secret: string) {
   try {
-    const decoded = Buffer.from(token, "base64url").toString("utf8");
+    const normalized = token.replace(/-/g, "+").replace(/_/g, "/");
+    const padding = (4 - (normalized.length % 4)) % 4;
+    const decoded = Buffer.from(`${normalized}${"=".repeat(padding)}`, "base64").toString("utf8");
     const [expiresAtRaw, signature] = decoded.split(".");
     if (!expiresAtRaw || !signature) return false;
     const expiresAt = Number(expiresAtRaw);

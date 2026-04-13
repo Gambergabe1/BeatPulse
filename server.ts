@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
-import crypto from "crypto";
+import * as crypto from "node:crypto";
 import { fileURLToPath } from "url";
 import multer from "multer";
 import { config as loadEnv } from "dotenv";

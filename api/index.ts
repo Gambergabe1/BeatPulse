@@ -2,7 +2,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { sql } from "@vercel/postgres";
 import multer from "multer";
 import { put, del as deleteBlob } from "@vercel/blob";
-import crypto from "crypto";
+import * as crypto from "node:crypto";
 import { handleBlobUploadRequest } from "./blob-upload-handler.ts";
 
 const app = express();

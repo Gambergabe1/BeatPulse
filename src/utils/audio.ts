@@ -290,6 +290,7 @@ export async function generateNotesFromAudio(
   const sameLaneCooldown = Math.max(minNoteSpacing * 1.35, gridInterval * 0.95);
   const recentPeakWindow = Math.max(0.55, beatInterval * 2);
   const recentNoteWindow = 1.0;
+  const simultaneousWindow = Math.max(0.045, gridInterval * 0.3);
   const staminaThreshold = 3 + stamina * 10 + tempoFactor * 4 + density * 2;
 
   const notes: any[] = [];
@@ -336,14 +337,25 @@ export async function generateNotesFromAudio(
       continue;
     }
 
+    const simultaneousNotes = notes.filter((note) => Math.abs(note.time - currentTime) < simultaneousWindow);
+    const simultaneousLanes = new Set<number>(simultaneousNotes.map((note) => note.lane));
+    const maxNotesAtMoment = fastSectionFactor > 0.38 || tempoFactor > 0.58 ? 1 : 2;
+    if (simultaneousNotes.length >= maxNotesAtMoment) {
+      continue;
+    }
+
     const laneGapCooldown = Math.max(minNoteSpacing * 0.7, gridInterval * 0.55);
     let availableLanes = [0, 1, 2, 3].filter((lane) =>
+      !simultaneousLanes.has(lane) &&
       laneOccupancy[lane] <= currentTime &&
       currentTime - laneLastTime[lane] >= (lane === lastLane ? sameLaneCooldown : laneGapCooldown)
     );
 
     if (availableLanes.length === 0) {
-      availableLanes = [0, 1, 2, 3].filter((lane) => laneOccupancy[lane] <= currentTime);
+      availableLanes = [0, 1, 2, 3].filter((lane) =>
+        !simultaneousLanes.has(lane) &&
+        laneOccupancy[lane] <= currentTime
+      );
     }
     if (availableLanes.length === 0) {
       continue;
@@ -433,6 +445,14 @@ export async function generateNotesFromAudio(
       }
     }
 
+    const remainingSlots = Math.max(0, maxNotesAtMoment - simultaneousNotes.length);
+    if (remainingSlots === 0) {
+      continue;
+    }
+    if (lanesToCreate.length > remainingSlots) {
+      lanesToCreate = lanesToCreate.slice(0, remainingSlots);
+    }
+
     let noteCreated = false;
     for (const lane of lanesToCreate) {
       if (!availableLanes.includes(lane)) continue;
@@ -489,6 +509,13 @@ export async function generateNotesFromAudio(
     ) {
       continue;
     }
+
+    const notesAtSameMoment = dedupedNotes.filter((existingNote) => Math.abs(existingNote.time - note.time) < simultaneousWindow);
+    const allowedAtMoment = note.duration ? 1 : 2;
+    if (notesAtSameMoment.length >= allowedAtMoment) {
+      continue;
+    }
+
     dedupedNotes.push(note);
   }
 

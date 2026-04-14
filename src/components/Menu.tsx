@@ -2,6 +2,7 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search, ArrowLeft, RefreshCw } from 'lucide-react';
 import { loadAudioFile, generateNotesFromAudio } from '../utils/audio';
+import { DEFAULT_DIFFICULTY, getChartSettingsForDifficulty, getDifficultyPreset } from '../utils/chartSettings';
 import { SongData, Settings } from '../types';
 import {
   changeAdminPassword,
@@ -38,13 +39,7 @@ const LEADERBOARD_REMOVAL_REASONS = [
   'Requested removal',
 ];
 
-const DEFAULT_CHART_SETTINGS = {
-  complexity: 0.5,
-  density: 0.5,
-  laneVariety: 0.5,
-  sliderProbability: 0.3,
-  stamina: 0.5,
-};
+const DEFAULT_CHART_SETTINGS = getChartSettingsForDifficulty(DEFAULT_DIFFICULTY);
 
 const formatPercentLabel = (value: number) => `${Math.round(value * 100)}%`;
 
@@ -91,11 +86,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [readySong, setReadySong] = useState<SongData | null>(null);
   const [metadata, setMetadata] = useState({ name: '', artist: '' });
   const [error, setError] = useState<string | null>(null);
-  const [complexity, setComplexity] = useState(settings.complexity ?? 0.5);
-  const [density, setDensity] = useState(settings.density ?? 0.5);
-  const [laneVariety, setLaneVariety] = useState(settings.laneVariety ?? 0.5);
-  const [sliderProbability, setSliderProbability] = useState(settings.sliderProbability ?? 0.3);
-  const [stamina, setStamina] = useState(settings.stamina ?? 0.5);
+  const [complexity, setComplexity] = useState(settings.complexity ?? DEFAULT_DIFFICULTY);
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [communitySongs, setCommunitySongs] = useState<any[]>([]);
   const [globalScores, setGlobalScores] = useState<GlobalScoreRecord[]>([]);
@@ -133,71 +124,33 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewTimeoutRef = useRef<any>(null);
   const isAdminPage = activeTab === 'ADMIN';
-  const generationControls = [
+  const chartSettings = getChartSettingsForDifficulty(complexity);
+  const difficultyPreset = getDifficultyPreset(complexity);
+  const { density, laneVariety, sliderProbability, stamina } = chartSettings;
+  const chartProfileRows = [
     {
-      id: 'complexity',
-      label: 'Difficulty',
-      hint: 'Overall chart intensity.',
-      value: complexity,
-      onChange: (value: number) => setComplexity(value),
-      accentClass: 'accent-neon-purple',
-      valueClass: 'text-neon-purple',
-      badgeClass: 'border-neon-purple/20 bg-neon-purple/10 text-neon-purple',
-      minLabel: 'Easy',
-      maxLabel: 'Expert',
-      summary: getSettingTier(complexity, ['Easy', 'Balanced', 'Challenging', 'Expert'] as const),
-    },
-    {
-      id: 'density',
-      label: 'Density',
-      hint: 'How many notes show up.',
+      label: 'Note Density',
       value: density,
-      onChange: (value: number) => setDensity(value),
-      accentClass: 'accent-neon-green',
-      valueClass: 'text-neon-green',
-      badgeClass: 'border-neon-green/20 bg-neon-green/10 text-neon-green',
-      minLabel: 'Light',
-      maxLabel: 'Dense',
       summary: getSettingTier(density, ['Light', 'Steady', 'Busy', 'Dense'] as const),
+      accentClass: 'text-neon-green',
     },
     {
-      id: 'laneVariety',
-      label: 'Lane Variety',
-      hint: 'How often patterns move around.',
+      label: 'Lane Movement',
       value: laneVariety,
-      onChange: (value: number) => setLaneVariety(value),
-      accentClass: 'accent-neon-pink',
-      valueClass: 'text-neon-pink',
-      badgeClass: 'border-neon-pink/20 bg-neon-pink/10 text-neon-pink',
-      minLabel: 'Stable',
-      maxLabel: 'Wild',
       summary: getSettingTier(laneVariety, ['Stable', 'Mixed', 'Active', 'Wild'] as const),
+      accentClass: 'text-neon-pink',
     },
     {
-      id: 'sliderProbability',
-      label: 'Sliders',
-      hint: 'How often hold notes appear.',
+      label: 'Hold Notes',
       value: sliderProbability,
-      onChange: (value: number) => setSliderProbability(value),
-      accentClass: 'accent-neon-blue',
-      valueClass: 'text-neon-blue',
-      badgeClass: 'border-neon-blue/20 bg-neon-blue/10 text-neon-blue',
-      minLabel: 'Rare',
-      maxLabel: 'Frequent',
       summary: getSettingTier(sliderProbability, ['Rare', 'Occasional', 'Frequent', 'Flowing'] as const),
+      accentClass: 'text-neon-blue',
     },
     {
-      id: 'stamina',
       label: 'Stamina',
-      hint: 'How hard long bursts can push.',
       value: stamina,
-      onChange: (value: number) => setStamina(value),
-      accentClass: 'accent-neon-orange',
-      valueClass: 'text-neon-orange',
-      badgeClass: 'border-neon-orange/20 bg-neon-orange/10 text-neon-orange',
-      minLabel: 'Relaxed',
-      maxLabel: 'Demanding',
       summary: getSettingTier(stamina, ['Relaxed', 'Standard', 'Demanding', 'Endurance'] as const),
+      accentClass: 'text-neon-orange',
     },
   ];
   const keybindingPrompt =
@@ -207,10 +160,6 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
 
   const resetChartSettings = () => {
     setComplexity(DEFAULT_CHART_SETTINGS.complexity);
-    setDensity(DEFAULT_CHART_SETTINGS.density);
-    setLaneVariety(DEFAULT_CHART_SETTINGS.laneVariety);
-    setSliderProbability(DEFAULT_CHART_SETTINGS.sliderProbability);
-    setStamina(DEFAULT_CHART_SETTINGS.stamina);
   };
 
   useEffect(() => {
@@ -310,7 +259,11 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         setReadySong(prev => prev ? {
           ...prev,
           notes: newNotes,
-          difficulty: complexity
+          difficulty: complexity,
+          density,
+          laneVariety,
+          sliderProbability,
+          stamina
         } : null);
       } catch (err) {
         console.error("Failed to regenerate notes:", err);
@@ -340,10 +293,11 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
 
     const difficulty = chartOverrides?.difficulty ?? song.difficulty;
-    const densityValue = chartOverrides?.density ?? song.density ?? difficulty;
-    const laneVarietyValue = chartOverrides?.laneVariety ?? song.laneVariety ?? difficulty;
-    const sliderProbabilityValue = chartOverrides?.sliderProbability ?? song.sliderProbability ?? 0.3;
-    const staminaValue = chartOverrides?.stamina ?? song.stamina ?? 0.5;
+    const fallbackProfile = getChartSettingsForDifficulty(difficulty);
+    const densityValue = chartOverrides?.density ?? song.density ?? fallbackProfile.density;
+    const laneVarietyValue = chartOverrides?.laneVariety ?? song.laneVariety ?? fallbackProfile.laneVariety;
+    const sliderProbabilityValue = chartOverrides?.sliderProbability ?? song.sliderProbability ?? fallbackProfile.sliderProbability;
+    const staminaValue = chartOverrides?.stamina ?? song.stamina ?? fallbackProfile.stamina;
 
     let notes = [];
     if (Array.isArray(song.notes)) {
@@ -434,7 +388,11 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         artist,
         audioBuffer,
         notes,
-        difficulty: complexity
+        difficulty: complexity,
+        density,
+        laneVariety,
+        sliderProbability,
+        stamina
       });
       setMetadata({ name, artist });
     } catch (err) {
@@ -1675,10 +1633,10 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                         <div>
                           <h4 className="font-display font-bold text-white flex items-center gap-2">
                             <Activity className="w-5 h-5 text-neon-blue" />
-                            Chart Feel
+                            Chart Difficulty
                           </h4>
                           <p className="text-white/50 text-sm mt-2">
-                            Keep the generator easy to tune. These shape newly generated charts and replay-friendly regenerations.
+                            One slider now shapes the whole chart automatically, so new players can get into a song faster.
                           </p>
                         </div>
                         <button
@@ -1689,38 +1647,54 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                         </button>
                       </div>
 
-                      <div className="grid gap-4 lg:grid-cols-2">
-                        {generationControls.map((control) => (
-                          <div key={control.id} className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                            <div className="flex items-start justify-between gap-3 mb-4">
-                              <div>
-                                <p className="text-sm font-bold text-white">{control.label}</p>
-                                <p className="text-xs text-white/45 mt-1">{control.hint}</p>
-                              </div>
-                              <div className="text-right">
-                                <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.2em] ${control.badgeClass}`}>
-                                  {control.summary}
-                                </span>
-                                <p className={`mt-2 text-[11px] font-mono ${control.valueClass}`}>{formatPercentLabel(control.value)}</p>
-                              </div>
-                            </div>
-
-                            <input
-                              type="range"
-                              min="0"
-                              max="1"
-                              step="0.1"
-                              value={control.value}
-                              onChange={(e) => control.onChange(parseFloat(e.target.value))}
-                              className={`w-full ${control.accentClass} h-2 bg-white/10 rounded-lg appearance-none cursor-pointer`}
-                            />
-
-                            <div className="mt-3 flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-white/25">
-                              <span>{control.minLabel}</span>
-                              <span>{control.maxLabel}</span>
-                            </div>
+                      <div className="rounded-[28px] border border-white/8 bg-black/20 p-5">
+                        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                          <div>
+                            <p className="text-sm font-bold text-white">Difficulty</p>
+                            <p className="text-xs text-white/45 mt-1">{difficultyPreset.description}</p>
                           </div>
-                        ))}
+                          <div className="text-left lg:text-right">
+                            <span className="inline-flex items-center rounded-full border border-neon-purple/20 bg-neon-purple/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-neon-purple">
+                              {difficultyPreset.label}
+                            </span>
+                            <p className="mt-2 text-[11px] font-mono text-neon-purple">{formatPercentLabel(complexity)}</p>
+                          </div>
+                        </div>
+
+                        <div className="mt-5">
+                          <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.1"
+                            value={complexity}
+                            onChange={(e) => setComplexity(parseFloat(e.target.value))}
+                            className="w-full accent-neon-purple h-2 bg-white/10 rounded-lg appearance-none cursor-pointer"
+                          />
+
+                          <div className="mt-3 flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-white/25">
+                            <span>Easy</span>
+                            <span>Expert</span>
+                          </div>
+                        </div>
+
+                        <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                          {chartProfileRows.map((row) => (
+                            <div key={row.label} className="rounded-2xl border border-white/8 bg-black/30 px-4 py-3">
+                              <div className="flex items-center justify-between gap-3">
+                                <div>
+                                  <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-white/35">{row.label}</p>
+                                  <p className={`mt-2 text-sm font-display font-bold ${row.accentClass}`}>{row.summary}</p>
+                                </div>
+                                <span className="text-[11px] font-mono text-white/45">{formatPercentLabel(row.value)}</span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        <p className="mt-5 text-xs text-white/40">
+                          Density, lane movement, hold notes, and stamina are tuned automatically from this slider.
+                        </p>
                       </div>
                     </div>
 

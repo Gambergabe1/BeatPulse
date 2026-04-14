@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { Trophy, RotateCcw, Home, Star, Share2, Activity, List, Music, Save } from 'lucide-react';
 import { ReplayEvent } from '../types';
 import { getSongById, saveReplay, ScoreRecord } from '../services/pulseApi';
+import { getChartSettingsForDifficulty } from '../utils/chartSettings';
 
 type HighScore = ScoreRecord;
 
@@ -47,6 +48,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   replayEvents,
   initialHighScores = []
 }) => {
+  const difficultyProfile = getChartSettingsForDifficulty(difficulty);
   const getGrade = () => {
     if (accuracy >= 95) return { label: 'S', color: 'text-neon-blue', shadow: 'shadow-neon-blue/50' };
     if (accuracy >= 85) return { label: 'A', color: 'text-neon-green', shadow: 'shadow-neon-green/50' };
@@ -72,10 +74,10 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
         songName,
         artist,
         difficulty,
-        density: density ?? difficulty,
-        laneVariety: laneVariety ?? difficulty,
-        sliderProbability: sliderProbability ?? 0.3,
-        stamina: stamina ?? 0.5,
+        density: density ?? difficultyProfile.density,
+        laneVariety: laneVariety ?? difficultyProfile.laneVariety,
+        sliderProbability: sliderProbability ?? difficultyProfile.sliderProbability,
+        stamina: stamina ?? difficultyProfile.stamina,
         score,
         accuracy,
         date: new Date().toLocaleDateString(),

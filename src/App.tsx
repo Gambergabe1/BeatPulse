@@ -11,6 +11,9 @@ import { GameOverScreen } from './components/GameOverScreen';
 import { Tutorial } from './components/Tutorial';
 import { SongData, Settings } from './types';
 import { saveGlobalScore, ScoreRecord } from './services/pulseApi';
+import { DEFAULT_DIFFICULTY, getChartSettingsForDifficulty } from './utils/chartSettings';
+
+const defaultChartSettings = getChartSettingsForDifficulty(DEFAULT_DIFFICULTY);
 
 type View = 'INTRO' | 'TUTORIAL' | 'MENU' | 'GAME' | 'RESULTS';
 
@@ -18,11 +21,11 @@ const defaultSettings: Settings = {
   volume: 1,
   visualEffects: true,
   keybindings: ['d', 'f', 'j', 'k'],
-  complexity: 0.5,
-  density: 0.5,
-  laneVariety: 0.5,
-  sliderProbability: 0.3,
-  stamina: 0.5
+  complexity: defaultChartSettings.complexity,
+  density: defaultChartSettings.density,
+  laneVariety: defaultChartSettings.laneVariety,
+  sliderProbability: defaultChartSettings.sliderProbability,
+  stamina: defaultChartSettings.stamina
 };
 
 export default function App() {

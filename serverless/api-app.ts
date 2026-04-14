@@ -128,6 +128,18 @@ interface DataRelationshipMaintenance {
   unresolvedReplays: number;
 }
 
+interface SongColumnInfo {
+  column_name: string;
+  is_nullable: "YES" | "NO";
+  column_default: string | null;
+}
+
+interface SongInsertColumn {
+  column: string;
+  value: string | number | null;
+  cast?: "jsonb";
+}
+
 function ensureDatabaseEnvironment() {
   if (!process.env.POSTGRES_URL && !process.env.DATABASE_URL) {
     throw new Error("DATABASE_URL/POSTGRES_URL is not configured.");
@@ -215,6 +227,11 @@ async function prepareStorageSchema() {
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS audio_path TEXT`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS notes_url TEXT`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS notes_path TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS audio_blob_url TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS audio_blob_key TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS notes_blob_url TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS notes_blob_key TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS complexity REAL`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS density REAL`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS lane_variety REAL`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS slider_probability REAL`;
@@ -460,12 +477,16 @@ function normalizeSongRow(row: any): CommunitySongRecord {
   const scores = sortScoresDesc(parseScoreArray(row.scores as Json, createdAt));
   const audioPath = canonicalizeSongAssetPath(
     id,
-    extractRelativeAssetPath(row.audio_path ?? row.audioPath ?? row.audio_url ?? row.audioUrl),
+    extractRelativeAssetPath(
+      row.audio_path ?? row.audioPath ?? row.audio_blob_key ?? row.audio_url ?? row.audio_blob_url ?? row.audioUrl
+    ),
     "audio.mp3"
   );
   const notesPath = canonicalizeSongAssetPath(
     id,
-    extractRelativeAssetPath(row.notes_path ?? row.notesPath ?? row.notes_url ?? row.notesUrl),
+    extractRelativeAssetPath(
+      row.notes_path ?? row.notesPath ?? row.notes_blob_key ?? row.notes_url ?? row.notes_blob_url ?? row.notesUrl
+    ),
     "notes.json"
   );
   const topScore = Math.max(clampNumber(row.top_score ?? row.topScore, 0), toTopScoreFromScores(scores));
@@ -473,9 +494,9 @@ function normalizeSongRow(row: any): CommunitySongRecord {
     id,
     name: toText(row.name, "Untitled"),
     artist: toText(row.artist, "Unknown Artist"),
-    audioUrl: toText(row.audio_url ?? row.audioUrl, ""),
+    audioUrl: toText(row.audio_url ?? row.audio_blob_url ?? row.audioUrl, ""),
     audioPath,
-    notesUrl: toText(row.notes_url ?? row.notesUrl, ""),
+    notesUrl: toText(row.notes_url ?? row.notes_blob_url ?? row.notesUrl, ""),
     notesPath,
     difficulty,
     density,
@@ -528,6 +549,73 @@ function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
 
 function sortScoresDesc(scores: ScoreRecord[]) {
   return scores.sort((a, b) => b.score - a.score);
+}
+
+function getSongInsertColumns(song: CommunitySongRecord, columns: SongColumnInfo[]) {
+  const defs: SongInsertColumn[] = [
+    { column: "id", value: song.id },
+    { column: "name", value: song.name },
+    { column: "artist", value: song.artist },
+    { column: "audio_url", value: song.audioUrl },
+    { column: "audio_path", value: song.audioPath },
+    { column: "notes_url", value: song.notesUrl },
+    { column: "notes_path", value: song.notesPath },
+    { column: "difficulty", value: song.difficulty },
+    { column: "density", value: song.density },
+    { column: "lane_variety", value: song.laneVariety },
+    { column: "slider_probability", value: song.sliderProbability },
+    { column: "stamina", value: song.stamina },
+    { column: "top_score", value: song.topScore },
+    { column: "scores", value: JSON.stringify(song.scores), cast: "jsonb" },
+    { column: "author_name", value: song.authorName },
+    { column: "created_at", value: song.createdAt },
+    { column: "status", value: song.status },
+  ];
+
+  const legacyColumns = new Map<string, SongInsertColumn>([
+    ["complexity", { column: "complexity", value: song.difficulty }],
+    ["audio_blob_key", { column: "audio_blob_key", value: song.audioPath }],
+    ["audio_blob_url", { column: "audio_blob_url", value: song.audioUrl }],
+    ["notes_blob_key", { column: "notes_blob_key", value: song.notesPath }],
+    ["notes_blob_url", { column: "notes_blob_url", value: song.notesUrl }],
+  ]);
+
+  const existingColumns = new Set(columns.map((column) => column.column_name));
+  for (const [columnName, def] of legacyColumns) {
+    if (existingColumns.has(columnName)) {
+      defs.push(def);
+    }
+  }
+
+  const includedColumns = new Set(defs.map((def) => def.column));
+  const unsupportedRequiredColumns = columns
+    .filter((column) => column.is_nullable === "NO" && column.column_default == null && !includedColumns.has(column.column_name))
+    .map((column) => column.column_name);
+
+  if (unsupportedRequiredColumns.length > 0) {
+    throw new Error(`Songs table has unsupported required columns: ${unsupportedRequiredColumns.join(", ")}`);
+  }
+
+  return defs;
+}
+
+async function insertSongRow(song: CommunitySongRecord) {
+  const { rows } = await sql<SongColumnInfo>`
+    SELECT column_name, is_nullable, column_default
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'songs'
+  `;
+
+  const columns = getSongInsertColumns(song, rows);
+  const columnNames = columns.map((column) => column.column).join(", ");
+  const placeholders = columns
+    .map((column, index) => `$${index + 1}${column.cast ? `::${column.cast}` : ""}`)
+    .join(", ");
+
+  await sql.query(
+    `INSERT INTO songs (${columnNames}) VALUES (${placeholders})`,
+    columns.map((column) => column.value)
+  );
 }
 
 function ok<T>(res: Response, data: T) {
@@ -1279,18 +1367,7 @@ app.post("/api/songs", uploader.single("audio"), async (req, res) => {
       status: "ready",
     };
 
-    await sql`
-      INSERT INTO songs (
-        id, name, artist, audio_url, audio_path, notes_url, notes_path,
-        difficulty, density, lane_variety, slider_probability, stamina,
-        top_score, scores, author_name, created_at, status
-      )
-      VALUES (
-        ${newSong.id}, ${newSong.name}, ${newSong.artist}, ${newSong.audioUrl}, ${newSong.audioPath}, ${newSong.notesUrl}, ${newSong.notesPath},
-        ${newSong.difficulty}, ${newSong.density}, ${newSong.laneVariety}, ${newSong.sliderProbability}, ${newSong.stamina},
-        ${newSong.topScore}, ${JSON.stringify(newSong.scores)}::jsonb, ${newSong.authorName}, ${newSong.createdAt}, ${newSong.status}
-      )
-    `;
+    await insertSongRow(newSong);
 
     return ok(res, newSong);
   } catch (error) {

@@ -21,6 +21,7 @@ const defaultSettings: Settings = {
   volume: 1,
   visualEffects: true,
   keybindings: ['d', 'f', 'j', 'k'],
+  advancedChartMode: false,
   complexity: defaultChartSettings.complexity,
   density: defaultChartSettings.density,
   laneVariety: defaultChartSettings.laneVariety,

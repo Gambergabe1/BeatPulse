@@ -40,6 +40,7 @@ export interface Settings {
   volume: number;
   visualEffects: boolean;
   keybindings: [string, string, string, string];
+  advancedChartMode: boolean;
   complexity: number;
   density: number;
   laneVariety: number;

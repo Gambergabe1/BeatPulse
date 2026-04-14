@@ -82,11 +82,18 @@ const describeGlobalScoreLinkIssue = (issue: GlobalScoreLinkIssue) => {
 };
 
 export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings, onSaveSettings }) => {
+  const initialComplexity = settings.complexity ?? DEFAULT_DIFFICULTY;
+  const initialChartSettings = getChartSettingsForDifficulty(initialComplexity);
   const [isUploading, setIsUploading] = useState(false);
   const [readySong, setReadySong] = useState<SongData | null>(null);
   const [metadata, setMetadata] = useState({ name: '', artist: '' });
   const [error, setError] = useState<string | null>(null);
-  const [complexity, setComplexity] = useState(settings.complexity ?? DEFAULT_DIFFICULTY);
+  const [complexity, setComplexity] = useState(initialComplexity);
+  const [density, setDensity] = useState(settings.density ?? initialChartSettings.density);
+  const [laneVariety, setLaneVariety] = useState(settings.laneVariety ?? initialChartSettings.laneVariety);
+  const [sliderProbability, setSliderProbability] = useState(settings.sliderProbability ?? initialChartSettings.sliderProbability);
+  const [stamina, setStamina] = useState(settings.stamina ?? initialChartSettings.stamina);
+  const [advancedChartMode, setAdvancedChartMode] = useState(settings.advancedChartMode ?? false);
   const [isRegenerating, setIsRegenerating] = useState(false);
   const [communitySongs, setCommunitySongs] = useState<any[]>([]);
   const [globalScores, setGlobalScores] = useState<GlobalScoreRecord[]>([]);
@@ -126,31 +133,88 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const isAdminPage = activeTab === 'ADMIN';
   const chartSettings = getChartSettingsForDifficulty(complexity);
   const difficultyPreset = getDifficultyPreset(complexity);
-  const { density, laneVariety, sliderProbability, stamina } = chartSettings;
+  const effectiveDensity = advancedChartMode ? density : chartSettings.density;
+  const effectiveLaneVariety = advancedChartMode ? laneVariety : chartSettings.laneVariety;
+  const effectiveSliderProbability = advancedChartMode ? sliderProbability : chartSettings.sliderProbability;
+  const effectiveStamina = advancedChartMode ? stamina : chartSettings.stamina;
   const chartProfileRows = [
     {
       label: 'Note Density',
-      value: density,
-      summary: getSettingTier(density, ['Light', 'Steady', 'Busy', 'Dense'] as const),
+      value: effectiveDensity,
+      summary: getSettingTier(effectiveDensity, ['Light', 'Steady', 'Busy', 'Dense'] as const),
       accentClass: 'text-neon-green',
     },
     {
       label: 'Lane Movement',
-      value: laneVariety,
-      summary: getSettingTier(laneVariety, ['Stable', 'Mixed', 'Active', 'Wild'] as const),
+      value: effectiveLaneVariety,
+      summary: getSettingTier(effectiveLaneVariety, ['Stable', 'Mixed', 'Active', 'Wild'] as const),
       accentClass: 'text-neon-pink',
     },
     {
       label: 'Hold Notes',
-      value: sliderProbability,
-      summary: getSettingTier(sliderProbability, ['Rare', 'Occasional', 'Frequent', 'Flowing'] as const),
+      value: effectiveSliderProbability,
+      summary: getSettingTier(effectiveSliderProbability, ['Rare', 'Occasional', 'Frequent', 'Flowing'] as const),
       accentClass: 'text-neon-blue',
     },
     {
       label: 'Stamina',
-      value: stamina,
-      summary: getSettingTier(stamina, ['Relaxed', 'Standard', 'Demanding', 'Endurance'] as const),
+      value: effectiveStamina,
+      summary: getSettingTier(effectiveStamina, ['Relaxed', 'Standard', 'Demanding', 'Endurance'] as const),
       accentClass: 'text-neon-orange',
+    },
+  ];
+  const advancedControls = [
+    {
+      id: 'density',
+      label: 'Density',
+      hint: 'How many notes show up.',
+      value: density,
+      onChange: setDensity,
+      accentClass: 'accent-neon-green',
+      valueClass: 'text-neon-green',
+      badgeClass: 'border-neon-green/20 bg-neon-green/10 text-neon-green',
+      minLabel: 'Light',
+      maxLabel: 'Dense',
+      summary: getSettingTier(density, ['Light', 'Steady', 'Busy', 'Dense'] as const),
+    },
+    {
+      id: 'laneVariety',
+      label: 'Lane Variety',
+      hint: 'How often patterns move around.',
+      value: laneVariety,
+      onChange: setLaneVariety,
+      accentClass: 'accent-neon-pink',
+      valueClass: 'text-neon-pink',
+      badgeClass: 'border-neon-pink/20 bg-neon-pink/10 text-neon-pink',
+      minLabel: 'Stable',
+      maxLabel: 'Wild',
+      summary: getSettingTier(laneVariety, ['Stable', 'Mixed', 'Active', 'Wild'] as const),
+    },
+    {
+      id: 'sliderProbability',
+      label: 'Sliders',
+      hint: 'How often hold notes appear.',
+      value: sliderProbability,
+      onChange: setSliderProbability,
+      accentClass: 'accent-neon-blue',
+      valueClass: 'text-neon-blue',
+      badgeClass: 'border-neon-blue/20 bg-neon-blue/10 text-neon-blue',
+      minLabel: 'Rare',
+      maxLabel: 'Frequent',
+      summary: getSettingTier(sliderProbability, ['Rare', 'Occasional', 'Frequent', 'Flowing'] as const),
+    },
+    {
+      id: 'stamina',
+      label: 'Stamina',
+      hint: 'How hard long bursts can push.',
+      value: stamina,
+      onChange: setStamina,
+      accentClass: 'accent-neon-orange',
+      valueClass: 'text-neon-orange',
+      badgeClass: 'border-neon-orange/20 bg-neon-orange/10 text-neon-orange',
+      minLabel: 'Relaxed',
+      maxLabel: 'Demanding',
+      summary: getSettingTier(stamina, ['Relaxed', 'Standard', 'Demanding', 'Endurance'] as const),
     },
   ];
   const keybindingPrompt =
@@ -158,8 +222,24 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       ? `Press a key for Lane ${activeKeybindIndex + 1}.`
       : 'Click a lane to change its key.';
 
+  const applyChartProfile = (profile: ReturnType<typeof getChartSettingsForDifficulty>) => {
+    setDensity(profile.density);
+    setLaneVariety(profile.laneVariety);
+    setSliderProbability(profile.sliderProbability);
+    setStamina(profile.stamina);
+  };
+
+  const toggleAdvancedChartMode = () => {
+    const nextMode = !advancedChartMode;
+    if (!nextMode) {
+      applyChartProfile(getChartSettingsForDifficulty(complexity));
+    }
+    setAdvancedChartMode(nextMode);
+  };
+
   const resetChartSettings = () => {
     setComplexity(DEFAULT_CHART_SETTINGS.complexity);
+    applyChartProfile(DEFAULT_CHART_SETTINGS);
   };
 
   useEffect(() => {
@@ -186,18 +266,29 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     localStorage.setItem('username', username);
   }, [username]);
 
+  useEffect(() => {
+    setLocalSettings(settings);
+  }, [settings]);
+
+  useEffect(() => {
+    if (!advancedChartMode) {
+      applyChartProfile(chartSettings);
+    }
+  }, [advancedChartMode, complexity, chartSettings.density, chartSettings.laneVariety, chartSettings.sliderProbability, chartSettings.stamina]);
+
   // Sync generation settings to parent settings
   useEffect(() => {
     const updatedSettings = {
       ...settings,
+      advancedChartMode,
       complexity,
-      density,
-      laneVariety,
-      sliderProbability,
-      stamina
+      density: effectiveDensity,
+      laneVariety: effectiveLaneVariety,
+      sliderProbability: effectiveSliderProbability,
+      stamina: effectiveStamina
     };
     onSaveSettings(updatedSettings);
-  }, [complexity, density, laneVariety, sliderProbability, stamina]);
+  }, [advancedChartMode, complexity, effectiveDensity, effectiveLaneVariety, effectiveSliderProbability, effectiveStamina]);
 
   const loadCommunitySongs = useCallback(async () => {
     try {
@@ -251,19 +342,19 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       try {
         const newNotes = await generateNotesFromAudio(readySong.audioBuffer, {
           complexity,
-          density,
-          laneVariety,
-          sliderProbability,
-          stamina
+          density: effectiveDensity,
+          laneVariety: effectiveLaneVariety,
+          sliderProbability: effectiveSliderProbability,
+          stamina: effectiveStamina
         });
         setReadySong(prev => prev ? {
           ...prev,
           notes: newNotes,
           difficulty: complexity,
-          density,
-          laneVariety,
-          sliderProbability,
-          stamina
+          density: effectiveDensity,
+          laneVariety: effectiveLaneVariety,
+          sliderProbability: effectiveSliderProbability,
+          stamina: effectiveStamina
         } : null);
       } catch (err) {
         console.error("Failed to regenerate notes:", err);
@@ -273,7 +364,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     }, 400); // 400ms debounce
 
     return () => clearTimeout(timer);
-  }, [complexity, density, laneVariety, sliderProbability, stamina, readySong?.audioBuffer]);
+  }, [complexity, effectiveDensity, effectiveLaneVariety, effectiveSliderProbability, effectiveStamina, readySong?.audioBuffer]);
 
   const loadStoredSongData = useCallback(async (
     song: any,
@@ -366,10 +457,10 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       const audioBuffer = await loadAudioFile(file, audioContext);
       const notes = await generateNotesFromAudio(audioBuffer, {
         complexity,
-        density,
-        laneVariety,
-        sliderProbability,
-        stamina
+        density: effectiveDensity,
+        laneVariety: effectiveLaneVariety,
+        sliderProbability: effectiveSliderProbability,
+        stamina: effectiveStamina
       });
 
       const fileName = file.name.replace(/\.[^/.]+$/, "");
@@ -389,10 +480,10 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         audioBuffer,
         notes,
         difficulty: complexity,
-        density,
-        laneVariety,
-        sliderProbability,
-        stamina
+        density: effectiveDensity,
+        laneVariety: effectiveLaneVariety,
+        sliderProbability: effectiveSliderProbability,
+        stamina: effectiveStamina
       });
       setMetadata({ name, artist });
     } catch (err) {
@@ -1639,12 +1730,24 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                             One slider now shapes the whole chart automatically, so new players can get into a song faster.
                           </p>
                         </div>
-                        <button
-                          onClick={resetChartSettings}
-                          className="px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-xs font-bold uppercase tracking-widest text-white/70 hover:bg-white/10 hover:text-white transition-all"
-                        >
-                          Reset to Balanced
-                        </button>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            onClick={toggleAdvancedChartMode}
+                            className={`px-4 py-2 rounded-xl border text-xs font-bold uppercase tracking-widest transition-all ${
+                              advancedChartMode
+                                ? 'border-neon-pink/40 bg-neon-pink/15 text-neon-pink hover:bg-neon-pink hover:text-white'
+                                : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white'
+                            }`}
+                          >
+                            {advancedChartMode ? 'Advanced Mode On' : 'Activate Advanced Mode'}
+                          </button>
+                          <button
+                            onClick={resetChartSettings}
+                            className="px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-xs font-bold uppercase tracking-widest text-white/70 hover:bg-white/10 hover:text-white transition-all"
+                          >
+                            Reset to Balanced
+                          </button>
+                        </div>
                       </div>
 
                       <div className="rounded-[28px] border border-white/8 bg-black/20 p-5">
@@ -1693,9 +1796,61 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                         </div>
 
                         <p className="mt-5 text-xs text-white/40">
-                          Density, lane movement, hold notes, and stamina are tuned automatically from this slider.
+                          {advancedChartMode
+                            ? 'Manual chart tuning is active. The sliders below override the automatic profile.'
+                            : 'Density, lane movement, hold notes, and stamina are tuned automatically from this slider.'}
                         </p>
                       </div>
+
+                      {advancedChartMode ? (
+                        <div className="mt-5 rounded-[28px] border border-neon-pink/15 bg-neon-pink/5 p-5">
+                          <div className="flex items-start justify-between gap-4 mb-5">
+                            <div>
+                              <p className="text-sm font-bold text-white">Advanced Mode</p>
+                              <p className="text-xs text-white/45 mt-1">
+                                Fine tune the chart exactly how you want without losing the main difficulty slider.
+                              </p>
+                            </div>
+                            <span className="inline-flex items-center rounded-full border border-neon-pink/20 bg-neon-pink/10 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-neon-pink">
+                              Manual Overrides
+                            </span>
+                          </div>
+
+                          <div className="grid gap-4 lg:grid-cols-2">
+                            {advancedControls.map((control) => (
+                              <div key={control.id} className="rounded-2xl border border-white/8 bg-black/20 p-4">
+                                <div className="flex items-start justify-between gap-3 mb-4">
+                                  <div>
+                                    <p className="text-sm font-bold text-white">{control.label}</p>
+                                    <p className="text-xs text-white/45 mt-1">{control.hint}</p>
+                                  </div>
+                                  <div className="text-right">
+                                    <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.2em] ${control.badgeClass}`}>
+                                      {control.summary}
+                                    </span>
+                                    <p className={`mt-2 text-[11px] font-mono ${control.valueClass}`}>{formatPercentLabel(control.value)}</p>
+                                  </div>
+                                </div>
+
+                                <input
+                                  type="range"
+                                  min="0"
+                                  max="1"
+                                  step="0.1"
+                                  value={control.value}
+                                  onChange={(e) => control.onChange(parseFloat(e.target.value))}
+                                  className={`w-full ${control.accentClass} h-2 bg-white/10 rounded-lg appearance-none cursor-pointer`}
+                                />
+
+                                <div className="mt-3 flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-white/25">
+                                  <span>{control.minLabel}</span>
+                                  <span>{control.maxLabel}</span>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
                     </div>
 
                     <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">

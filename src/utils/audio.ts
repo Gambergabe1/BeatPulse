@@ -1,4 +1,4 @@
-import type { Note } from '../types';
+import type { Note, SongSection, SongSectionKind } from '../types';
 
 export interface NoteGenerationConfig {
   complexity?: number;
@@ -97,6 +97,73 @@ const mixToMono = (audioBuffer: AudioBuffer) => {
     for (let i = 0; i < channelData.length; i++) mono[i] += channelData[i] / channelCount;
   }
   return mono;
+};
+
+/**
+ * Finds broad musical phrases from the energy envelope. It intentionally uses
+ * long windows: section labels should be stable and useful for a playfield
+ * timeline, not flicker with every drum hit.
+ */
+export const analyzeSongSections = (audioBuffer: AudioBuffer): SongSection[] => {
+  const duration = audioBuffer.duration;
+  if (!Number.isFinite(duration) || duration <= 0) return [];
+  const mono = mixToMono(audioBuffer);
+  const windowSeconds = clamp(duration / 9, 5.5, 12);
+  const windowSize = Math.max(1, Math.floor(audioBuffer.sampleRate * windowSeconds));
+  const windows: Array<{ start: number; end: number; energy: number }> = [];
+
+  for (let start = 0; start < mono.length; start += windowSize) {
+    const end = Math.min(mono.length, start + windowSize);
+    let sum = 0;
+    for (let index = start; index < end; index += 4) sum += mono[index] * mono[index];
+    windows.push({
+      start: start / audioBuffer.sampleRate,
+      end: end / audioBuffer.sampleRate,
+      energy: Math.sqrt(sum / Math.max(1, Math.ceil((end - start) / 4))),
+    });
+  }
+  if (windows.length === 1) return [{ id: 'section-1', label: 'Full track', kind: 'verse', start: 0, end: duration, intensity: 0.5 }];
+
+  const energies = windows.map((window) => window.energy);
+  const highEnergy = percentile(energies, 0.72);
+  const lowEnergy = percentile(energies, 0.34);
+  const maxEnergy = Math.max(0.00001, ...energies);
+  const edgeCount = duration >= 36 ? 1 : 0;
+  const raw = windows.map((window, index) => {
+    let kind: SongSectionKind;
+    if (edgeCount && index < edgeCount) kind = 'intro';
+    else if (edgeCount && index >= windows.length - edgeCount) kind = 'outro';
+    else if (window.energy >= highEnergy) kind = 'chorus';
+    else if (index > 1 && window.energy <= lowEnergy && windows.slice(0, index).some((entry) => entry.energy >= highEnergy)) kind = 'bridge';
+    else kind = 'verse';
+    return { ...window, kind };
+  });
+
+  const combined: Array<{ start: number; end: number; kind: SongSectionKind; energy: number; count: number }> = [];
+  raw.forEach((section) => {
+    const previous = combined[combined.length - 1];
+    if (previous && previous.kind === section.kind) {
+      previous.end = section.end;
+      previous.energy += section.energy;
+      previous.count += 1;
+    } else {
+      combined.push({ start: section.start, end: section.end, kind: section.kind, energy: section.energy, count: 1 });
+    }
+  });
+  const labelCounts: Partial<Record<SongSectionKind, number>> = {};
+  const labels: Record<SongSectionKind, string> = { intro: 'Intro', verse: 'Verse', chorus: 'Chorus', bridge: 'Bridge', outro: 'Outro' };
+  return combined.map((section, index) => {
+    labelCounts[section.kind] = (labelCounts[section.kind] ?? 0) + 1;
+    const suffix = ['verse', 'chorus', 'bridge'].includes(section.kind) ? ` ${labelCounts[section.kind]}` : '';
+    return {
+      id: `section-${index + 1}`,
+      label: `${labels[section.kind]}${suffix}`,
+      kind: section.kind,
+      start: section.start,
+      end: Math.min(duration, section.end),
+      intensity: clamp((section.energy / section.count) / maxEnergy, 0.15, 1),
+    };
+  });
 };
 
 const analyzeAudioWindows = (monoData: Float32Array, sampleRate: number, windowSize: number) => {
@@ -463,10 +530,13 @@ export async function generateNotesFromAudio(
     const paceRatio = (candidate.localPace ?? candidateRate) / Math.max(0.2, candidateRate);
     const fastSection = clamp((paceRatio - 0.72) / 1.15, 0, 1);
     const phraseEnergy = clamp(((candidate.sectionEnergy ?? 1) - 0.55) / 1.1, 0, 1);
+    const edgeDistance = Math.min(candidate.time, audioBuffer.duration - candidate.time) / Math.max(1, audioBuffer.duration);
+    const isIntroOrOutro = edgeDistance < 0.11;
+    const chorusLift = clamp((phraseEnergy - 0.42) / 0.58, 0, 1);
     const downbeat = ((candidate.beatPosition ?? 0) % 4 + 4) % 4 === 0;
     const dynamicGap = Math.max(
       minNoteSpacing,
-      1 / (targetNotesPerSecond * (0.82 + fastSection * 0.27 + phraseEnergy * 0.14))
+      1 / (targetNotesPerSecond * (0.78 + fastSection * 0.3 + chorusLift * 0.42 - (isIntroOrOutro ? 0.16 : 0)))
     );
     const strongPeak = candidate.strength >= (downbeat ? 0.96 : 1.08);
     if (candidate.time - lastNoteTime < dynamicGap && candidate.strength < 1.32 + fastSection * 0.16) continue;
@@ -514,12 +584,14 @@ export async function generateNotesFromAudio(
       if (!availableLanes.includes(lane)) continue;
       const noActiveLongNote = !notes.some((note) => note.duration && note.time + note.duration > candidate.time);
       const sliderChance = sliderProbability
-        * (0.35 + phraseEnergy * 0.4 + clamp((candidate.sustain ?? 1) - 0.65, 0, 0.35))
+        * (0.28 + phraseEnergy * 0.46 + clamp((candidate.sustain ?? 1) - 0.65, 0, 0.42))
         * (1 - fastSection * 0.46)
-        * (1 - tempoFactor * 0.22);
+        * (1 - tempoFactor * 0.22)
+        * (isIntroOrOutro ? 0.42 : 1);
       const canSlide = lanes.length === 1 && strongPeak && noActiveLongNote
         && candidate.time - lastNoteTime > Math.max(0.24, beatInterval * 0.5)
         && candidate.time < audioBuffer.duration - beatInterval * 1.25
+        && !isIntroOrOutro
         && (candidate.sustain ?? 0) > 0.68;
       let duration: number | undefined;
       let endLane: number | undefined;

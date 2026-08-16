@@ -1,10 +1,10 @@
 ﻿import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useMemo } from 'react';
-import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Users, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search, ArrowLeft, RefreshCw } from 'lucide-react';
-import { loadAudioFile, generateNotesFromAudio } from '../utils/audio';
+import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Users, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, ArrowLeft, RefreshCw } from 'lucide-react';
+import { analyzeSongSections, loadAudioFile, generateNotesFromAudio } from '../utils/audio';
 import { DEFAULT_DIFFICULTY, DIFFICULTY_PRESETS, getChartSettingsForDifficulty, getDifficultyPreset } from '../utils/chartSettings';
-import { SongData, Settings } from '../types';
+import { DEFAULT_GAMEPLAY_OPTIONS, GameplayOptions, SongData, Settings } from '../types';
 import {
   changeAdminPassword,
   deleteCommunitySong,
@@ -21,21 +21,29 @@ import {
   ReplayLinkIssue,
   saveCommunitySong,
   updateCommunitySong,
+  updateSocialProfile,
   MultiplayerRoom,
   PlayerIdentity
 } from '../services/pulseApi';
 import { SocialHub } from './SocialHub';
+import { SongLibrary } from './SongLibrary';
+import { BeatmapEditor } from './BeatmapEditor';
+import { TimingCalibration } from './TimingCalibration';
+import { ProgressionHub } from './ProgressionHub';
 import { getPlayerId, getPlayerToken } from '../utils/playerIdentity';
 import { prefersMovingSliders } from '../utils/device';
+import { getSeasonTier, getUpcomingLevelRewards, PlayerProgress, toggleFavoriteSong, updateProfileLoadout } from '../utils/progression';
 
 interface MenuProps {
   onStartGame: (songData: SongData, isReplay?: boolean, replayEvents?: any[], multiplayer?: MultiplayerRoom) => void;
   audioContext: AudioContext;
   settings: Settings;
   onSaveSettings: (settings: Settings) => void;
+  progress: PlayerProgress;
+  onUpdateProgress: (progress: PlayerProgress) => void;
 }
 
-type MainTab = 'LOCAL' | 'COMMUNITY' | 'SOCIAL' | 'GLOBAL' | 'SETTINGS' | 'REPLAYS';
+type MainTab = 'LOCAL' | 'COMMUNITY' | 'SOCIAL' | 'PROGRESS' | 'GLOBAL' | 'SETTINGS' | 'REPLAYS';
 
 const LEADERBOARD_REMOVAL_REASONS = [
   'Inappropriate name',
@@ -94,7 +102,7 @@ const describeGlobalScoreLinkIssue = (issue: GlobalScoreLinkIssue) => {
   return `Leaderboard metadata is out of sync. Expected ${issue.expectedSongName || 'unknown'} by ${issue.expectedArtist || 'unknown'}.`;
 };
 
-export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings, onSaveSettings }) => {
+export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings, onSaveSettings, progress, onUpdateProgress }) => {
   const initialComplexity = settings.complexity ?? DEFAULT_DIFFICULTY;
   const initialChartSettings = getChartSettingsForDifficulty(initialComplexity);
   const [isUploading, setIsUploading] = useState(false);
@@ -117,6 +125,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [lastMainTab, setLastMainTab] = useState<MainTab>('LOCAL');
   const [isSaving, setIsSaving] = useState(false);
   const [lastUploadedFile, setLastUploadedFile] = useState<File | null>(null);
+  const [lastUploadedCover, setLastUploadedCover] = useState<File | null>(null);
+  const [mapTags, setMapTags] = useState('');
   const [username, setUsername] = useState(localStorage.getItem('username') || 'Anonymous');
   const playerId = useMemo(() => getPlayerId(), []);
   const playerToken = useMemo(() => getPlayerToken(), []);
@@ -126,6 +136,15 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     playerToken,
     username: username.trim() || 'Anonymous',
   }), [playerId, playerToken, username]);
+  const handleToggleFavorite = useCallback((songId: string) => {
+    onUpdateProgress(toggleFavoriteSong(songId));
+  }, [onUpdateProgress]);
+  const handleProfileLoadout = useCallback((updates: Partial<Pick<PlayerProgress, 'selectedAvatar' | 'selectedBadge' | 'selectedTitle' | 'selectedFrame' | 'selectedTitleColor'>>) => {
+    onUpdateProgress(updateProfileLoadout(updates));
+  }, [onUpdateProgress]);
+  const handleChartNotesChange = useCallback((notes: SongData['notes']) => {
+    setReadySong((current) => current ? { ...current, notes } : current);
+  }, []);
   
   // Admin states
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -148,14 +167,27 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [localSettings, setLocalSettings] = useState<Settings>(settings);
   const [activeKeybindIndex, setActiveKeybindIndex] = useState<number | null>(null);
   const [savedReplays, setSavedReplays] = useState<any[]>([]);
-  const [searchQuery, setSearchQuery] = useState('');
+  const sharedReplayIdRef = useRef(typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('replay'));
+  const [isEditingChart, setIsEditingChart] = useState(false);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewTimeoutRef = useRef<any>(null);
+  const gameplayOptions = { ...DEFAULT_GAMEPLAY_OPTIONS, ...(localSettings.gameplay || {}) };
+  const upcomingLevelRewards = getUpcomingLevelRewards(progress.level);
+
+  const updateGameplayOptions = (changes: Partial<GameplayOptions>) => {
+    const nextSettings = {
+      ...localSettings,
+      gameplay: { ...gameplayOptions, ...changes },
+    };
+    setLocalSettings(nextSettings);
+    onSaveSettings(nextSettings);
+  };
   const isAdminPage = activeTab === 'ADMIN';
   const sectionMeta = ({
     LOCAL: { lead: 'Play', accent: 'Studio', subtitle: 'Load a track and shape your chart', icon: Activity, color: 'text-neon-blue' },
     COMMUNITY: { lead: 'Community', accent: 'Library', subtitle: 'Discover player-made rhythm charts', icon: Cloud, color: 'text-neon-blue' },
     SOCIAL: { lead: 'Pulse', accent: 'Network', subtitle: 'Friends · Messages · Live Matches', icon: Users, color: 'text-neon-purple' },
+    PROGRESS: { lead: 'Player', accent: 'Progress', subtitle: 'Missions · Shop · Ranked · Achievements', icon: Trophy, color: 'text-neon-orange' },
     GLOBAL: { lead: 'Global', accent: 'Rankings', subtitle: 'The best runs across every chart', icon: Trophy, color: 'text-neon-green' },
     REPLAYS: { lead: 'Replay', accent: 'Vault', subtitle: 'Rewatch and study your saved performances', icon: Play, color: 'text-neon-blue' },
     SETTINGS: { lead: 'Player', accent: 'Setup', subtitle: 'Tune controls, charts, visuals, and sound', icon: SettingsIcon, color: 'text-neon-purple' },
@@ -304,6 +336,24 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   }, [username]);
 
   useEffect(() => {
+    void updateSocialProfile(playerIdentity, {
+      level: progress.level,
+      xp: progress.xp,
+      achievements: progress.achievements,
+      favoriteSongIds: progress.favoriteSongIds,
+      recentRuns: progress.recentRuns,
+      pulseShards: progress.pulseShards,
+      selectedAvatar: progress.selectedAvatar,
+      selectedBadge: progress.selectedBadge,
+      selectedTitle: progress.selectedTitle,
+      selectedFrame: progress.selectedFrame,
+      selectedTitleColor: progress.selectedTitleColor,
+    }).catch(() => {
+      // The profile still works locally when the optional social service is unavailable.
+    });
+  }, [playerIdentity, progress.achievements, progress.favoriteSongIds, progress.level, progress.pulseShards, progress.recentRuns, progress.selectedAvatar, progress.selectedBadge, progress.selectedFrame, progress.selectedTitle, progress.selectedTitleColor, progress.xp]);
+
+  useEffect(() => {
     setLocalSettings(settings);
   }, [settings]);
 
@@ -414,6 +464,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
 
     const arrayBuffer = await response.arrayBuffer();
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+    const sections = analyzeSongSections(audioBuffer);
 
     const difficulty = chartOverrides?.difficulty ?? song.difficulty;
     const fallbackProfile = getChartSettingsForDifficulty(difficulty);
@@ -468,7 +519,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       density: densityValue,
       laneVariety: laneVarietyValue,
       sliderProbability: sliderProbabilityValue,
-      stamina: staminaValue
+      stamina: staminaValue,
+      sections,
     };
   }, [audioContext, movingSlidersEnabled]);
 
@@ -485,6 +537,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     setError(null);
     setReadySong(null);
     setLastUploadedFile(file);
+    setLastUploadedCover(null);
+    setMapTags('');
 
     try {
       const audioBuffer = await loadAudioFile(file, audioContext);
@@ -496,6 +550,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         stamina: effectiveStamina,
         allowMovingSliders: movingSlidersEnabled
       });
+      const sections = analyzeSongSections(audioBuffer);
 
       const fileName = file.name.replace(/\.[^/.]+$/, "");
       let name = fileName;
@@ -517,7 +572,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         density: effectiveDensity,
         laneVariety: effectiveLaneVariety,
         sliderProbability: effectiveSliderProbability,
-        stamina: effectiveStamina
+        stamina: effectiveStamina,
+        sections,
       });
       setMetadata({ name, artist });
     } catch (err) {
@@ -558,7 +614,9 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         sliderProbability: readySong.sliderProbability ?? 0.3,
         stamina: readySong.stamina ?? 0.5,
         authorName: username || 'Anonymous',
-        notes: readySong.notes
+        notes: readySong.notes,
+        coverFile: lastUploadedCover || undefined,
+        tags: mapTags.split(',').map((tag) => tag.trim()).filter(Boolean)
       });
 
       setCommunitySongs(prev => [newSong, ...prev]);
@@ -576,6 +634,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     try {
       const songData = await loadStoredSongData(song);
       setMetadata({ name: song.name, artist: song.artist });
+      setMapTags(Array.isArray(song.tags) ? song.tags.join(', ') : '');
       setReadySong(songData);
       setLastMainTab('LOCAL');
       setActiveTab('LOCAL');
@@ -624,6 +683,19 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       setError('Failed to load replay audio.');
     }
   }, [communitySongs, loadStoredSongData, onStartGame]);
+
+  useEffect(() => {
+    const replayId = sharedReplayIdRef.current;
+    if (!replayId || communitySongs.length === 0 || savedReplays.length === 0) return;
+    const sharedReplay = savedReplays.find((replay) => replay.id === replayId);
+    sharedReplayIdRef.current = null;
+    if (!sharedReplay) {
+      setError('That shared replay is no longer available.');
+      return;
+    }
+    window.history.replaceState({}, '', window.location.pathname);
+    void handleLoadReplay(sharedReplay);
+  }, [communitySongs.length, handleLoadReplay, savedReplays]);
 
   const handleAdminLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -706,6 +778,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       if (readySong?.id === id) {
         setReadySong(null);
         setLastUploadedFile(null);
+        setLastUploadedCover(null);
+        setMapTags('');
         setMetadata({ name: '', artist: '' });
       }
     } catch (err) {
@@ -1015,13 +1089,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     return () => handlePreviewStop();
   }, []);
 
-  const filteredCommunitySongs = communitySongs.filter(song => 
-    song.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    song.artist.toLowerCase().includes(searchQuery.toLowerCase())
-  );
-
   return (
-    <div className="min-h-screen w-full bg-black flex flex-col items-center justify-start md:justify-center p-6 md:p-12 relative overflow-x-hidden">
+    <div className={`min-h-screen w-full flex flex-col items-center justify-start md:justify-center p-6 md:p-12 relative overflow-x-hidden ${localSettings.menuTheme === 'aurora' ? 'bg-[#080512]' : 'bg-black'}`}>
       {/* Background Elements */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-neon-blue/10 blur-[120px] rounded-full" />
@@ -1060,9 +1129,29 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
             <div className="w-5 h-5 rounded-full bg-neon-purple/20 flex items-center justify-center">
               <User className="w-3 h-3 text-neon-purple" />
             </div>
-            <span className="text-[10px] font-bold text-white/60 uppercase tracking-widest truncate max-w-[120px]">
-              {username || 'Anonymous'}
-            </span>
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="max-w-[100px] truncate text-[10px] font-bold uppercase tracking-widest text-white/60 sm:max-w-[140px]">
+                {username || 'Anonymous'}
+              </span>
+              <span className="shrink-0 rounded-md border border-neon-blue/30 bg-neon-blue/10 px-1.5 py-0.5 font-mono text-[9px] font-black uppercase tracking-wider text-neon-blue">
+                Lvl {progress.level}
+              </span>
+              <span className="hidden truncate text-[9px] font-bold uppercase tracking-[0.14em] text-neon-purple md:inline">
+                {getSeasonTier(progress)}
+              </span>
+            </div>
+            <button
+              onClick={() => handleMainTabChange('SOCIAL')}
+              aria-label="Open Social"
+              className={`ml-auto flex shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1.5 font-display text-[9px] font-bold uppercase tracking-wider transition-all sm:px-3 ${
+                activeTab === 'SOCIAL'
+                  ? 'border-neon-purple bg-neon-purple text-black shadow-[0_0_14px_rgba(168,85,247,0.28)]'
+                  : 'border-neon-purple/30 bg-neon-purple/10 text-neon-purple hover:border-neon-purple/60 hover:bg-neon-purple/20'
+              }`}
+            >
+              <Users className="h-3.5 w-3.5" />
+              <span>Social</span>
+            </button>
           </div>
           {isAdminPage ? (
             <button
@@ -1160,6 +1249,17 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                     className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white text-sm focus:border-neon-blue outline-none"
                     placeholder="Artist"
                   />
+                  <label className="block rounded-xl border border-dashed border-white/15 bg-black/15 px-3 py-2.5 text-left text-[10px] font-bold uppercase tracking-wider text-white/40 transition hover:border-neon-purple/45 hover:text-neon-purple">
+                    <span>{lastUploadedCover ? `Cover ready: ${lastUploadedCover.name}` : 'Optional cover art (PNG, JPG, WebP)'}</span>
+                    <input type="file" accept="image/png,image/jpeg,image/webp" className="mt-2 block w-full text-xs normal-case tracking-normal text-white/55 file:mr-3 file:rounded-lg file:border-0 file:bg-neon-purple/15 file:px-2 file:py-1.5 file:text-[10px] file:font-bold file:text-neon-purple" onChange={(event) => setLastUploadedCover(event.target.files?.[0] || null)} />
+                  </label>
+                  <input
+                    type="text"
+                    value={mapTags}
+                    onChange={(event) => setMapTags(event.target.value)}
+                    className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white text-sm focus:border-neon-blue outline-none"
+                    placeholder="Tags (e.g. pop, fast, practice)"
+                  />
                 </div>
                 
                 <p className="text-neon-blue/60 text-[10px] font-bold uppercase tracking-widest mb-6">
@@ -1181,6 +1281,14 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                     <Play className="w-5 h-5 fill-current" />
                   )}
                   {isRegenerating ? 'Updating...' : 'Start Game'}
+                </button>
+
+                <button
+                  onClick={() => setIsEditingChart(true)}
+                  disabled={isRegenerating}
+                  className="mt-3 w-full rounded-xl border border-neon-orange/30 bg-neon-orange/10 py-3 font-display text-xs font-bold uppercase tracking-widest text-neon-orange transition hover:bg-neon-orange hover:text-black disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <span className="flex items-center justify-center gap-2"><Edit2 className="h-4 w-4" /> Edit beatmap</span>
                 </button>
 
                 {lastUploadedFile && (
@@ -1283,6 +1391,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   { id: 'LOCAL', label: 'Local', icon: <Activity className="w-3.5 h-3.5" /> },
                   { id: 'COMMUNITY', label: 'Community', icon: <Cloud className="w-3.5 h-3.5" /> },
                   { id: 'SOCIAL', label: 'Social', icon: <Users className="w-3.5 h-3.5" /> },
+                  { id: 'PROGRESS', label: 'Progress', icon: <Trophy className="w-3.5 h-3.5" /> },
                   { id: 'GLOBAL', label: 'Global Scores', icon: <Trophy className="w-3.5 h-3.5" /> },
                   { id: 'REPLAYS', label: 'Replays', icon: <Play className="w-3.5 h-3.5" /> }
                 ].map((tab) => (
@@ -1314,58 +1423,25 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 songs={communitySongs}
                 onLaunchMatch={handleLaunchMultiplayer}
               />
+            ) : activeTab === 'PROGRESS' ? (
+              <ProgressionHub
+                progress={progress}
+                settings={localSettings}
+                onSaveSettings={(nextSettings) => {
+                  setLocalSettings(nextSettings);
+                  onSaveSettings(nextSettings);
+                }}
+                onProgressUpdate={onUpdateProgress}
+              />
             ) : activeTab === 'COMMUNITY' ? (
-              <div className="flex flex-col gap-4">
-                <div className="relative">
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
-                  <input
-                    type="text"
-                    placeholder="Search by song name or artist..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-11 pr-4 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-neon-blue/50 transition-all"
-                  />
-                </div>
-
-                {filteredCommunitySongs.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
-                    <Music className="w-12 h-12 mb-4 opacity-10" />
-                    <p className="text-sm font-bold uppercase tracking-widest">
-                      {searchQuery ? 'No matches found' : 'No songs shared yet'}
-                    </p>
-                    <p className="text-xs mt-1">
-                      {searchQuery ? 'Try a different search term' : 'Upload and save your own to start the collection!'}
-                    </p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar touch-pan-y">
-                    {filteredCommunitySongs.map((song) => (
-                      <button
-                        key={song.id}
-                        onClick={() => {
-                          handlePreviewStop();
-                          handleLoadCommunitySong(song);
-                        }}
-                        onMouseEnter={() => handlePreviewStart(song.audioUrl)}
-                        onMouseLeave={handlePreviewStop}
-                        className="flex items-center gap-4 p-4 rounded-2xl bg-white/5 border border-white/5 transition-all text-left group w-full hover:bg-white/10 hover:border-neon-blue/30"
-                      >
-                        <div className="p-3 rounded-xl bg-neon-blue/10 text-neon-blue">
-                          <Music className="w-5 h-5" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <h4 className="font-display font-bold text-white truncate">{song.name}</h4>
-                          <p className="text-white/40 text-xs truncate">{song.artist}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-[10px] font-bold text-white/40 uppercase tracking-tighter">Top Score</p>
-                          <p className="text-sm font-black text-neon-pink">{(song.topScore || 0).toLocaleString()}</p>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <SongLibrary
+                songs={communitySongs}
+                favoriteSongIds={progress.favoriteSongIds}
+                onToggleFavorite={handleToggleFavorite}
+                onLoadSong={handleLoadCommunitySong}
+                onPreviewStart={handlePreviewStart}
+                onPreviewStop={handlePreviewStop}
+              />
             ) : activeTab === 'GLOBAL' ? (
               globalScores.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
@@ -1388,6 +1464,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                         <div>
                           <div className="text-white font-bold">{score.score.toLocaleString()}</div>
                           <div className="text-[10px] text-white/40 uppercase tracking-tighter">{score.username} - {score.songName}</div>
+                          {score.fullCombo && <div className="mt-1 inline-flex rounded-full border border-neon-orange/35 bg-neon-orange/10 px-2 py-0.5 text-[8px] font-black uppercase tracking-[0.12em] text-neon-orange">Full Combo</div>}
                         </div>
                       </div>
                       <div className="text-right">
@@ -1422,6 +1499,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                         <div>
                           <div className="text-white font-bold">{replay.songName}</div>
                           <div className="text-[10px] text-white/40 uppercase tracking-tighter">{replay.artist} - {replay.date}</div>
+                          {replay.judgements && <div className="mt-1 text-[9px] font-bold uppercase tracking-wider text-neon-purple">{replay.judgements.perfect || 0} perfect · {replay.judgements.great || 0} great · {replay.judgements.miss || 0} miss</div>}
                         </div>
                       </div>
                       <div className="flex items-center gap-6">
@@ -1965,6 +2043,16 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   </div>
 
                   <div className="space-y-6">
+                    <div className="rounded-2xl border border-neon-orange/20 bg-gradient-to-br from-neon-orange/[0.09] to-neon-purple/[0.05] p-6">
+                      <div className="flex items-start justify-between gap-4"><div><p className="text-[10px] font-black uppercase tracking-[0.2em] text-neon-orange">{getSeasonTier(progress)} · {progress.season}</p><h4 className="mt-2 font-display text-3xl font-black text-white">Level {progress.level}</h4><p className="mt-1 text-sm text-white/45">{progress.xp.toLocaleString()} XP · {progress.runs} completed runs</p></div><div className="flex gap-2"><div className="rounded-2xl border border-neon-blue/20 bg-neon-blue/[0.08] px-3 py-3 text-right"><p className="font-display text-xl font-black text-neon-blue">{progress.pulseShards.toLocaleString()}</p><p className="text-[9px] font-black uppercase tracking-wider text-white/35">Shards</p></div><div className="rounded-2xl border border-white/10 bg-black/20 px-3 py-3 text-right"><p className="font-display text-xl font-black text-neon-orange">{progress.fullCombos}</p><p className="text-[9px] font-black uppercase tracking-wider text-white/35">Full combos</p></div></div></div>
+                      <div className="mt-5 h-2 overflow-hidden rounded-full bg-black/25"><div className="h-full rounded-full bg-gradient-to-r from-neon-orange to-neon-purple" style={{ width: `${Math.min(100, ((progress.xp % 900) / 900) * 100)}%` }} /></div>
+                      <div className="mt-4 flex flex-wrap gap-2">{progress.achievements.slice(-4).map((achievement) => <span key={achievement} className="rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-[9px] font-bold uppercase tracking-wider text-white/50">{achievement.replace(/-/g, ' ')}</span>)}{progress.achievements.length === 0 && <span className="text-xs text-white/35">Finish a run to begin your collection.</span>}</div>
+                    </div>
+                    <div className="rounded-2xl border border-neon-purple/20 bg-neon-purple/[0.05] p-5">
+                      <div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-black uppercase tracking-[0.2em] text-neon-purple">Profile loadout</p><h4 className="mt-1 font-display text-xl font-black text-white">Show your rewards</h4><p className="mt-1 text-xs text-white/40">Unlock and equip avatars, titles, badges, and frames as you level up.</p></div><div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/15 bg-gradient-to-br from-neon-blue/25 to-neon-purple/35 font-display text-xl font-black text-white">{progress.selectedAvatar.charAt(0).toUpperCase()}</div></div>
+                      <div className="mt-5 grid gap-3 sm:grid-cols-2"><label className="text-[10px] font-black uppercase tracking-wider text-white/35">Avatar<select value={progress.selectedAvatar} onChange={(event) => handleProfileLoadout({ selectedAvatar: event.target.value as PlayerProgress['selectedAvatar'] })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm font-bold capitalize text-white outline-none focus:border-neon-purple/50">{progress.unlockedAvatars.map((avatar) => <option key={avatar} value={avatar}>{avatar}</option>)}</select></label><label className="text-[10px] font-black uppercase tracking-wider text-white/35">Profile frame<select value={progress.selectedFrame} onChange={(event) => handleProfileLoadout({ selectedFrame: event.target.value as PlayerProgress['selectedFrame'] })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm font-bold capitalize text-white outline-none focus:border-neon-purple/50">{progress.unlockedFrames.map((frame) => <option key={frame} value={frame}>{frame}</option>)}</select></label><label className="text-[10px] font-black uppercase tracking-wider text-white/35">Title<select value={progress.selectedTitle} onChange={(event) => handleProfileLoadout({ selectedTitle: event.target.value as PlayerProgress['selectedTitle'] })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm font-bold capitalize text-white outline-none focus:border-neon-purple/50">{progress.unlockedTitles.map((title) => <option key={title} value={title}>{title.replace(/-/g, ' ')}</option>)}</select></label><label className="text-[10px] font-black uppercase tracking-wider text-white/35">Badge<select value={progress.selectedBadge || ''} onChange={(event) => handleProfileLoadout({ selectedBadge: event.target.value ? event.target.value as NonNullable<PlayerProgress['selectedBadge']> : undefined })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm font-bold capitalize text-white outline-none focus:border-neon-purple/50"><option value="">No badge</option>{progress.unlockedBadges.map((badge) => <option key={badge} value={badge}>{badge}</option>)}</select></label><label className="text-[10px] font-black uppercase tracking-wider text-white/35">Title color<select value={progress.selectedTitleColor} onChange={(event) => handleProfileLoadout({ selectedTitleColor: event.target.value as PlayerProgress['selectedTitleColor'] })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm font-bold capitalize text-white outline-none focus:border-neon-purple/50">{progress.unlockedTitleColors.map((color) => <option key={color} value={color}>{color}</option>)}</select></label></div>
+                      <div className="mt-5 border-t border-white/8 pt-4"><div className="flex items-center justify-between"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-white/35">Next rewards</p><span className="text-[10px] font-mono text-neon-blue">Lvl {upcomingLevelRewards[0]?.level || progress.level}</span></div><div className="mt-3 space-y-2">{upcomingLevelRewards.map((reward) => <div key={reward.id} className="flex items-center justify-between gap-3 rounded-xl bg-black/20 px-3 py-2.5"><div className="min-w-0"><p className="truncate text-xs font-bold text-white">{reward.label}</p><p className="mt-0.5 truncate text-[10px] text-white/35">Level {reward.level} · {reward.description}</p></div><span className="rounded-full border border-white/10 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-neon-purple">{reward.kind}</span></div>)}{upcomingLevelRewards.length === 0 && <p className="text-xs text-white/35">You have collected every current level reward.</p>}</div></div>
+                    </div>
                     <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">
                       <div className="mb-5">
                         <h4 className="font-display font-bold text-white flex items-center gap-2">
@@ -2034,7 +2122,58 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                             </button>
                           </div>
                         </div>
+
+                        <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
+                          <div className="mb-4"><h5 className="text-sm font-bold text-white">Accessibility</h5><p className="mt-1 text-xs text-white/40">Tune the playfield for comfort and readability.</p></div>
+                          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-white/40">Lane colors</label>
+                          <select aria-label="Lane color theme" value={localSettings.laneTheme} onChange={(event) => { const nextSettings = { ...localSettings, laneTheme: event.target.value as Settings['laneTheme'] }; setLocalSettings(nextSettings); onSaveSettings(nextSettings); }} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white outline-none focus:border-neon-blue/50">{progress.unlockedLaneThemes.map((theme) => <option key={theme} value={theme}>{theme === 'colorblind' ? 'Colorblind safe' : theme.replace(/-/g, ' ')}</option>)}</select>
+                          <label className="mt-4 block text-[10px] font-black uppercase tracking-[0.16em] text-white/40">Hit sound</label>
+                          <select aria-label="Hit sound" value={localSettings.hitSound} onChange={(event) => { const nextSettings = { ...localSettings, hitSound: event.target.value as Settings['hitSound'] }; setLocalSettings(nextSettings); onSaveSettings(nextSettings); }} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm capitalize text-white outline-none focus:border-neon-blue/50">{progress.unlockedHitSounds.map((sound) => <option key={sound} value={sound}>{sound}</option>)}</select>
+                          <div className="mt-4 grid grid-cols-3 gap-2">{progress.unlockedThemes.map((theme) => <button key={theme} type="button" aria-pressed={localSettings.visualTheme === theme} onClick={() => { const nextSettings = { ...localSettings, visualTheme: theme }; setLocalSettings(nextSettings); onSaveSettings(nextSettings); }} className={`rounded-xl border px-2 py-2 text-[9px] font-black uppercase tracking-wider ${localSettings.visualTheme === theme ? 'border-neon-purple/45 bg-neon-purple/15 text-white' : 'border-white/10 text-white/45 hover:bg-white/10'}`}>{theme}</button>)}</div>
+                          <div className="mt-4 space-y-2">{([
+                            ['reducedMotion', 'Reduced motion', 'Keeps feedback clear with less movement.'],
+                            ['largeNotes', 'Larger notes', 'Makes notes and receptors easier to read.'],
+                            ['hapticFeedback', 'Haptic feedback', 'Uses a short vibration when your device supports it.'],
+                          ] as Array<[keyof Pick<Settings, 'reducedMotion' | 'largeNotes' | 'hapticFeedback'>, string, string]>).map(([key, label, hint]) => <button key={key} type="button" aria-pressed={localSettings[key]} onClick={() => { const nextSettings = { ...localSettings, [key]: !localSettings[key] }; setLocalSettings(nextSettings); onSaveSettings(nextSettings); }} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left ${localSettings[key] ? 'border-neon-green/25 bg-neon-green/[0.07]' : 'border-white/8 bg-black/10'}`}><span><span className="block text-xs font-bold text-white">{label}</span><span className="mt-0.5 block text-[10px] text-white/35">{hint}</span></span><span className={`h-2.5 w-2.5 rounded-full ${localSettings[key] ? 'bg-neon-green shadow-[0_0_8px_#39ff14]' : 'bg-white/20'}`} /></button>)}</div>
+                        </div>
                       </div>
+                    </div>
+                    <div className="rounded-2xl border border-neon-blue/20 bg-neon-blue/[0.05] p-6">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div><h4 className="font-display font-bold text-white">Practice & modifiers</h4><p className="mt-1 text-xs text-white/40">Practice tools are local only. Modified runs do not enter leaderboards.</p></div>
+                        <button type="button" onClick={() => updateGameplayOptions({ practiceMode: !gameplayOptions.practiceMode })} className={`rounded-full border px-3 py-1.5 text-[10px] font-black uppercase tracking-wider ${gameplayOptions.practiceMode ? 'border-neon-green/35 bg-neon-green/15 text-neon-green' : 'border-white/10 bg-black/20 text-white/40'}`}>{gameplayOptions.practiceMode ? 'Practice on' : 'Practice off'}</button>
+                      </div>
+
+                      <div className="mt-5 rounded-2xl border border-white/8 bg-black/20 p-4">
+                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Input offset</p><p className="mt-1 text-xs text-white/40">Calibrate how early or late your taps register.</p></div><span className="font-mono text-sm text-neon-blue">{gameplayOptions.inputOffsetMs > 0 ? '+' : ''}{gameplayOptions.inputOffsetMs} ms</span></div>
+                        <input aria-label="Input timing offset" type="range" min="-120" max="120" step="5" value={gameplayOptions.inputOffsetMs} onChange={(event) => updateGameplayOptions({ inputOffsetMs: parseInt(event.target.value, 10) })} className="mt-4 h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue" />
+                      </div>
+
+                      <div className="mt-4">
+                        <TimingCalibration
+                          audioContext={audioContext}
+                          volume={localSettings.volume}
+                          currentOffsetMs={gameplayOptions.inputOffsetMs}
+                          onApply={(inputOffsetMs) => updateGameplayOptions({ inputOffsetMs })}
+                        />
+                      </div>
+
+                      <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
+                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Practice pace</p><p className="mt-1 text-xs text-white/40">Slows audio and chart timing together.</p></div><span className="font-mono text-sm text-neon-green">{gameplayOptions.practiceSpeed.toFixed(2).replace(/0$/, '')}x</span></div>
+                        <div className="mt-3 grid grid-cols-3 gap-2">{[0.5, 0.75, 1].map((speed) => <button key={speed} type="button" disabled={!gameplayOptions.practiceMode} aria-pressed={gameplayOptions.practiceSpeed === speed} onClick={() => updateGameplayOptions({ practiceSpeed: speed })} className={`rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-wider disabled:opacity-30 ${gameplayOptions.practiceSpeed === speed ? 'border-neon-green/35 bg-neon-green/10 text-neon-green' : 'border-white/8 text-white/45 hover:bg-white/10'}`}>{speed.toFixed(2).replace(/0$/, '')}x</button>)}</div>
+                      </div>
+
+                      <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
+                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Scroll speed</p><p className="mt-1 text-xs text-white/40">Changes note spacing without changing the chart.</p></div><span className="font-mono text-sm text-neon-blue">{gameplayOptions.scrollSpeed.toFixed(1)}x</span></div>
+                        <input aria-label="Default note scroll speed" type="range" min="0.6" max="1.6" step="0.1" value={gameplayOptions.scrollSpeed} onChange={(event) => updateGameplayOptions({ scrollSpeed: parseFloat(event.target.value) })} className="mt-4 h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue" />
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-2 gap-2">{([
+                        ['hiddenNotes', 'Hidden', 'Notes fade before the hit line.'],
+                        ['mirrorLanes', 'Mirror', 'Flip the lane layout.'],
+                        ['randomLanes', 'Random', 'Shuffle the lane order.'],
+                        ['noFail', 'No fail', 'Keep playing when health runs out.'],
+                      ] as Array<[keyof Pick<GameplayOptions, 'hiddenNotes' | 'mirrorLanes' | 'randomLanes' | 'noFail'>, string, string]>).map(([key, label, hint]) => <button key={key} type="button" aria-pressed={gameplayOptions[key]} onClick={() => updateGameplayOptions({ [key]: !gameplayOptions[key] })} className={`rounded-2xl border p-3 text-left transition ${gameplayOptions[key] ? 'border-neon-purple/35 bg-neon-purple/10 text-white' : 'border-white/8 bg-black/20 text-white/55 hover:bg-white/5'}`}><p className="text-xs font-black uppercase tracking-wider">{label}</p><p className="mt-1 text-[10px] leading-relaxed text-white/35">{hint}</p></button>)}</div>
                     </div>
                   </div>
                 </div>
@@ -2083,6 +2222,21 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
           </div>
         </div>
       </motion.div>
+
+      {isEditingChart && readySong && (
+        <BeatmapEditor
+          song={readySong}
+          audioContext={audioContext}
+          volume={localSettings.volume}
+          onNotesChange={handleChartNotesChange}
+          onTestChart={() => {
+            handlePreviewStop();
+            setIsEditingChart(false);
+            onStartGame(readySong);
+          }}
+          onClose={() => setIsEditingChart(false)}
+        />
+      )}
 
       {/* Delete Confirmation Modal */}
       <AnimatePresence>

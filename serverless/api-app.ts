@@ -31,6 +31,7 @@ interface ScoreRecord {
   accuracy: number;
   date: string;
   username: string;
+  fullCombo: boolean;
 }
 
 interface CommunitySongRecord {
@@ -80,6 +81,7 @@ interface GlobalScoreRecord {
   createdAt: string;
   songName: string;
   artist: string;
+  fullCombo: boolean;
 }
 
 type FriendshipStatus = "pending" | "accepted";
@@ -203,6 +205,7 @@ async function prepareStorageSchema() {
       username TEXT NOT NULL,
       song_name TEXT NOT NULL,
       artist TEXT NOT NULL,
+      full_combo BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL
     );
   `;
@@ -262,6 +265,7 @@ async function prepareStorageSchema() {
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS song_id TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS song_name TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS artist TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS full_combo BOOLEAN NOT NULL DEFAULT FALSE`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
 
   await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS id TEXT`;
@@ -474,6 +478,7 @@ function parseScoreArray(raw: Json, createdAt = new Date().toISOString()): Score
       accuracy: clampNumber(row.accuracy, 0),
       date: toDisplayDate(row.date, createdAt),
       username: toText(row.username, "Anonymous"),
+      fullCombo: row.fullCombo === true,
     };
   });
 }
@@ -560,6 +565,7 @@ function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
     createdAt,
     songName: toText(row.song_name ?? row.songName, "Unknown Song"),
     artist: toText(row.artist, "Unknown Artist"),
+    fullCombo: row.full_combo === true || row.fullCombo === true,
   };
 }
 
@@ -1168,6 +1174,7 @@ function createSongScoreEntry(score: number, accuracy: number, username: string,
     accuracy,
     date,
     username,
+    fullCombo: false,
   };
 }
 
@@ -1785,6 +1792,7 @@ app.post("/api/global-scores", async (req, res) => {
     const requestedSongId = (typeof req.body?.songId === "string" && req.body.songId.trim()) || "";
     const username = (typeof req.body?.username === "string" && req.body.username.trim()) || "Anonymous";
     const date = (typeof req.body?.date === "string" && req.body.date.trim()) || new Date().toLocaleDateString();
+    const fullCombo = req.body?.fullCombo === true;
 
     if (!Number.isFinite(score) || !Number.isFinite(accuracy)) {
       return fail(res, 400, "Score and accuracy must be numbers.");
@@ -1812,15 +1820,16 @@ app.post("/api/global-scores", async (req, res) => {
       createdAt: new Date().toISOString(),
       songName,
       artist,
+      fullCombo,
     };
 
     await sql`
-      INSERT INTO global_scores (id, song_id, score, accuracy, date, username, song_name, artist, created_at)
-      VALUES (${newScore.id}, ${newScore.songId || null}, ${newScore.score}, ${newScore.accuracy}, ${newScore.date}, ${newScore.username}, ${newScore.songName}, ${newScore.artist}, ${newScore.createdAt})
+      INSERT INTO global_scores (id, song_id, score, accuracy, date, username, song_name, artist, full_combo, created_at)
+      VALUES (${newScore.id}, ${newScore.songId || null}, ${newScore.score}, ${newScore.accuracy}, ${newScore.date}, ${newScore.username}, ${newScore.songName}, ${newScore.artist}, ${newScore.fullCombo}, ${newScore.createdAt})
     `;
 
     const updatedSong = linkedSong
-      ? applySongScoreEntry(linkedSong, createSongScoreEntry(score, accuracy, username, date))
+      ? applySongScoreEntry(linkedSong, { ...createSongScoreEntry(score, accuracy, username, date), fullCombo: newScore.fullCombo })
       : null;
 
     if (updatedSong) {

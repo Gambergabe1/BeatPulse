@@ -8,3 +8,6 @@ uploads/
 *.log
 .env*
 !.env.example
+
+.vercel
+.env*

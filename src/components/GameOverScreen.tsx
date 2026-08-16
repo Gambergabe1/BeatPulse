@@ -1,16 +1,46 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
-import { Trophy, RotateCcw, Home, Star, Share2, Activity, List, Music, Save } from 'lucide-react';
-import { ReplayEvent } from '../types';
-import { getSocialSnapshot, getSongById, saveReplay, ScoreRecord, MultiplayerRoom } from '../services/pulseApi';
+import { Trophy, RotateCcw, Home, Star, Share2, Activity, List, Music, Save, Sparkles, Gift, Gem, Palette, BadgeCheck, CheckCircle2 } from 'lucide-react';
+import { GameplayOptions, JudgementSummary, ReplayEvent } from '../types';
+import { getGlobalScores, getSocialSnapshot, getSongById, requestMultiplayerRematch, saveReplay, ScoreRecord, MultiplayerRoom } from '../services/pulseApi';
 import { getChartSettingsForDifficulty } from '../utils/chartSettings';
+import { LevelReward, MissionProgress } from '../utils/progression';
 
 type HighScore = ScoreRecord;
+
+const rewardVisuals: Record<LevelReward['kind'], { icon: React.ElementType; className: string }> = {
+  shards: { icon: Gem, className: 'border-neon-blue/30 bg-neon-blue/10 text-neon-blue' },
+  theme: { icon: Palette, className: 'border-neon-purple/30 bg-neon-purple/10 text-neon-purple' },
+  avatar: { icon: Sparkles, className: 'border-neon-pink/30 bg-neon-pink/10 text-neon-pink' },
+  badge: { icon: BadgeCheck, className: 'border-neon-orange/30 bg-neon-orange/10 text-neon-orange' },
+  title: { icon: Trophy, className: 'border-neon-green/30 bg-neon-green/10 text-neon-green' },
+  frame: { icon: Star, className: 'border-white/20 bg-white/10 text-white' },
+};
+
+const useAnimatedNumber = (target: number, duration = 850) => {
+  const [value, setValue] = useState(0);
+
+  useEffect(() => {
+    const startedAt = performance.now();
+    let frame = 0;
+    const tick = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      setValue(Math.round(target * eased));
+      if (progress < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [duration, target]);
+
+  return value;
+};
 
 interface GameOverScreenProps {
   score: number;
   accuracy: number;
   maxCombo: number;
+  fullCombo: boolean;
   songName: string;
   artist: string;
   songId?: string;
@@ -25,7 +55,17 @@ interface GameOverScreenProps {
   onReplay: () => void;
   isReplay: boolean;
   replayEvents: ReplayEvent[];
+  judgements: JudgementSummary;
+  gameplay: GameplayOptions;
+  earnedXp?: number;
+  levelUpRewards?: LevelReward[];
+  previousLevel?: number;
+  completedMissions?: MissionProgress[];
+  mapRating?: number;
+  onRateMap?: (rating: number) => void;
   initialHighScores?: HighScore[];
+  leaderboardStatus?: 'idle' | 'saving' | 'saved' | 'failed' | 'unranked';
+  leaderboardError?: string;
   multiplayerRoom?: MultiplayerRoom;
   playerId?: string;
   playerToken?: string;
@@ -35,6 +75,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   score,
   accuracy,
   maxCombo,
+  fullCombo,
   songName,
   artist,
   songId,
@@ -49,7 +90,17 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   onReplay,
   isReplay,
   replayEvents,
+  judgements,
+  gameplay,
+  earnedXp,
+  levelUpRewards = [],
+  previousLevel,
+  completedMissions = [],
+  mapRating,
+  onRateMap,
   initialHighScores = [],
+  leaderboardStatus = 'idle',
+  leaderboardError,
   multiplayerRoom,
   playerId,
   playerToken,
@@ -64,11 +115,43 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   };
 
   const grade = getGrade();
+  const displayedScore = useAnimatedNumber(score);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isCopied, setIsCopied] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
+  const [savedReplayId, setSavedReplayId] = useState<string | null>(null);
   const [highScores, setHighScores] = useState<HighScore[]>(initialHighScores);
   const [matchRoom, setMatchRoom] = useState(multiplayerRoom);
+  const [personalBest, setPersonalBest] = useState<{ score: number; accuracy: number; maxCombo: number } | null>(null);
+  const [previousPersonalBest, setPreviousPersonalBest] = useState<{ score: number; accuracy: number; maxCombo: number } | null>(null);
+  const [isNewPersonalBest, setIsNewPersonalBest] = useState(false);
+  const totalJudgements = judgements.perfect + judgements.great + judgements.miss;
+  const timingBuckets = useMemo(() => {
+    const buckets = Array.from({ length: 9 }, () => 0);
+    judgements.timingOffsets.forEach((offset) => {
+      const index = Math.max(0, Math.min(buckets.length - 1, Math.floor(((offset + 160) / 320) * buckets.length)));
+      buckets[index] += 1;
+    });
+    return buckets;
+  }, [judgements.timingOffsets]);
+  const timingPeak = Math.max(1, ...timingBuckets);
+  const averageOffset = judgements.timingOffsets.length
+    ? judgements.timingOffsets.reduce((total, value) => total + value, 0) / judgements.timingOffsets.length
+    : 0;
+  const matchStandings = useMemo(() => matchRoom ? [...matchRoom.participants].sort((left, right) => right.score - left.score) : [], [matchRoom]);
+  const selfMatchPosition = matchStandings.findIndex((player) => player.playerId === playerId);
+  const leaderGap = selfMatchPosition > 0 ? Math.max(0, matchStandings[0].score - (matchStandings[selfMatchPosition]?.score || 0)) : 0;
+  const hasRematchVoted = Boolean(matchRoom?.rematchVotes?.includes(playerId || ''));
+
+  const handleRematchVote = async () => {
+    if (!matchRoom || !playerId || !playerToken || !matchRoom.participants.some((player) => player.playerId === playerId)) return;
+    try {
+      const username = localStorage.getItem('username') || 'Anonymous';
+      setMatchRoom(await requestMultiplayerRematch({ playerId, playerToken, username }, matchRoom.id));
+    } catch (error) {
+      console.warn('Failed to vote for a rematch:', error);
+    }
+  };
 
   const handleSaveReplay = async () => {
     if (isSaved || !songId) return;
@@ -88,15 +171,35 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
         accuracy,
         date: new Date().toLocaleDateString(),
         createdAt: new Date().toISOString(),
-        events: replayEvents
+        events: replayEvents,
+        judgements,
       };
       
-      await saveReplay(newReplay);
+      const savedReplay = await saveReplay(newReplay);
       setIsSaved(true);
+      setSavedReplayId(savedReplay.id);
     } catch (err) {
       console.error("Failed to save replay:", err);
     }
   };
+
+  useEffect(() => {
+    if (!songId || isReplay || gameplay.practiceMode || gameplay.hiddenNotes || gameplay.mirrorLanes || gameplay.randomLanes) return;
+    const key = `beatpulse_personal_best:${songId}`;
+    let previous: { score: number; accuracy: number; maxCombo: number } | null = null;
+    try {
+      const stored = localStorage.getItem(key);
+      if (stored) previous = JSON.parse(stored);
+    } catch {
+      previous = null;
+    }
+    const isNewBest = !previous || score > previous.score || (score === previous.score && accuracy > previous.accuracy);
+    const next = isNewBest ? { score, accuracy, maxCombo } : previous;
+    if (isNewBest) localStorage.setItem(key, JSON.stringify(next));
+    setPreviousPersonalBest(previous);
+    setPersonalBest(next);
+    setIsNewPersonalBest(isNewBest);
+  }, [accuracy, gameplay.hiddenNotes, gameplay.mirrorLanes, gameplay.practiceMode, gameplay.randomLanes, isReplay, maxCombo, score, songId]);
 
   useEffect(() => {
     if (initialHighScores.length > 0) {
@@ -129,6 +232,40 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   }, [songId, initialHighScores]);
 
   useEffect(() => {
+    if (leaderboardStatus !== 'saved') return;
+
+    let isCancelled = false;
+    const normalized = (value: string) => value.trim().toLocaleLowerCase();
+
+    const refreshLeaderboard = async () => {
+      try {
+        const { scores } = await getGlobalScores({ limit: 500, offset: 0 });
+        const matchingScores = scores
+          .filter(entry =>
+            songId
+              ? entry.songId === songId
+              : normalized(entry.songName) === normalized(songName) && normalized(entry.artist) === normalized(artist)
+          )
+          .slice(0, 5)
+          .map(entry => ({
+            score: entry.score,
+            accuracy: entry.accuracy,
+            date: entry.date,
+            username: entry.username,
+            fullCombo: entry.fullCombo,
+          }));
+
+        if (!isCancelled) setHighScores(matchingScores);
+      } catch (error) {
+        if (!isCancelled) console.error('Failed to refresh the result leaderboard:', error);
+      }
+    };
+
+    refreshLeaderboard();
+    return () => { isCancelled = true; };
+  }, [artist, leaderboardStatus, songId, songName]);
+
+  useEffect(() => {
     setMatchRoom(multiplayerRoom);
   }, [multiplayerRoom]);
 
@@ -156,7 +293,9 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
 
   const handleShare = async () => {
     const shareText = `I just scored ${score.toLocaleString()} (${accuracy.toFixed(1)}%) with rank ${grade.label} on ${songName} in BeatPulse! 🎵🔥`;
-    const shareUrl = window.location.href;
+    const shareUrl = savedReplayId
+      ? `${window.location.origin}${window.location.pathname}?replay=${encodeURIComponent(savedReplayId)}`
+      : window.location.href;
 
     if (navigator.share) {
       try {
@@ -413,7 +552,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
             >
               <div>
                 <span className="text-[10px] font-bold text-white/30 uppercase tracking-[0.3em]">Final Score</span>
-                <div className="text-4xl font-display font-black text-white">{score.toLocaleString()}</div>
+                <div className="text-4xl font-display font-black text-white tabular-nums">{displayedScore.toLocaleString()}</div>
               </div>
               <Trophy className="w-8 h-8 text-neon-blue opacity-50" />
             </motion.div>
@@ -438,8 +577,35 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
                 <div className="text-3xl font-display font-black text-neon-pink">{maxCombo}</div>
               </motion.div>
             </div>
+            {fullCombo && (
+              <div className="rounded-2xl border border-neon-orange/40 bg-neon-orange/10 px-4 py-3 text-center text-xs font-black uppercase tracking-[0.2em] text-neon-orange">
+                Full Combo
+              </div>
+            )}
           </div>
         </div>
+
+        {levelUpRewards.length > 0 && <motion.section initial={{ y: 18, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.48 }} className="mb-6 overflow-hidden rounded-3xl border border-neon-orange/35 bg-gradient-to-br from-neon-orange/[0.13] via-neon-purple/[0.08] to-black/20 p-5"><div className="flex flex-wrap items-start justify-between gap-4"><div className="flex items-center gap-3"><div className="rounded-2xl border border-neon-orange/35 bg-neon-orange/10 p-3 text-neon-orange"><Gift className="h-6 w-6" /></div><div><p className="text-[10px] font-black uppercase tracking-[0.22em] text-neon-orange">Level up rewards</p><h3 className="mt-1 font-display text-2xl font-black text-white">Level {previousLevel || Math.max(1, levelUpRewards[0].level - 1)} → Level {Math.max(...levelUpRewards.map((reward) => reward.level))}</h3><p className="mt-1 text-xs text-white/45">Your new items are ready in the Profile loadout.</p></div></div><span className="rounded-full border border-white/10 bg-black/25 px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-white/50">{levelUpRewards.length} new reward{levelUpRewards.length === 1 ? '' : 's'}</span></div><div className="mt-5 grid gap-3 sm:grid-cols-2">{levelUpRewards.map((reward) => { const visual = rewardVisuals[reward.kind]; const RewardIcon = visual.icon; return <div key={reward.id} className={`rounded-2xl border p-4 ${visual.className}`}><div className="flex items-start gap-3"><RewardIcon className="mt-0.5 h-5 w-5 shrink-0" /><div><p className="font-display text-sm font-black text-white">{reward.label}</p><p className="mt-1 text-xs leading-relaxed text-white/55">{reward.description}</p></div></div></div>; })}</div></motion.section>}
+
+        {completedMissions.length > 0 && <motion.section initial={{ y: 18, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.52 }} className="mb-6 rounded-3xl border border-neon-blue/30 bg-neon-blue/[0.08] p-5"><div className="flex items-start gap-3"><div className="rounded-2xl bg-neon-blue/15 p-3 text-neon-blue"><CheckCircle2 className="h-6 w-6" /></div><div><p className="text-[10px] font-black uppercase tracking-[0.22em] text-neon-blue">Mission complete</p><h3 className="mt-1 font-display text-xl font-black text-white">Rewards are ready to claim</h3><p className="mt-1 text-xs text-white/45">Open Missions from the Progress tab to claim your XP and Pulse Shards.</p></div></div><div className="mt-4 flex flex-wrap gap-2">{completedMissions.map((mission) => <span key={mission.id} className="rounded-full border border-white/10 bg-black/20 px-3 py-1.5 text-[10px] font-bold text-white/65">{mission.label} · +{mission.rewardShards} Shards</span>)}</div></motion.section>}
+
+        <div className="mb-6 grid gap-4 md:grid-cols-2">
+          <motion.section initial={{ y: 14, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.54 }} className="rounded-3xl border border-white/10 bg-white/[0.035] p-5">
+            <div className="mb-4 flex items-center justify-between"><div><p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/35">Grade breakdown</p><p className="mt-1 text-xs text-white/45">{totalJudgements || 0} judged inputs</p></div>{fullCombo && <span className="rounded-full border border-neon-orange/35 bg-neon-orange/10 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-neon-orange">FC</span>}</div>
+            <div className="grid grid-cols-3 gap-2 text-center"><div className="rounded-2xl bg-neon-blue/10 p-3"><p className="font-display text-2xl font-black text-neon-blue">{judgements.perfect}</p><p className="mt-1 text-[9px] font-black uppercase tracking-wider text-white/40">Perfect</p></div><div className="rounded-2xl bg-neon-green/10 p-3"><p className="font-display text-2xl font-black text-neon-green">{judgements.great}</p><p className="mt-1 text-[9px] font-black uppercase tracking-wider text-white/40">Great</p></div><div className="rounded-2xl bg-neon-pink/10 p-3"><p className="font-display text-2xl font-black text-neon-pink">{judgements.miss}</p><p className="mt-1 text-[9px] font-black uppercase tracking-wider text-white/40">Miss</p></div></div>
+            {judgements.holdBreak > 0 && <p className="mt-3 text-center text-[10px] font-bold uppercase tracking-wider text-white/35">Includes {judgements.holdBreak} hold break{judgements.holdBreak === 1 ? '' : 's'}.</p>}
+          </motion.section>
+
+          <motion.section initial={{ y: 14, opacity: 0 }} animate={{ y: 0, opacity: 1 }} transition={{ delay: 0.58 }} className="rounded-3xl border border-white/10 bg-white/[0.035] p-5">
+            <div className="mb-4 flex items-center justify-between"><div><p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/35">Timing spread</p><p className="mt-1 text-xs text-white/45">{judgements.timingOffsets.length ? `${averageOffset > 8 ? 'Late' : averageOffset < -8 ? 'Early' : 'Centered'} by ${Math.abs(Math.round(averageOffset))} ms` : 'No timing data yet'}</p></div><span className="font-mono text-[10px] text-white/30">EARLY → LATE</span></div>
+            <div className="flex h-16 items-end gap-1 rounded-2xl border border-white/5 bg-black/20 px-3 py-2">{timingBuckets.map((count, index) => <div key={index} className={`min-w-0 flex-1 rounded-t-sm ${index === 4 ? 'bg-neon-blue' : 'bg-neon-purple/60'}`} style={{ height: `${Math.max(4, (count / timingPeak) * 100)}%` }} />)}</div>
+            <p className="mt-3 text-[10px] text-white/35">Tighter clusters around the center mean more consistent timing.</p>
+          </motion.section>
+        </div>
+
+        {(isNewPersonalBest || personalBest) && <motion.div initial={isNewPersonalBest ? { scale: 0.94, opacity: 0 } : false} animate={{ scale: 1, opacity: 1 }} className={`mb-6 rounded-2xl border px-5 py-4 ${isNewPersonalBest ? 'border-neon-green/35 bg-neon-green/10 shadow-[0_0_32px_rgba(57,255,20,0.12)]' : 'border-white/10 bg-white/[0.035]'}`}><div className="flex items-center justify-between gap-4"><div><p className={`text-[10px] font-black uppercase tracking-[0.2em] ${isNewPersonalBest ? 'text-neon-green' : 'text-white/40'}`}>{isNewPersonalBest ? 'New personal best' : 'Personal best'}</p><p className="mt-1 text-sm text-white/65">{personalBest?.score.toLocaleString()} · {personalBest?.accuracy.toFixed(1)}% · {personalBest?.maxCombo} combo</p>{isNewPersonalBest && <p className="mt-2 text-[10px] font-bold uppercase tracking-wider text-neon-green/75">{previousPersonalBest ? `+${Math.max(0, score - previousPersonalBest.score).toLocaleString()} score over your last best` : 'Your first score on this chart has been saved.'}</p>}{!isNewPersonalBest && personalBest && <p className="mt-2 text-[10px] font-bold uppercase tracking-wider text-white/35">{Math.max(0, personalBest.score - score).toLocaleString()} points to beat your best</p>}</div>{isNewPersonalBest && <motion.div animate={{ rotate: [0, -10, 10, 0], scale: [1, 1.18, 1] }} transition={{ duration: 0.65, delay: 0.2 }} className="rounded-2xl bg-neon-green/15 p-3"><Sparkles className="h-6 w-6 text-neon-green" /></motion.div>}</div></motion.div>}
+
+        {(earnedXp || (songId && onRateMap)) && <div className="mb-6 grid gap-4 md:grid-cols-2"><div className="rounded-2xl border border-neon-purple/25 bg-neon-purple/[0.07] px-5 py-4"><p className="text-[10px] font-black uppercase tracking-[0.2em] text-neon-purple">Pulse progress</p><p className="mt-1 font-display text-2xl font-black text-white">{earnedXp ? `+${earnedXp} XP` : 'Replay analysis'}</p><p className="mt-1 text-xs text-white/40">Complete runs unlock new themes and achievement milestones.</p></div>{songId && onRateMap && <div className="rounded-2xl border border-white/10 bg-white/[0.035] px-5 py-4"><p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/40">Rate this map</p><div className="mt-2 flex items-center gap-1">{[1, 2, 3, 4, 5].map((rating) => <button key={rating} type="button" aria-label={`Rate ${rating} out of 5`} aria-pressed={mapRating === rating} onClick={() => onRateMap(rating)} className={`rounded-lg p-1 transition ${rating <= (mapRating || 0) ? 'text-neon-orange' : 'text-white/20 hover:text-white/60'}`}><Star className={`h-5 w-5 ${rating <= (mapRating || 0) ? 'fill-current' : ''}`} /></button>)}</div><p className="mt-1 text-xs text-white/40">{mapRating ? `Your rating: ${mapRating}/5` : 'Your private map rating.'}</p></div>}</div>}
 
         {matchRoom && (
           <motion.div
@@ -452,6 +618,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
               <div className="flex items-center gap-3"><Activity className="h-5 w-5 text-neon-purple" /><h3 className="font-display text-sm font-bold uppercase tracking-widest">Match standings</h3></div>
               <span className="font-mono text-xs font-bold tracking-[0.2em] text-neon-blue">{matchRoom.code}</span>
             </div>
+            {selfMatchPosition >= 0 && <div className="mb-4 rounded-2xl border border-white/8 bg-black/20 px-4 py-3 text-xs text-white/50">You finished <span className="font-black text-white">#{selfMatchPosition + 1}</span>{selfMatchPosition > 0 ? <> · <span className="font-mono text-neon-orange">{leaderGap.toLocaleString()}</span> behind the leader</> : <> · <span className="text-neon-green">You led the room</span></>}</div>}
             <div className="space-y-2">
               {[...matchRoom.participants].sort((a, b) => b.score - a.score).map((player, index) => (
                 <div key={player.playerId} className={`flex items-center justify-between rounded-2xl border p-4 ${player.playerId === playerId ? 'border-neon-blue/40 bg-neon-blue/10' : 'border-white/5 bg-black/20'}`}>
@@ -472,11 +639,23 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
         >
           <div className="flex items-center gap-3 mb-6">
             <List className="w-5 h-5 text-neon-purple" />
-            <h3 className="font-display font-bold text-white uppercase tracking-widest text-sm">Top Scores</h3>
+            <div>
+              <h3 className="font-display font-bold text-white uppercase tracking-widest text-sm">
+                {songId ? 'Song Top Scores' : 'Local Song Scores'}
+              </h3>
+              {leaderboardStatus === 'saving' && <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neon-blue">Updating leaderboard…</p>}
+              {leaderboardStatus === 'saved' && <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neon-green">Song + global leaderboards updated</p>}
+              {leaderboardStatus === 'unranked' && <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neon-orange">Practice and modifier runs stay off leaderboards</p>}
+              {leaderboardStatus === 'failed' && <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neon-pink">{leaderboardError || 'Leaderboard update failed'}</p>}
+            </div>
           </div>
           
           <div className="space-y-3">
-            {highScores.map((hs, idx) => (
+            {highScores.length === 0 ? (
+              <p className="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-center text-xs font-bold uppercase tracking-widest text-white/35">
+                {leaderboardStatus === 'saving' ? 'Saving your score…' : leaderboardStatus === 'unranked' ? 'Practice run — not submitted.' : leaderboardStatus === 'failed' ? 'Your score was not saved.' : 'No scores yet'}
+              </p>
+            ) : highScores.map((hs, idx) => (
               <div 
                 key={idx} 
                 className={`flex items-center justify-between p-4 rounded-2xl border ${
@@ -490,6 +669,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
                   <div>
                     <div className="text-white font-bold">{hs.score.toLocaleString()}</div>
                     <div className="text-[10px] text-white/40 uppercase tracking-tighter">{hs.username} - {hs.date}</div>
+                    {hs.fullCombo && <div className="mt-1 inline-flex rounded-full border border-neon-orange/35 bg-neon-orange/10 px-2 py-0.5 text-[8px] font-black uppercase tracking-[0.12em] text-neon-orange">Full Combo</div>}
                   </div>
                 </div>
                 <div className="text-neon-green font-mono text-sm">{hs.accuracy.toFixed(1)}%</div>
@@ -506,6 +686,8 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
             <RotateCcw className="w-5 h-5 group-hover:rotate-[-180deg] transition-transform duration-500" />
             Retry
           </button>}
+
+          {matchRoom && matchRoom.participants.some((player) => player.playerId === playerId) && <button onClick={handleRematchVote} className={`w-full px-6 py-5 rounded-full font-display font-black uppercase tracking-widest transition-all flex items-center justify-center gap-3 text-sm ${hasRematchVoted ? 'border border-neon-green/35 bg-neon-green/10 text-neon-green' : 'bg-neon-blue text-black hover:bg-white'}`}><RotateCcw className="w-5 h-5" />{hasRematchVoted ? `Voted ${matchRoom.rematchVotes?.length || 0}/${matchRoom.participants.length}` : `Vote rematch ${matchRoom.rematchVotes?.length || 0}/${matchRoom.participants.length}`}</button>}
           
           {!isReplay ? (
             <button 

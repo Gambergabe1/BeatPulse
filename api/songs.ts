@@ -1,7 +1,7 @@
 import * as crypto from "node:crypto";
 import { sql } from "@vercel/postgres";
 import multer from "multer";
-import { put } from "@vercel/blob";
+import { del, put } from "@vercel/blob";
 
 type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
@@ -10,6 +10,7 @@ interface ScoreRecord {
   accuracy: number;
   date: string;
   username: string;
+  fullCombo: boolean;
 }
 
 interface CommunitySongRecord {
@@ -20,6 +21,10 @@ interface CommunitySongRecord {
   audioPath: string;
   notesUrl: string;
   notesPath: string;
+  coverUrl?: string;
+  coverPath?: string;
+  tags: string[];
+  chartVersion: number;
   difficulty: number;
   density: number;
   laneVariety: number;
@@ -46,6 +51,7 @@ interface SongInsertColumn {
 
 const uploader = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 150 } });
 const BLOB_WRITE_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
+const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
 
 function ok(res: any, data: unknown) {
   return res.status(200).json({ success: true, data });
@@ -65,6 +71,61 @@ function ensureBlobConfig() {
   if (!BLOB_WRITE_TOKEN) {
     throw new Error("BLOB_READ_WRITE_TOKEN is not configured.");
   }
+}
+
+function queryValue(req: any, key: string) {
+  const value = req.query?.[key];
+  if (Array.isArray(value)) return String(value[0] || "");
+  if (value !== undefined && value !== null) return String(value);
+  try { return new URL(typeof req.url === "string" ? req.url : "/api/songs", "http://localhost").searchParams.get(key) || ""; }
+  catch { return ""; }
+}
+
+function isPasswordHash(value: unknown) {
+  if (typeof value !== "string") return false;
+  const [salt, hash] = value.split(":");
+  return Boolean(salt && hash);
+}
+
+function createPasswordHash(password: string) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  return `${salt}:${crypto.scryptSync(password, salt, 64).toString("hex")}`;
+}
+
+function verifyPassword(password: string, storedHash: string) {
+  const [salt, expectedHash] = storedHash.split(":");
+  if (!salt || !expectedHash) return false;
+  const actual = crypto.scryptSync(password, salt, 64).toString("hex");
+  const received = Buffer.from(actual, "hex");
+  const expected = Buffer.from(expectedHash, "hex");
+  return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+}
+
+function decodeBase64Url(value: string) {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padding = (4 - (normalized.length % 4)) % 4;
+  return Buffer.from(`${normalized}${"=".repeat(padding)}`, "base64").toString("utf8");
+}
+
+function verifyAdminToken(token: string, secret: string) {
+  try {
+    const [expiresAtRaw, signature] = decodeBase64Url(token).split(".");
+    const expiresAt = Number(expiresAtRaw);
+    if (!expiresAtRaw || !signature || !Number.isFinite(expiresAt) || Date.now() > expiresAt) return false;
+    const expectedSignature = crypto.createHmac("sha256", secret).update(expiresAtRaw).digest("hex");
+    const received = Buffer.from(signature, "utf8");
+    const expected = Buffer.from(expectedSignature, "utf8");
+    return received.length === expected.length && crypto.timingSafeEqual(received, expected);
+  } catch {
+    return false;
+  }
+}
+
+function extractBearerToken(req: any) {
+  const header = req.headers?.authorization;
+  if (typeof header !== "string") return null;
+  const [scheme, token] = header.split(" ");
+  return scheme === "Bearer" && token ? token : null;
 }
 
 function clampNumber(value: unknown, fallback: number) {
@@ -146,12 +207,23 @@ function parseScoreArray(raw: Json, createdAt = new Date().toISOString()): Score
       accuracy: clampNumber(row.accuracy, 0),
       date: toDisplayDate(row.date, createdAt),
       username: toText(row.username, "Anonymous"),
+      fullCombo: row.fullCombo === true,
     };
   }).sort((a, b) => b.score - a.score);
 }
 
 function toTopScoreFromScores(scores: ScoreRecord[]) {
   return scores.reduce((max, entry) => Math.max(max, entry.score || 0), 0);
+}
+
+function sanitizeTags(value: unknown) {
+  const source = typeof value === "string"
+    ? (() => { try { return JSON.parse(value) as unknown; } catch { return value.split(","); } })()
+    : value;
+  if (!Array.isArray(source)) return [];
+  return Array.from(new Set(source.flatMap((tag) => typeof tag === "string"
+    ? [tag.trim().toLowerCase().replace(/[^a-z0-9 -]/g, "").slice(0, 24)]
+    : []).filter(Boolean))).slice(0, 8);
 }
 
 function normalizeSongRow(row: any): CommunitySongRecord {
@@ -177,6 +249,9 @@ function normalizeSongRow(row: any): CommunitySongRecord {
     ),
     "notes.json"
   );
+  const rawCoverUrl = toText(row.cover_url ?? row.coverUrl, "");
+  const rawCoverPath = extractRelativeAssetPath(row.cover_path ?? row.coverPath ?? rawCoverUrl);
+  const coverPath = rawCoverUrl && rawCoverPath ? canonicalizeSongAssetPath(id, rawCoverPath, "cover.png") : undefined;
 
   return {
     id,
@@ -186,6 +261,10 @@ function normalizeSongRow(row: any): CommunitySongRecord {
     audioPath,
     notesUrl: toText(row.notes_url ?? row.notes_blob_url ?? row.notesUrl, ""),
     notesPath,
+    coverUrl: rawCoverUrl || undefined,
+    coverPath,
+    tags: sanitizeTags(row.tags),
+    chartVersion: Math.max(1, Math.round(clampNumber(row.chart_version ?? row.chartVersion, 1))),
     difficulty,
     density,
     laneVariety,
@@ -259,6 +338,10 @@ function getSongInsertColumns(song: CommunitySongRecord, columns: SongColumnInfo
     { column: "audio_path", value: song.audioPath },
     { column: "notes_url", value: song.notesUrl },
     { column: "notes_path", value: song.notesPath },
+    { column: "cover_url", value: song.coverUrl || null },
+    { column: "cover_path", value: song.coverPath || null },
+    { column: "tags", value: JSON.stringify(song.tags), cast: "jsonb" },
+    { column: "chart_version", value: song.chartVersion },
     { column: "difficulty", value: song.difficulty },
     { column: "density", value: song.density },
     { column: "lane_variety", value: song.laneVariety },
@@ -317,6 +400,20 @@ async function insertSongRow(song: CommunitySongRecord) {
   );
 }
 
+async function ensureSongIdUsesText() {
+  const { rows } = await sql<{ data_type: string }>`
+    SELECT data_type
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'songs' AND column_name = 'id'
+    LIMIT 1
+  `;
+  const dataType = rows[0]?.data_type;
+  if (!dataType || ["text", "character varying"].includes(dataType)) return;
+
+  await sql.query("ALTER TABLE songs ALTER COLUMN id DROP DEFAULT");
+  await sql.query("ALTER TABLE songs ALTER COLUMN id TYPE TEXT USING id::text");
+}
+
 async function prepareSongsSchema() {
   ensureDatabaseConfig();
 
@@ -356,6 +453,10 @@ async function prepareSongsSchema() {
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS complexity REAL`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS difficulty REAL`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS density REAL`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS cover_url TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS cover_path TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS tags JSONB NOT NULL DEFAULT '[]'::jsonb`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS chart_version INTEGER NOT NULL DEFAULT 1`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS lane_variety REAL`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS slider_probability REAL`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS stamina REAL`;
@@ -364,6 +465,62 @@ async function prepareSongsSchema() {
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS author_name TEXT`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS status TEXT`;
+  await ensureSongIdUsesText();
+}
+
+async function prepareAdminStateSchema() {
+  await sql`
+    CREATE TABLE IF NOT EXISTS admin_state (
+      id TEXT PRIMARY KEY,
+      password_hash TEXT NOT NULL,
+      token_secret TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL
+    )
+  `;
+  await sql`ALTER TABLE admin_state ADD COLUMN IF NOT EXISTS password_hash TEXT`;
+  await sql`ALTER TABLE admin_state ADD COLUMN IF NOT EXISTS token_secret TEXT`;
+  await sql`ALTER TABLE admin_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ`;
+}
+
+async function getAdminState() {
+  const { rows } = await sql`
+    SELECT ctid::text AS row_ref, password_hash, token_secret, updated_at
+    FROM admin_state
+    ORDER BY updated_at DESC NULLS LAST
+    LIMIT 1
+  `;
+  if (rows.length === 0) {
+    const passwordHash = createPasswordHash(ADMIN_DEFAULT_PASSWORD);
+    const tokenSecret = crypto.randomBytes(32).toString("hex");
+    const updatedAt = new Date().toISOString();
+    try {
+      await sql`INSERT INTO admin_state (id, password_hash, token_secret, updated_at) VALUES ('default', ${passwordHash}, ${tokenSecret}, ${updatedAt})`;
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("invalid input syntax for type integer")) throw error;
+      await sql`INSERT INTO admin_state (id, password_hash, token_secret, updated_at) VALUES (1, ${passwordHash}, ${tokenSecret}, ${updatedAt})`;
+    }
+    return getAdminState();
+  }
+  const row = rows[0] as { row_ref?: string; password_hash?: string | null; token_secret?: string | null };
+  const passwordHash = isPasswordHash(row.password_hash) ? row.password_hash! : createPasswordHash(ADMIN_DEFAULT_PASSWORD);
+  const tokenSecret = typeof row.token_secret === "string" && row.token_secret.trim() ? row.token_secret.trim() : crypto.randomBytes(32).toString("hex");
+  if ((!isPasswordHash(row.password_hash) || !row.token_secret?.trim()) && row.row_ref) {
+    await sql`UPDATE admin_state SET password_hash = ${passwordHash}, token_secret = ${tokenSecret}, updated_at = ${new Date().toISOString()} WHERE ctid::text = ${row.row_ref}`;
+  }
+  return { passwordHash, tokenSecret };
+}
+
+async function isAuthorizedAdmin(req: any) {
+  await prepareAdminStateSchema();
+  const token = extractBearerToken(req);
+  if (!token) return false;
+  const state = await getAdminState();
+  return verifyAdminToken(token, state.tokenSecret);
+}
+
+async function tableExists(tableName: "global_scores" | "replays") {
+  const { rows } = await sql`SELECT to_regclass(${`public.${tableName}`}) IS NOT NULL AS present`;
+  return Boolean(rows[0]?.present);
 }
 
 async function readSong(id: string) {
@@ -372,8 +529,13 @@ async function readSong(id: string) {
   return normalizeSongRow(rows[0]);
 }
 
-async function handleGet(res: any) {
+async function handleGet(req: any, res: any) {
   await prepareSongsSchema();
+  const id = queryValue(req, "id").trim();
+  if (id) {
+    const song = await readSong(id);
+    return song ? ok(res, song) : fail(res, 404, "Song not found.");
+  }
   const { rows } = await sql`SELECT * FROM songs ORDER BY created_at DESC`;
   return ok(res, rows.map(normalizeSongRow));
 }
@@ -396,12 +558,16 @@ async function handlePost(req: any, res: any) {
   const laneVariety = clampNumber(body.laneVariety, 0.5);
   const sliderProbability = clampNumber(body.sliderProbability, 0.3);
   const stamina = clampNumber(body.stamina, 0.5);
+  const tags = sanitizeTags(body.tags);
+  const chartVersion = Math.max(1, Math.round(clampNumber(body.chartVersion, 1)));
 
   let id = "";
   let audioUrl = "";
   let audioPath = "";
   let notesUrl = "";
   let notesPath = "";
+  let coverUrl = "";
+  let coverPath = "";
 
   if (req.file) {
     ensureBlobConfig();
@@ -435,6 +601,8 @@ async function handlePost(req: any, res: any) {
     notesUrl = typeof body.notesUrl === "string" ? body.notesUrl.trim() : "";
     const providedAudioPath = extractRelativeAssetPath(body.audioPath);
     const providedNotesPath = extractRelativeAssetPath(body.notesPath);
+    coverUrl = typeof body.coverUrl === "string" ? body.coverUrl.trim() : "";
+    const providedCoverPath = extractRelativeAssetPath(body.coverPath);
 
     if (!id || !isSafeSongId(id)) {
       return fail(res, 400, "A valid song id is required.");
@@ -446,11 +614,16 @@ async function handlePost(req: any, res: any) {
 
     audioPath = canonicalizeSongAssetPath(id, providedAudioPath, "audio.mp3");
     notesPath = canonicalizeSongAssetPath(id, providedNotesPath, "notes.json");
+    if (coverUrl || providedCoverPath) {
+      if (!coverUrl || !providedCoverPath) return fail(res, 400, "Cover asset details are incomplete.");
+      coverPath = canonicalizeSongAssetPath(id, providedCoverPath, "cover.png");
+    }
     if (
       !isAbsoluteHttpUrl(audioUrl) ||
       !isAbsoluteHttpUrl(notesUrl) ||
       !isSafeSongAssetPath(id, audioPath) ||
       !isSafeSongAssetPath(id, notesPath)
+      || (coverUrl && (!isAbsoluteHttpUrl(coverUrl) || !isSafeSongAssetPath(id, coverPath)))
     ) {
       return fail(res, 400, "Uploaded asset details are invalid.");
     }
@@ -468,6 +641,10 @@ async function handlePost(req: any, res: any) {
     audioPath,
     notesUrl,
     notesPath,
+    coverUrl: coverUrl || undefined,
+    coverPath: coverPath || undefined,
+    tags,
+    chartVersion,
     difficulty,
     density,
     laneVariety,
@@ -485,14 +662,79 @@ async function handlePost(req: any, res: any) {
   return ok(res, song);
 }
 
+async function handlePatch(req: any, res: any) {
+  await prepareSongsSchema();
+  if (!(await isAuthorizedAdmin(req))) return fail(res, 401, "Unauthorized.");
+  const id = queryValue(req, "id").trim();
+  if (!id) return fail(res, 400, "A song id is required.");
+  const song = await readSong(id);
+  if (!song) return fail(res, 404, "Song not found.");
+  const updates = parseRequestBody(req);
+  const next: CommunitySongRecord = {
+    ...song,
+    name: typeof updates.name === "string" && updates.name.trim() ? updates.name.trim() : song.name,
+    artist: typeof updates.artist === "string" && updates.artist.trim() ? updates.artist.trim() : song.artist,
+    authorName: typeof updates.authorName === "string" && updates.authorName.trim() ? updates.authorName.trim() : song.authorName,
+    difficulty: clampNumber(updates.difficulty, song.difficulty),
+    density: clampNumber(updates.density, song.density),
+    laneVariety: clampNumber(updates.laneVariety, song.laneVariety),
+    sliderProbability: clampNumber(updates.sliderProbability, song.sliderProbability),
+    stamina: clampNumber(updates.stamina, song.stamina),
+    topScore: clampNumber(updates.topScore, song.topScore),
+    tags: updates.tags === undefined ? song.tags : sanitizeTags(updates.tags),
+    chartVersion: updates.chartVersion === undefined ? song.chartVersion : Math.max(1, Math.round(clampNumber(updates.chartVersion, song.chartVersion))),
+  };
+  await sql`
+    UPDATE songs SET name = ${next.name}, artist = ${next.artist}, difficulty = ${next.difficulty}, density = ${next.density},
+      lane_variety = ${next.laneVariety}, slider_probability = ${next.sliderProbability}, stamina = ${next.stamina},
+      top_score = ${next.topScore}, scores = ${JSON.stringify(next.scores)}::jsonb, author_name = ${next.authorName}, status = ${next.status},
+      tags = ${JSON.stringify(next.tags)}::jsonb, chart_version = ${next.chartVersion}
+    WHERE id = ${id}
+  `;
+  if (await tableExists("global_scores")) {
+    await sql`UPDATE global_scores SET song_id = ${song.id}, song_name = ${next.name}, artist = ${next.artist} WHERE song_id = ${song.id} OR ((song_id IS NULL OR song_id = '') AND song_name = ${song.name} AND artist = ${song.artist})`;
+  }
+  if (await tableExists("replays")) {
+    await sql`UPDATE replays SET song_id = ${song.id}, song_name = ${next.name}, artist = ${next.artist} WHERE song_id = ${song.id} OR ((song_id IS NULL OR song_id = '') AND song_name = ${song.name} AND artist = ${song.artist})`;
+  }
+  return ok(res, next);
+}
+
+async function handleDelete(req: any, res: any) {
+  await prepareSongsSchema();
+  if (!(await isAuthorizedAdmin(req))) return fail(res, 401, "Unauthorized.");
+  ensureBlobConfig();
+  const id = queryValue(req, "id").trim();
+  if (!id) return fail(res, 400, "A song id is required.");
+  const song = await readSong(id);
+  if (!song) return fail(res, 404, "Song not found.");
+  await sql`DELETE FROM songs WHERE id = ${id}`;
+  if (await tableExists("replays")) {
+    await sql`DELETE FROM replays WHERE song_id = ${song.id} OR ((song_id IS NULL OR song_id = '') AND song_name = ${song.name} AND artist = ${song.artist})`;
+  }
+  if (await tableExists("global_scores")) {
+    await sql`DELETE FROM global_scores WHERE song_id = ${song.id} OR ((song_id IS NULL OR song_id = '') AND song_name = ${song.name} AND artist = ${song.artist})`;
+  }
+  await del([song.audioPath, song.notesPath, ...(song.coverPath ? [song.coverPath] : [])], { token: BLOB_WRITE_TOKEN });
+  return ok(res, { message: "Song deleted." });
+}
+
 export default async function handler(req: any, res: any) {
   try {
     if (req.method === "GET") {
-      return await handleGet(res);
+      return await handleGet(req, res);
     }
 
     if (req.method === "POST") {
       return await handlePost(req, res);
+    }
+
+    if (req.method === "PATCH") {
+      return await handlePatch(req, res);
+    }
+
+    if (req.method === "DELETE") {
+      return await handleDelete(req, res);
     }
 
     return fail(res, 405, "Method not allowed.");

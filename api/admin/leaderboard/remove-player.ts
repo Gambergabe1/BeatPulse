@@ -20,6 +20,7 @@ interface ScoreRecord {
   accuracy: number;
   date: string;
   username: string;
+  fullCombo: boolean;
 }
 
 interface CommunitySongRecord {
@@ -150,6 +151,7 @@ function parseScoreArray(raw: Json, createdAt = new Date().toISOString()): Score
       accuracy: clampNumber(row.accuracy, 0),
       date: toDisplayDate(row.date, createdAt),
       username: toText(row.username, "Anonymous"),
+      fullCombo: row.fullCombo === true,
     };
   });
 }

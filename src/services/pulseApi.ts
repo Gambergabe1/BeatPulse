@@ -1,14 +1,17 @@
 import { put } from '@vercel/blob/client';
+import type { JudgementSummary } from '../types';
 
 export interface ScoreRecord {
   score: number;
   accuracy: number;
   date: string;
   username: string;
+  fullCombo: boolean;
 }
 
 export interface ScoreSubmissionResult {
   id: string;
+  score: GlobalScoreRecord;
   song?: {
     id: string;
     topScore: number;
@@ -24,6 +27,10 @@ export interface CommunitySongRecord {
   audioPath: string;
   notesUrl: string;
   notesPath: string;
+  coverUrl?: string;
+  coverPath?: string;
+  tags?: string[];
+  chartVersion?: number;
   difficulty: number;
   density?: number;
   laneVariety?: number;
@@ -34,6 +41,15 @@ export interface CommunitySongRecord {
   authorName?: string;
   createdAt: string;
   status?: string;
+}
+
+export interface MapReview {
+  id: string;
+  songId: string;
+  username: string;
+  rating: number;
+  body: string;
+  createdAt: string;
 }
 
 export interface ReplayRecord {
@@ -51,6 +67,7 @@ export interface ReplayRecord {
   date: string;
   createdAt: string;
   events: any[];
+  judgements?: JudgementSummary;
 }
 
 export interface GlobalScoreRecord {
@@ -63,6 +80,7 @@ export interface GlobalScoreRecord {
   createdAt: string;
   songName: string;
   artist: string;
+  fullCombo: boolean;
 }
 
 export interface LeaderboardModerationResult {
@@ -144,6 +162,31 @@ export interface IntegrityReport {
 
 export type PlayerPresence = 'online' | 'offline' | 'in-game';
 
+export interface PublicProfileRecentRun {
+  id: string;
+  songId?: string;
+  songName: string;
+  artist: string;
+  score: number;
+  accuracy: number;
+  fullCombo: boolean;
+  playedAt: string;
+}
+
+export interface PublicProfileUpdate {
+  level: number;
+  xp: number;
+  achievements: string[];
+  favoriteSongIds: string[];
+  recentRuns: PublicProfileRecentRun[];
+  pulseShards: number;
+  selectedAvatar: string;
+  selectedBadge?: string;
+  selectedTitle: string;
+  selectedFrame: string;
+  selectedTitleColor?: string;
+}
+
 export interface SocialPlayer {
   id: string;
   username: string;
@@ -152,6 +195,17 @@ export interface SocialPlayer {
   lastSeen: string;
   friendshipId?: string;
   unread?: number;
+  level: number;
+  xp: number;
+  achievements: string[];
+  favoriteSongIds: string[];
+  recentRuns: PublicProfileRecentRun[];
+  pulseShards: number;
+  selectedAvatar: string;
+  selectedBadge?: string;
+  selectedTitle: string;
+  selectedFrame: string;
+  selectedTitleColor?: string;
 }
 
 export interface SocialMessage {
@@ -179,6 +233,12 @@ export interface MultiplayerParticipant {
   updatedAt: string;
 }
 
+export interface MultiplayerSpectator {
+  playerId: string;
+  username: string;
+  joinedAt: string;
+}
+
 export interface MultiplayerRoom {
   id: string;
   code: string;
@@ -190,6 +250,8 @@ export interface MultiplayerRoom {
   updatedAt: string;
   maxPlayers: number;
   participants: MultiplayerParticipant[];
+  spectators?: MultiplayerSpectator[];
+  rematchVotes?: string[];
 }
 
 export interface SocialSnapshot {
@@ -282,6 +344,7 @@ async function uploadSongAssetsDirectly(payload: {
   id: string;
   audioFile: File;
   notes: unknown[];
+  coverFile?: File;
 }) {
   const audioExtension = getAudioExtension(payload.audioFile);
   const audioBaseName = payload.audioFile.name
@@ -301,11 +364,18 @@ async function uploadSongAssetsDirectly(payload: {
     }),
   ]);
 
+  const coverExtension = payload.coverFile ? getAudioExtension(payload.coverFile) : '';
+  const coverPath = payload.coverFile ? `songs/${payload.id}/cover${coverExtension}` : undefined;
+  const coverUpload = payload.coverFile && coverPath
+    ? await uploadBlobDirectly(coverPath, payload.coverFile, { contentType: payload.coverFile.type || undefined })
+    : undefined;
+
   return {
     audioUrl: audioUpload.url,
     audioPath: audioUpload.pathname,
     notesUrl: notesUpload.url,
     notesPath: notesUpload.pathname,
+    ...(coverUpload ? { coverUrl: coverUpload.url, coverPath: coverUpload.pathname } : {}),
   };
 }
 
@@ -376,6 +446,7 @@ function createSongUploadFormData(payload: {
   stamina: number;
   authorName: string;
   notes: unknown[];
+  tags?: string[];
 }) {
   const formData = new FormData();
   formData.append('audio', payload.audioFile);
@@ -388,6 +459,7 @@ function createSongUploadFormData(payload: {
   formData.append('stamina', String(payload.stamina));
   formData.append('authorName', payload.authorName);
   formData.append('notes', JSON.stringify(payload.notes));
+  formData.append('tags', JSON.stringify(payload.tags || []));
   return formData;
 }
 
@@ -402,6 +474,7 @@ async function saveCommunitySongMultipart(payload: {
   stamina: number;
   authorName: string;
   notes: unknown[];
+  tags?: string[];
 }) {
   const res = await fetch('/api/songs', {
     method: 'POST',
@@ -417,7 +490,7 @@ export const getCommunitySongs = async (): Promise<CommunitySongRecord[]> => {
 
 export const getSongById = async (id: string): Promise<CommunitySongRecord> => {
   try {
-    return await parseApiResponse<CommunitySongRecord>(await fetch(`/api/songs/${encodeURIComponent(id)}`));
+    return await parseApiResponse<CommunitySongRecord>(await fetch(`/api/songs?id=${encodeURIComponent(id)}`));
   } catch (error) {
     const songs = await getCommunitySongs();
     const match = songs.find((song) => song.id === id);
@@ -427,6 +500,16 @@ export const getSongById = async (id: string): Promise<CommunitySongRecord> => {
     throw error;
   }
 };
+
+export const getMapReviews = async (songId: string): Promise<MapReview[]> =>
+  parseApiResponse<MapReview[]>(await fetch(`/api/map-reviews?songId=${encodeURIComponent(songId)}`));
+
+export const saveMapReview = async (payload: Pick<MapReview, 'songId' | 'username' | 'rating' | 'body'>): Promise<MapReview> =>
+  parseApiResponse<MapReview>(await fetch('/api/map-reviews', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }));
 
 export const saveCommunitySong = async (payload: {
   audioFile: File;
@@ -439,6 +522,8 @@ export const saveCommunitySong = async (payload: {
   stamina: number;
   authorName: string;
   notes: unknown[];
+  coverFile?: File;
+  tags?: string[];
 }): Promise<CommunitySongRecord> => {
   if (!isLocalHostname()) {
     try {
@@ -447,6 +532,7 @@ export const saveCommunitySong = async (payload: {
         id,
         audioFile: payload.audioFile,
         notes: payload.notes,
+        coverFile: payload.coverFile,
       });
 
       const res = await fetch('/api/songs', {
@@ -462,6 +548,8 @@ export const saveCommunitySong = async (payload: {
           sliderProbability: payload.sliderProbability,
           stamina: payload.stamina,
           authorName: payload.authorName,
+          tags: payload.tags || [],
+          chartVersion: 1,
           ...uploadedAssets,
         }),
       });
@@ -494,7 +582,7 @@ export const updateCommunitySong = async (
   updates: Record<string, unknown>,
   token: string | null
 ): Promise<CommunitySongRecord> => {
-  const res = await fetch(`/api/songs/${encodeURIComponent(id)}`, {
+  const res = await fetch(`/api/songs?id=${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: {
       'Content-Type': 'application/json',
@@ -506,7 +594,7 @@ export const updateCommunitySong = async (
 };
 
 export const deleteCommunitySong = async (id: string, token: string | null): Promise<void> => {
-  const res = await fetch(`/api/songs/${encodeURIComponent(id)}`, {
+  const res = await fetch(`/api/songs?id=${encodeURIComponent(id)}`, {
     method: 'DELETE',
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
@@ -549,13 +637,31 @@ export const saveGlobalScore = async (payload: {
   username: string;
   songName: string;
   artist: string;
+  fullCombo: boolean;
+  submissionId?: string;
 }): Promise<ScoreSubmissionResult> => {
-  const res = await fetch('/api/global-scores', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  return parseApiResponse<ScoreSubmissionResult>(res);
+  const submissionId = payload.submissionId || crypto.randomUUID();
+  const requestBody = JSON.stringify({ ...payload, submissionId });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const res = await fetch('/api/global-scores', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: requestBody,
+      });
+      if (attempt === 0 && (res.status === 408 || res.status === 429 || res.status >= 500)) {
+        await new Promise(resolve => window.setTimeout(resolve, 450));
+        continue;
+      }
+      return await parseApiResponse<ScoreSubmissionResult>(res);
+    } catch (error) {
+      if (attempt === 1) throw error;
+      await new Promise(resolve => window.setTimeout(resolve, 450));
+    }
+  }
+
+  throw new Error('Unable to save score.');
 };
 
 export const getReplays = async (): Promise<ReplayRecord[]> => {
@@ -636,31 +742,39 @@ async function postJson<T>(url: string, payload: Record<string, unknown>): Promi
   }));
 }
 
+const socialEndpoint = (action: string) => `/api/social?action=${encodeURIComponent(action)}`;
+
+const postSocialJson = <T>(action: string, payload: Record<string, unknown>) =>
+  postJson<T>(socialEndpoint(action), payload);
+
 export const startSocialSession = (identity: PlayerIdentity) =>
-  postJson<SocialSnapshot>('/api/social/session', { ...identity });
+  postSocialJson<SocialSnapshot>('session', { ...identity });
+
+export const updateSocialProfile = (identity: PlayerIdentity, profile: PublicProfileUpdate) =>
+  postSocialJson<SocialSnapshot>('profile/update', { ...identity, profile });
 
 export const getSocialSnapshot = async (identity: PlayerIdentity) => {
-  const search = new URLSearchParams({ playerId: identity.playerId, username: identity.username });
-  return parseApiResponse<SocialSnapshot>(await fetch(`/api/social/snapshot?${search}`, {
+  const search = new URLSearchParams({ action: 'snapshot', playerId: identity.playerId, username: identity.username });
+  return parseApiResponse<SocialSnapshot>(await fetch(`/api/social?${search}`, {
     headers: { 'X-BeatPulse-Token': identity.playerToken },
   }));
 };
 
 export const sendFriendRequest = (identity: PlayerIdentity, friendCode: string) =>
-  postJson<SocialSnapshot>('/api/social/friends/request', { ...identity, friendCode });
+  postSocialJson<SocialSnapshot>('friends/request', { ...identity, friendCode });
 
 export const respondToFriendRequest = (identity: PlayerIdentity, friendshipId: string, accept: boolean) =>
-  postJson<SocialSnapshot>('/api/social/friends/respond', { ...identity, friendshipId, accept });
+  postSocialJson<SocialSnapshot>('friends/respond', { ...identity, friendshipId, accept });
 
 export const removeFriend = (identity: PlayerIdentity, friendId: string) =>
-  postJson<SocialSnapshot>('/api/social/friends/remove', { ...identity, friendId });
+  postSocialJson<SocialSnapshot>('friends/remove', { ...identity, friendId });
 
 export const blockPlayer = (identity: PlayerIdentity, targetId: string, blocked = true) =>
-  postJson<SocialSnapshot>('/api/social/block', { ...identity, targetId, blocked });
+  postSocialJson<SocialSnapshot>('block', { ...identity, targetId, blocked });
 
 export const getDirectMessages = async (identity: PlayerIdentity, friendId: string) => {
-  const search = new URLSearchParams({ playerId: identity.playerId, username: identity.username, friendId });
-  return parseApiResponse<SocialMessage[]>(await fetch(`/api/social/messages?${search}`, {
+  const search = new URLSearchParams({ action: 'messages', playerId: identity.playerId, username: identity.username, friendId });
+  return parseApiResponse<SocialMessage[]>(await fetch(`/api/social?${search}`, {
     headers: { 'X-BeatPulse-Token': identity.playerToken },
   }));
 };
@@ -670,7 +784,7 @@ export const sendDirectMessage = (
   recipientId: string,
   body: string,
   invite?: { roomCode: string }
-) => postJson<SocialMessage>('/api/social/messages', {
+) => postSocialJson<SocialMessage>('messages', {
   ...identity,
   recipientId,
   body,
@@ -678,35 +792,38 @@ export const sendDirectMessage = (
 });
 
 export const createMultiplayerRoom = (identity: PlayerIdentity, songId: string) =>
-  postJson<MultiplayerRoom>('/api/multiplayer/rooms', { ...identity, songId });
+  postSocialJson<MultiplayerRoom>('multiplayer/rooms', { ...identity, songId });
 
 export const joinMultiplayerRoom = (identity: PlayerIdentity, code: string) =>
-  postJson<MultiplayerRoom>('/api/multiplayer/rooms/join', { ...identity, code });
+  postSocialJson<MultiplayerRoom>('multiplayer/rooms/join', { ...identity, code });
+
+export const changeMultiplayerRoomSong = (identity: PlayerIdentity, roomId: string, songId: string) =>
+  postSocialJson<MultiplayerRoom>('multiplayer/rooms/song', { ...identity, roomId, songId });
 
 export const setMultiplayerReady = (identity: PlayerIdentity, roomId: string, ready: boolean) =>
-  postJson<MultiplayerRoom>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/ready`, { ...identity, ready });
+  postSocialJson<MultiplayerRoom>('multiplayer/rooms/ready', { ...identity, roomId, ready });
 
 export const startMultiplayerRoom = (identity: PlayerIdentity, roomId: string) =>
-  postJson<MultiplayerRoom>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/start`, { ...identity });
+  postSocialJson<MultiplayerRoom>('multiplayer/rooms/start', { ...identity, roomId });
 
 export const updateMultiplayerProgress = (
   identity: PlayerIdentity,
   roomId: string,
   progress: { score: number; combo: number; accuracy: number; progress: number; finished?: boolean }
-) => postJson<MultiplayerRoom>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/progress`, { ...identity, ...progress });
+) => postSocialJson<MultiplayerRoom>('multiplayer/rooms/progress', { ...identity, roomId, ...progress });
 
 export const requestMultiplayerRematch = (identity: PlayerIdentity, roomId: string) =>
-  postJson<MultiplayerRoom>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/rematch`, { ...identity });
+  postSocialJson<MultiplayerRoom>('multiplayer/rooms/rematch', { ...identity, roomId });
 
 export const leaveMultiplayerRoom = (identity: PlayerIdentity, roomId: string) =>
-  postJson<{ left: true }>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/leave`, { ...identity });
+  postSocialJson<{ left: true }>('multiplayer/rooms/leave', { ...identity, roomId });
 
 export const getRoomMessages = async (identity: PlayerIdentity, roomId: string) => {
-  const search = new URLSearchParams({ playerId: identity.playerId, username: identity.username });
-  return parseApiResponse<SocialMessage[]>(await fetch(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/messages?${search}`, {
+  const search = new URLSearchParams({ action: 'multiplayer/rooms/messages', playerId: identity.playerId, username: identity.username, roomId });
+  return parseApiResponse<SocialMessage[]>(await fetch(`/api/social?${search}`, {
     headers: { 'X-BeatPulse-Token': identity.playerToken },
   }));
 };
 
 export const sendRoomMessage = (identity: PlayerIdentity, roomId: string, body: string) =>
-  postJson<SocialMessage>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/messages`, { ...identity, body });
+  postSocialJson<SocialMessage>('multiplayer/rooms/messages', { ...identity, roomId, body });

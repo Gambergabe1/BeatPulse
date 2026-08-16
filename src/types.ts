@@ -10,6 +10,17 @@ export interface Note {
   held?: boolean; // Runtime sustain state
 }
 
+export type SongSectionKind = 'intro' | 'verse' | 'chorus' | 'bridge' | 'outro';
+
+export interface SongSection {
+  id: string;
+  label: string;
+  kind: SongSectionKind;
+  start: number;
+  end: number;
+  intensity: number;
+}
+
 export interface CommunitySong {
   id: string;
   name: string;
@@ -32,10 +43,41 @@ export interface GameState {
   combo: number;
   maxCombo: number;
   accuracy: number;
+  health: number;
   totalNotes: number;
   hitNotes: number;
   currentTime: number;
   duration: number;
+}
+
+export interface GameplayOptions {
+  practiceMode: boolean;
+  practiceSpeed: number;
+  scrollSpeed: number;
+  inputOffsetMs: number;
+  hiddenNotes: boolean;
+  mirrorLanes: boolean;
+  randomLanes: boolean;
+  noFail: boolean;
+}
+
+export const DEFAULT_GAMEPLAY_OPTIONS: GameplayOptions = {
+  practiceMode: false,
+  practiceSpeed: 1,
+  scrollSpeed: 1,
+  inputOffsetMs: 0,
+  hiddenNotes: false,
+  mirrorLanes: false,
+  randomLanes: false,
+  noFail: true,
+};
+
+export interface JudgementSummary {
+  perfect: number;
+  great: number;
+  miss: number;
+  holdBreak: number;
+  timingOffsets: number[];
 }
 
 export interface Settings {
@@ -48,6 +90,14 @@ export interface Settings {
   laneVariety: number;
   sliderProbability: number;
   stamina: number;
+  gameplay: GameplayOptions;
+  laneTheme: 'pulse' | 'colorblind' | 'high-contrast' | 'ocean' | 'sunset';
+  visualTheme: 'pulse' | 'aurora' | 'sunset';
+  hitSound: 'classic' | 'arcade' | 'soft';
+  menuTheme: 'pulse' | 'aurora';
+  reducedMotion: boolean;
+  largeNotes: boolean;
+  hapticFeedback: boolean;
 }
 
 export interface SongData {
@@ -61,12 +111,14 @@ export interface SongData {
   laneVariety?: number;
   sliderProbability?: number;
   stamina?: number;
+  sections?: SongSection[];
 }
 
 export interface ReplayEvent {
   time: number;
   lane: number;
   type: string;
+  offsetMs?: number;
 }
 
 export interface SavedReplay {
@@ -83,4 +135,5 @@ export interface SavedReplay {
   accuracy: number;
   date: string;
   events: ReplayEvent[];
+  judgements?: JudgementSummary;
 }

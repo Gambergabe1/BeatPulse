@@ -1,5 +1,5 @@
 import * as crypto from "node:crypto";
-import { sql } from "@vercel/postgres";
+import { db, sql, type VercelPoolClient } from "@vercel/postgres";
 
 interface GlobalScoreRecord {
   id: string;
@@ -11,6 +11,7 @@ interface GlobalScoreRecord {
   createdAt: string;
   songName: string;
   artist: string;
+  fullCombo: boolean;
 }
 
 interface ScoreRecord {
@@ -18,6 +19,7 @@ interface ScoreRecord {
   accuracy: number;
   date: string;
   username: string;
+  fullCombo: boolean;
 }
 
 interface SongScoreState {
@@ -46,6 +48,11 @@ function ensureDatabaseConfig() {
 function clampNumber(value: unknown, fallback: number) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getBoundedQueryNumber(value: unknown, fallback: number, minimum: number, maximum: number) {
+  if (value === undefined || value === null || value === "") return fallback;
+  return Math.max(minimum, Math.min(maximum, clampNumber(value, fallback)));
 }
 
 function toText(value: unknown, fallback: string) {
@@ -114,6 +121,7 @@ function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
     createdAt,
     songName: toText(row.song_name ?? row.songName, "Unknown Song"),
     artist: toText(row.artist, "Unknown Artist"),
+    fullCombo: row.full_combo === true || row.fullCombo === true,
   };
 }
 
@@ -127,6 +135,7 @@ function parseScoreArray(raw: unknown, createdAt: string) {
       accuracy: clampNumber(row.accuracy, 0),
       date: toDisplayDate(row.date, createdAt),
       username: toText(row.username, "Anonymous"),
+      fullCombo: row.fullCombo === true,
     };
   }).sort((a, b) => b.score - a.score);
 }
@@ -148,9 +157,43 @@ function normalizeSongScoreRow(row: any): SongScoreState {
   };
 }
 
+function getSubmissionId(value: unknown) {
+  if (typeof value !== "string") return crypto.randomUUID();
+  const id = value.trim();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
+    ? id
+    : crypto.randomUUID();
+}
+
+async function readGlobalScoreWithClient(client: VercelPoolClient, id: string): Promise<GlobalScoreRecord | null> {
+  const { rows } = await client.sql`SELECT * FROM global_scores WHERE id = ${id} LIMIT 1`;
+  return rows.length > 0 ? normalizeGlobalScoreRow(rows[0]) : null;
+}
+
 async function tableExists(tableName: "songs" | "global_scores") {
   const { rows } = await sql`SELECT to_regclass(${`public.${tableName}`}) IS NOT NULL AS present`;
   return Boolean(rows[0]?.present);
+}
+
+async function ensureTextIdentifier(tableName: "songs" | "global_scores", columnName: "id" | "song_id") {
+  const { rows } = await sql<{ data_type: string }>`
+    SELECT data_type
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = ${tableName} AND column_name = ${columnName}
+    LIMIT 1
+  `;
+  const dataType = rows[0]?.data_type;
+  if (!dataType || ["text", "character varying"].includes(dataType)) return;
+
+  // Preserve legacy numeric records while allowing the UUID IDs created by BeatPulse.
+  await sql.query(`ALTER TABLE ${tableName} ALTER COLUMN ${columnName} DROP DEFAULT`);
+  await sql.query(`ALTER TABLE ${tableName} ALTER COLUMN ${columnName} TYPE TEXT USING ${columnName}::text`);
+}
+
+async function migrateLegacyIdentifierTypes() {
+  await ensureTextIdentifier("global_scores", "id");
+  await ensureTextIdentifier("global_scores", "song_id");
+  await ensureTextIdentifier("songs", "id");
 }
 
 async function prepareGlobalScoresSchema() {
@@ -166,6 +209,7 @@ async function prepareGlobalScoresSchema() {
       username TEXT NOT NULL,
       song_name TEXT NOT NULL,
       artist TEXT NOT NULL,
+      full_combo BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL
     );
   `;
@@ -178,7 +222,9 @@ async function prepareGlobalScoresSchema() {
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS username TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS song_name TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS artist TEXT`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS full_combo BOOLEAN NOT NULL DEFAULT FALSE`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
+  await migrateLegacyIdentifierTypes();
 }
 
 async function prepareSongsLookupSchema() {
@@ -196,15 +242,8 @@ async function prepareSongsLookupSchema() {
   return true;
 }
 
-async function readSong(id: string): Promise<SongScoreState | null> {
-  if (!id) return null;
-
-  const songsPresent = await prepareSongsLookupSchema();
-  if (!songsPresent) {
-    return null;
-  }
-
-  const { rows } = await sql`
+async function readSongWithClient(client: VercelPoolClient, id: string): Promise<SongScoreState | null> {
+  const { rows } = await client.sql`
     SELECT id, name, artist, top_score, scores, created_at
     FROM songs
     WHERE id = ${id}
@@ -218,8 +257,8 @@ async function readSong(id: string): Promise<SongScoreState | null> {
 async function handleGet(req: any, res: any) {
   await prepareGlobalScoresSchema();
 
-  const limit = Math.max(1, Math.min(500, clampNumber(getQueryValue(req, "limit"), 100)));
-  const offset = Math.max(0, clampNumber(getQueryValue(req, "offset"), 0));
+  const limit = getBoundedQueryNumber(getQueryValue(req, "limit"), 100, 1, 500);
+  const offset = getBoundedQueryNumber(getQueryValue(req, "offset"), 0, 0, Number.MAX_SAFE_INTEGER);
 
   const { rows } = await sql`
     SELECT * FROM global_scores
@@ -241,74 +280,125 @@ async function handlePost(req: any, res: any) {
   const body = parseRequestBody(req);
   const score = clampNumber(body.score, Number.NaN);
   const accuracy = clampNumber(body.accuracy, Number.NaN);
-  const requestedSongId = typeof body.songId === "string" ? body.songId.trim() : "";
+  const requestedSongId =
+    typeof body.songId === "string" && body.songId.trim()
+      ? body.songId.trim()
+      : (getQueryValue(req, "songId") || "").trim();
   const username = typeof body.username === "string" && body.username.trim() ? body.username.trim() : "Anonymous";
   const date = typeof body.date === "string" && body.date.trim() ? body.date.trim() : new Date().toLocaleDateString();
+  const fullCombo = body.fullCombo === true;
+  const submissionId = getSubmissionId(body.submissionId);
 
   if (!Number.isFinite(score) || !Number.isFinite(accuracy)) {
     return fail(res, 400, "Score and accuracy must be numbers.");
   }
 
-  const linkedSong = requestedSongId ? await readSong(requestedSongId) : null;
-  if (requestedSongId && !linkedSong) {
+  const songsAvailable = requestedSongId ? await prepareSongsLookupSchema() : false;
+  if (requestedSongId && !songsAvailable) {
     return fail(res, 404, "Song not found.");
   }
 
-  const newScore: GlobalScoreRecord = {
-    id: crypto.randomUUID(),
-    songId: linkedSong?.id || requestedSongId || undefined,
-    score,
-    accuracy,
-    date,
-    username,
-    createdAt: new Date().toISOString(),
-    songName:
-      linkedSong?.name ||
-      (typeof body.songName === "string" && body.songName.trim() ? body.songName.trim() : "Unknown Song"),
-    artist:
-      linkedSong?.artist ||
-      (typeof body.artist === "string" && body.artist.trim() ? body.artist.trim() : "Unknown Artist"),
-  };
+  let client: VercelPoolClient | undefined;
+  try {
+    client = await db.connect();
+    await client.sql`BEGIN`;
 
-  await sql`
-    INSERT INTO global_scores (id, song_id, score, accuracy, date, username, song_name, artist, created_at)
-    VALUES (
-      ${newScore.id},
-      ${newScore.songId || null},
-      ${newScore.score},
-      ${newScore.accuracy},
-      ${newScore.date},
-      ${newScore.username},
-      ${newScore.songName},
-      ${newScore.artist},
-      ${newScore.createdAt}
-    )
-  `;
+    // A retry must never create a duplicate global score or duplicate song entry.
+    await client.sql`SELECT pg_advisory_xact_lock(hashtext(${`beatpulse:submission:${submissionId}`}))`;
+    const existingScore = await readGlobalScoreWithClient(client, submissionId);
+    if (existingScore) {
+      const existingSong = existingScore.songId ? await readSongWithClient(client, existingScore.songId) : null;
+      await client.sql`COMMIT`;
+      return ok(res, { id: existingScore.id, score: existingScore, song: existingSong });
+    }
 
-  let updatedSong: SongScoreState | null = null;
-  if (linkedSong) {
-    const nextSongScores = [...linkedSong.scores, {
-      score: newScore.score,
-      accuracy: newScore.accuracy,
-      date: newScore.date,
-      username: newScore.username,
-    }].sort((a, b) => b.score - a.score).slice(0, 5);
-    const nextTopScore = toTopScoreFromScores(nextSongScores);
+    // The song leaderboard is stored as one JSON column. Lock that song while
+    // a finish is added so simultaneous players cannot overwrite each other.
+    if (requestedSongId) {
+      await client.sql`SELECT pg_advisory_xact_lock(hashtext(${`beatpulse:score:${requestedSongId}`}))`;
+    }
 
-    await sql`
-      UPDATE songs
-      SET scores = ${JSON.stringify(nextSongScores)}::jsonb, top_score = ${nextTopScore}
-      WHERE id = ${linkedSong.id}
+    const linkedSong = requestedSongId ? await readSongWithClient(client, requestedSongId) : null;
+    if (requestedSongId && !linkedSong) {
+      await client.sql`ROLLBACK`;
+      return fail(res, 404, "Song not found.");
+    }
+
+    const newScore: GlobalScoreRecord = {
+      id: submissionId,
+      songId: linkedSong?.id || undefined,
+      score,
+      accuracy,
+      date,
+      username,
+      createdAt: new Date().toISOString(),
+      songName:
+        linkedSong?.name ||
+        (typeof body.songName === "string" && body.songName.trim() ? body.songName.trim() : "Unknown Song"),
+      artist:
+        linkedSong?.artist ||
+        (typeof body.artist === "string" && body.artist.trim() ? body.artist.trim() : "Unknown Artist"),
+      fullCombo,
+    };
+
+    await client.sql`
+      INSERT INTO global_scores (id, song_id, score, accuracy, date, username, song_name, artist, full_combo, created_at)
+      VALUES (
+        ${newScore.id},
+        ${newScore.songId || null},
+        ${newScore.score},
+        ${newScore.accuracy},
+        ${newScore.date},
+        ${newScore.username},
+        ${newScore.songName},
+        ${newScore.artist},
+        ${newScore.fullCombo},
+        ${newScore.createdAt}
+      )
     `;
 
-    updatedSong = {
-      ...linkedSong,
-      scores: nextSongScores,
-      topScore: nextTopScore,
-    };
-  }
+    let updatedSong: SongScoreState | null = null;
+    if (linkedSong) {
+      const nextSongScores = [...linkedSong.scores, {
+        score: newScore.score,
+        accuracy: newScore.accuracy,
+        date: newScore.date,
+        username: newScore.username,
+        fullCombo: newScore.fullCombo,
+      }].sort((a, b) => b.score - a.score).slice(0, 5);
+      const nextTopScore = toTopScoreFromScores(nextSongScores);
 
-  return ok(res, { id: newScore.id, song: updatedSong });
+      await client.sql`
+        UPDATE songs
+        SET scores = ${JSON.stringify(nextSongScores)}::jsonb, top_score = ${nextTopScore}
+        WHERE id = ${linkedSong.id}
+      `;
+
+      updatedSong = {
+        ...linkedSong,
+        scores: nextSongScores,
+        topScore: nextTopScore,
+      };
+    }
+
+    await client.sql`COMMIT`;
+    console.info("[api/global-scores] saved", {
+      scoreId: newScore.id,
+      songId: newScore.songId ?? null,
+      hasSongLeaderboard: Boolean(updatedSong),
+    });
+    return ok(res, { id: newScore.id, score: newScore, song: updatedSong });
+  } catch (error) {
+    if (client) {
+      try { await client.sql`ROLLBACK`; } catch { /* The transaction may already be closed. */ }
+    }
+    console.error("[api/global-scores] save failed", {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  } finally {
+    client?.release();
+  }
 }
 
 export default async function handler(req: any, res: any) {
@@ -324,6 +414,7 @@ export default async function handler(req: any, res: any) {
     return fail(res, 405, "Method not allowed.");
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to process global scores.";
+    console.error("[api/global-scores] request failed", { method: req.method, message });
     return fail(res, 500, message);
   }
 }

@@ -18,6 +18,7 @@ interface ReplayRecord {
   date: string;
   createdAt: string;
   events: unknown[];
+  judgements?: unknown;
 }
 
 interface SongLookupRow {
@@ -107,12 +108,34 @@ function normalizeReplayRow(row: any): ReplayRecord {
     date: toDisplayDate(row.date, createdAt),
     createdAt,
     events: parseEventsArray(row.events as Json),
+    judgements: row.judgements ?? undefined,
   };
 }
 
 async function tableExists(tableName: "songs" | "replays") {
   const { rows } = await sql`SELECT to_regclass(${`public.${tableName}`}) IS NOT NULL AS present`;
   return Boolean(rows[0]?.present);
+}
+
+async function ensureTextIdentifier(tableName: "songs" | "replays", columnName: "id" | "song_id") {
+  const { rows } = await sql<{ data_type: string }>`
+    SELECT data_type
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = ${tableName} AND column_name = ${columnName}
+    LIMIT 1
+  `;
+  const dataType = rows[0]?.data_type;
+  if (!dataType || ["text", "character varying"].includes(dataType)) return;
+
+  // Preserve legacy numeric records while allowing the UUID IDs created by BeatPulse.
+  await sql.query(`ALTER TABLE ${tableName} ALTER COLUMN ${columnName} DROP DEFAULT`);
+  await sql.query(`ALTER TABLE ${tableName} ALTER COLUMN ${columnName} TYPE TEXT USING ${columnName}::text`);
+}
+
+async function migrateLegacyIdentifierTypes() {
+  await ensureTextIdentifier("replays", "id");
+  await ensureTextIdentifier("replays", "song_id");
+  await ensureTextIdentifier("songs", "id");
 }
 
 async function prepareReplaysSchema() {
@@ -134,6 +157,7 @@ async function prepareReplaysSchema() {
       date TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL,
       events JSONB NOT NULL DEFAULT '[]'::jsonb
+      , judgements JSONB
     );
   `;
 
@@ -151,6 +175,8 @@ async function prepareReplaysSchema() {
   await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS date TEXT`;
   await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
   await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS events JSONB`;
+  await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS judgements JSONB`;
+  await migrateLegacyIdentifierTypes();
 }
 
 async function prepareSongsLookupSchema() {
@@ -227,18 +253,19 @@ async function handlePost(req: any, res: any) {
     date: (typeof body.date === "string" && body.date.trim()) || new Date().toLocaleDateString(),
     createdAt: new Date().toISOString(),
     events: parseEventsArray(body.events as Json),
+    judgements: body.judgements ?? undefined,
   };
 
   await sql`
     INSERT INTO replays (
       id, song_id, song_name, artist,
       difficulty, density, lane_variety, slider_probability, stamina,
-      score, accuracy, date, created_at, events
+      score, accuracy, date, created_at, events, judgements
     )
     VALUES (
       ${replay.id}, ${replay.songId}, ${replay.songName}, ${replay.artist},
       ${replay.difficulty}, ${replay.density}, ${replay.laneVariety}, ${replay.sliderProbability}, ${replay.stamina},
-      ${replay.score}, ${replay.accuracy}, ${replay.date}, ${replay.createdAt}, ${JSON.stringify(replay.events)}::jsonb
+      ${replay.score}, ${replay.accuracy}, ${replay.date}, ${replay.createdAt}, ${JSON.stringify(replay.events)}::jsonb, ${JSON.stringify(replay.judgements ?? null)}::jsonb
     )
   `;
 

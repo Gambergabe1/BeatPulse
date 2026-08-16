@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Note, GameState, Settings } from '../types';
+import { DEFAULT_GAMEPLAY_OPTIONS, GameplayOptions, JudgementSummary, Note, GameState, Settings, SongSection } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 import { Home, Pause, Play } from 'lucide-react';
 import { MultiplayerRoom } from '../services/pulseApi';
@@ -7,15 +7,18 @@ import { prefersMovingSliders } from '../utils/device';
 
 interface GameCanvasProps {
   notes: Note[];
+  sections?: SongSection[];
   audioContext: AudioContext;
   audioBuffer: AudioBuffer;
   difficulty: number;
-  onGameEnd: (score: number, accuracy: number, maxCombo: number, replayEvents: { time: number; lane: number; type: string }[]) => void;
+  onGameEnd: (score: number, accuracy: number, maxCombo: number, replayEvents: { time: number; lane: number; type: string }[], fullCombo: boolean, judgements: JudgementSummary) => void;
   onExit: () => void;
   isReplay?: boolean;
   replayEvents?: { time: number; lane: number; type: string }[];
   settings: Settings;
+  gameplayOptions: GameplayOptions;
   multiplayerRoom?: MultiplayerRoom | null;
+  multiplayerPlayerId?: string;
   synchronizedStartAt?: string;
   onMultiplayerProgress?: (progress: { score: number; combo: number; accuracy: number; progress: number }) => void;
 }
@@ -23,6 +26,18 @@ interface GameCanvasProps {
 const LANE_COUNT = 4;
 const NOTE_SPEED = 600; // pixels per second
 const HOLD_GRACE_SECONDS = 0.115;
+const LANE_THEMES = {
+  pulse: ['#00f3ff', '#a855f7', '#ff4fcf', '#65ff8f'],
+  colorblind: ['#56b4e9', '#e69f00', '#009e73', '#cc79a7'],
+  'high-contrast': ['#00e5ff', '#ffea00', '#ff6e40', '#76ff03'],
+  ocean: ['#38bdf8', '#22d3ee', '#2dd4bf', '#60a5fa'],
+  sunset: ['#fb7185', '#fb923c', '#facc15', '#c084fc'],
+} as const;
+const VISUAL_BACKGROUNDS = {
+  pulse: 'radial-gradient(circle at 50% 20%, rgba(99,102,241,0.12), transparent 38%), radial-gradient(circle at 16% 75%, rgba(0,243,255,0.06), transparent 32%), radial-gradient(circle at 84% 72%, rgba(188,19,254,0.07), transparent 32%)',
+  aurora: 'radial-gradient(circle at 50% 12%, rgba(34,197,94,0.14), transparent 38%), radial-gradient(circle at 12% 72%, rgba(56,189,248,0.08), transparent 34%), radial-gradient(circle at 86% 70%, rgba(16,185,129,0.09), transparent 32%)',
+  sunset: 'radial-gradient(circle at 50% 18%, rgba(251,146,60,0.15), transparent 38%), radial-gradient(circle at 16% 76%, rgba(244,63,94,0.08), transparent 32%), radial-gradient(circle at 82% 72%, rgba(168,85,247,0.09), transparent 34%)',
+} as const;
 const TIMING_PRESETS = [
   { id: 'relaxed', label: 'Relaxed', hitWindow: 0.22, perfectWindow: 0.08, description: 'More room around every note.' },
   { id: 'standard', label: 'Standard', hitWindow: 0.15, perfectWindow: 0.05, description: 'Balanced timing for normal play.' },
@@ -50,6 +65,22 @@ const getSlideLanePosition = (note: Note, time: number) => {
 const getRequiredSlideLane = (note: Note, time: number) =>
   Math.round(getSlideLanePosition(note, time));
 
+const emptyJudgements = (): JudgementSummary => ({ perfect: 0, great: 0, miss: 0, holdBreak: 0, timingOffsets: [] });
+
+const createLaneOrder = (notes: Note[]) => {
+  let seed = notes.reduce((value, note) => {
+    for (const character of note.id) value = ((value << 5) - value + character.charCodeAt(0)) | 0;
+    return value;
+  }, notes.length * 97) >>> 0;
+  const order = [0, 1, 2, 3];
+  for (let index = order.length - 1; index > 0; index--) {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    const target = seed % (index + 1);
+    [order[index], order[target]] = [order[target], order[index]];
+  }
+  return order;
+};
+
 const estimateVisualBeat = (notes: Note[]) => {
   const uniqueTimes = [...new Set(notes.map((note) => Number(note.time.toFixed(3))))].sort((a, b) => a - b);
   const intervals: number[] = [];
@@ -66,6 +97,7 @@ const estimateVisualBeat = (notes: Note[]) => {
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({
   notes,
+  sections = [],
   audioContext,
   audioBuffer,
   difficulty,
@@ -74,22 +106,32 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   isReplay = false,
   replayEvents = [],
   settings,
+  gameplayOptions,
   multiplayerRoom,
+  multiplayerPlayerId,
   synchronizedStartAt,
   onMultiplayerProgress,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const movingSlidersEnabled = useMemo(prefersMovingSliders, []);
-  const [noteSpeedMultiplier, setNoteSpeedMultiplier] = useState(1);
+  const activeGameplayOptions = multiplayerRoom || isReplay
+    ? DEFAULT_GAMEPLAY_OPTIONS
+    : { ...DEFAULT_GAMEPLAY_OPTIONS, ...gameplayOptions };
+  const isPracticeMode = activeGameplayOptions.practiceMode && !multiplayerRoom && !isReplay;
+  const [replayPlaybackSpeed, setReplayPlaybackSpeed] = useState(1);
+  const playbackRate = isReplay ? replayPlaybackSpeed : isPracticeMode ? activeGameplayOptions.practiceSpeed : 1;
+  const [noteSpeedMultiplier, setNoteSpeedMultiplier] = useState(activeGameplayOptions.scrollSpeed);
   const [hitWindow, setHitWindow] = useState(0.15);
   const [perfectWindow, setPerfectWindow] = useState(0.05);
   const [isPaused, setIsPaused] = useState(false);
+  const [replaySeekTime, setReplaySeekTime] = useState(0);
   const [gameState, setGameState] = useState<GameState>({
     isPlaying: false,
     score: 0,
     combo: 0,
     maxCombo: 0,
     accuracy: 0,
+    health: 100,
     totalNotes: notes.length,
     hitNotes: 0,
     currentTime: 0,
@@ -100,30 +142,56 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   gameStateRef.current = gameState;
 
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
-  const startTimeRef = useRef<number>(0);
+  const playbackAnchorRef = useRef({ contextTime: 0, songTime: 0 });
+  const playbackRateRef = useRef(playbackRate);
   const requestRef = useRef<number>(0);
   const replayEventsRef = useRef<{ time: number; lane: number; type: string }[]>([]);
   const triggeredEventsRef = useRef<Set<number>>(new Set());
   const missedLanesRef = useRef<Record<number, number>>({});
-  const localNotesRef = useRef<Note[]>(notes.map((note) => ({
+  const laneOrder = useMemo(
+    () => activeGameplayOptions.randomLanes ? createLaneOrder(notes) : [0, 1, 2, 3],
+    [activeGameplayOptions.randomLanes, notes]
+  );
+  const localNotesRef = useRef<Note[]>(notes.map((note) => {
+    const mapLane = (lane: number) => {
+      const mirroredLane = activeGameplayOptions.mirrorLanes ? LANE_COUNT - 1 - lane : lane;
+      return laneOrder[mirroredLane];
+    };
+    return {
     ...note,
-    endLane: movingSlidersEnabled ? note.endLane : undefined,
+    lane: mapLane(note.lane),
+    endLane: movingSlidersEnabled && note.endLane !== undefined ? mapLane(note.endLane) : undefined,
     hit: false,
     missed: false,
     held: false,
-  })));
+    };
+  }));
   const holdTrackersRef = useRef<Map<string, HoldTracker>>(new Map());
   const replayHoldKeysRef = useRef<Set<string>>(new Set());
   const keysPressed = useRef<Set<string>>(new Set());
   const lastProgressSentRef = useRef(0);
+  const judgementSummaryRef = useRef<JudgementSummary>(emptyJudgements());
+  const autoPreviewUntilRef = useRef<number | null>(null);
 
   const isExitingRef = useRef(false);
   const hasEndedRef = useRef(false);
+  const isPausedRef = useRef(false);
   const [hitEffects, setHitEffects] = useState<{ id: number; lane: number; type: string }[]>([]);
+  const [screenPulse, setScreenPulse] = useState<{ id: number; color: string } | null>(null);
+  const [comboMilestone, setComboMilestone] = useState<number | null>(null);
+  const [practiceLoop, setPracticeLoop] = useState<{ start: number; end?: number } | null>(null);
+  const practiceLoopRef = useRef<{ start: number; end?: number } | null>(null);
 
   const laneKeys = settings.keybindings;
-  const laneColors = ['#00f3ff', '#a855f7', '#ff4fcf', '#65ff8f'];
+  const laneColors = LANE_THEMES[settings.laneTheme] ?? LANE_THEMES.pulse;
+  const noteScale = settings.largeNotes ? 1.15 : 1;
   const visualBeat = useMemo(() => estimateVisualBeat(notes), [notes]);
+  const activeSection = useMemo(
+    () => sections.find((section) => gameState.currentTime >= section.start && gameState.currentTime < section.end),
+    [gameState.currentTime, sections]
+  );
+  const multiplayerStandings = multiplayerRoom ? [...multiplayerRoom.participants].sort((a, b) => b.score - a.score) : [];
+  const localPlayerRank = multiplayerStandings.findIndex((player) => player.playerId === multiplayerPlayerId) + 1;
 
   const currentNoteSpeed = NOTE_SPEED * (1 + difficulty * 0.15) * noteSpeedMultiplier;
   const activeTimingPreset = TIMING_PRESETS.find((preset) =>
@@ -135,13 +203,30 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     setPerfectWindow(preset.perfectWindow);
   };
 
+  useEffect(() => {
+    playbackRateRef.current = playbackRate;
+  }, [playbackRate]);
+
+  const updatePracticeLoop = (next: { start: number; end?: number } | null) => {
+    practiceLoopRef.current = next;
+    setPracticeLoop(next);
+  };
+
+  useEffect(() => {
+    practiceLoopRef.current = practiceLoop;
+  }, [practiceLoop]);
+
   const endGame = () => {
     if (hasEndedRef.current || isExitingRef.current) return;
     hasEndedRef.current = true;
     
     const finalStats = gameStateRef.current;
     const eventsToPass = isReplay ? replayEvents : replayEventsRef.current;
-    onGameEnd(finalStats.score, finalStats.accuracy, finalStats.maxCombo, eventsToPass);
+    const fullCombo = finalStats.totalNotes > 0 && !eventsToPass.some((event) => event.type === 'MISS' || event.type === 'HOLD_BREAK');
+    onGameEnd(finalStats.score, finalStats.accuracy, finalStats.maxCombo, eventsToPass, fullCombo, {
+      ...judgementSummaryRef.current,
+      timingOffsets: [...judgementSummaryRef.current.timingOffsets],
+    });
     setGameState(prev => ({ ...prev, isPlaying: false }));
     stopGame();
   };
@@ -260,30 +345,33 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     };
   }, []);
 
-  const startGame = () => {
+  const getCurrentSongTime = () =>
+    playbackAnchorRef.current.songTime + (audioContext.currentTime - playbackAnchorRef.current.contextTime) * playbackRateRef.current;
+
+  const startAudioAt = (songTime: number, delaySeconds = 0) => {
     const source = audioContext.createBufferSource();
     const gainNode = audioContext.createGain();
-    
     source.buffer = audioBuffer;
+    source.playbackRate.value = playbackRateRef.current;
     gainNode.gain.value = settings.volume;
-    
     source.connect(gainNode);
     gainNode.connect(audioContext.destination);
-    
-    // Solo play keeps the familiar lead-in. Multiplayer uses the shared server timestamp.
-    const leadInTime = synchronizedStartAt
-      ? Math.max(0.25, (new Date(synchronizedStartAt).getTime() - Date.now()) / 1000)
-      : 10;
-    startTimeRef.current = audioContext.currentTime + leadInTime;
-    source.start(audioContext.currentTime + leadInTime);
+    const contextTime = audioContext.currentTime + delaySeconds;
+    playbackAnchorRef.current = { contextTime, songTime };
+    source.start(contextTime, Math.max(0, songTime));
     sourceRef.current = source;
-    
+    source.onended = () => endGame();
+  };
+
+  const startGame = () => {
+    // Solo play keeps the familiar lead-in. Multiplayer uses the shared server timestamp.
+    const scheduledStart = synchronizedStartAt ? new Date(synchronizedStartAt).getTime() : null;
+    const lateBy = scheduledStart ? Math.max(0, (Date.now() - scheduledStart) / 1000) : 0;
+    const leadInTime = scheduledStart ? Math.max(0.15, (scheduledStart - Date.now()) / 1000) : 10;
+    const playbackOffset = scheduledStart ? Math.min(lateBy, Math.max(0, audioBuffer.duration - 0.05)) : 0;
+    startAudioAt(playbackOffset, leadInTime);
     setGameState(prev => ({ ...prev, isPlaying: true }));
     requestRef.current = requestAnimationFrame(gameLoop);
-
-    source.onended = () => {
-      endGame();
-    };
   };
 
   const stopGame = () => {
@@ -297,7 +385,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
   const pauseGame = () => {
     if (multiplayerRoom) return;
+    isPausedRef.current = true;
     setIsPaused(true);
+    setReplaySeekTime(gameStateRef.current.currentTime);
     if (sourceRef.current) {
       sourceRef.current.onended = null;
       sourceRef.current.stop();
@@ -307,26 +397,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   };
 
   const resumeGame = () => {
+    isPausedRef.current = false;
     setIsPaused(false);
     const currentTime = gameStateRef.current.currentTime;
-    
-    const source = audioContext.createBufferSource();
-    const gainNode = audioContext.createGain();
-    
-    source.buffer = audioBuffer;
-    gainNode.gain.value = settings.volume;
-    
-    source.connect(gainNode);
-    gainNode.connect(audioContext.destination);
-    
-    startTimeRef.current = audioContext.currentTime - currentTime;
-    source.start(0, currentTime);
-    sourceRef.current = source;
-    
-    source.onended = () => {
-      endGame();
-    };
-    
+    startAudioAt(Math.max(0, currentTime));
     requestRef.current = requestAnimationFrame(gameLoop);
   };
 
@@ -340,21 +414,25 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     // Base volume adjusted by settings
     const baseVolume = settings.volume;
     
+    const soundStyle = settings.hitSound || 'classic';
+    const baseFrequency = soundStyle === 'arcade' ? 1046 : soundStyle === 'soft' ? 660 : 880;
+    if (soundStyle === 'arcade') osc.type = 'square';
+    if (soundStyle === 'soft') osc.type = 'sine';
     if (type === 'PERFECT') {
-      osc.frequency.value = 880;
+      osc.frequency.value = baseFrequency;
       gain.gain.setValueAtTime(0.1 * baseVolume, audioContext.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001 * baseVolume, audioContext.currentTime + 0.05);
       osc.start();
       osc.stop(audioContext.currentTime + 0.05);
     } else if (type === 'GREAT') {
-      osc.frequency.value = 440;
+      osc.frequency.value = soundStyle === 'arcade' ? 784 : soundStyle === 'soft' ? 494 : 440;
       gain.gain.setValueAtTime(0.1 * baseVolume, audioContext.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001 * baseVolume, audioContext.currentTime + 0.05);
       osc.start();
       osc.stop(audioContext.currentTime + 0.05);
     } else {
-      osc.type = 'sawtooth';
-      osc.frequency.value = 110;
+      osc.type = soundStyle === 'soft' ? 'sine' : 'sawtooth';
+      osc.frequency.value = soundStyle === 'arcade' ? 147 : 110;
       gain.gain.setValueAtTime(0.2 * baseVolume, audioContext.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001 * baseVolume, audioContext.currentTime + 0.1);
       osc.start();
@@ -364,10 +442,52 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
   const showJudgement = (lane: number, type: 'PERFECT' | 'GREAT' | 'MISS') => {
     if (type === 'MISS') missedLanesRef.current[lane] = Date.now();
+    if (settings.hapticFeedback && !isReplay && 'vibrate' in navigator) {
+      navigator.vibrate(type === 'PERFECT' ? 12 : type === 'GREAT' ? 8 : [18, 35, 14]);
+    }
     if (!settings.visualEffects) return;
     const effectId = Date.now() + Math.random();
     setHitEffects(prev => [...prev.slice(-10), { id: effectId, lane, type }]);
     setTimeout(() => setHitEffects(prev => prev.filter(effect => effect.id !== effectId)), 600);
+    if (type !== 'MISS' && !settings.reducedMotion) {
+      const color = type === 'PERFECT' ? '#00f3ff' : '#39ff14';
+      setScreenPulse({ id: effectId, color });
+      setTimeout(() => setScreenPulse(current => current?.id === effectId ? null : current), 260);
+    }
+  };
+
+  const recordJudgement = (type: 'PERFECT' | 'GREAT' | 'MISS', timingOffset?: number, holdBreak = false) => {
+    const summary = judgementSummaryRef.current;
+    if (type === 'PERFECT') summary.perfect += 1;
+    else if (type === 'GREAT') summary.great += 1;
+    else {
+      summary.miss += 1;
+      if (holdBreak) summary.holdBreak += 1;
+    }
+    if (timingOffset !== undefined && Number.isFinite(timingOffset)) {
+      summary.timingOffsets.push(Math.max(-160, Math.min(160, timingOffset)));
+      if (summary.timingOffsets.length > 300) summary.timingOffsets.shift();
+    }
+  };
+
+  const showComboMilestone = (combo: number) => {
+    if (settings.reducedMotion || combo < 10 || ![10, 25, 50, 100, 200].includes(combo)) return;
+    setComboMilestone(combo);
+    window.setTimeout(() => setComboMilestone(current => current === combo ? null : current), 900);
+  };
+
+  const getComboMultiplier = (combo: number) => combo >= 20 ? 2 : combo >= 10 ? 1.5 : 1;
+
+  const getWeightedPoints = (type: 'PERFECT' | 'GREAT', timingDifference: number, combo: number) => {
+    const base = type === 'PERFECT' ? 100 : 60;
+    const precision = Math.max(0, 1 - timingDifference / Math.max(hitWindow, 0.001));
+    return Math.round(base * (0.84 + precision * 0.16) * getComboMultiplier(combo));
+  };
+
+  const applyMissHealth = (health: number, loss: number) => {
+    const nextHealth = activeGameplayOptions.noFail ? Math.max(10, health - loss) : Math.max(0, health - loss);
+    if (!activeGameplayOptions.noFail && nextHealth === 0) window.setTimeout(endGame, 0);
+    return nextHealth;
   };
 
   const finishHold = (note: Note, currentTime: number, judgement: 'PERFECT' | 'GREAT') => {
@@ -380,12 +500,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     }
     showJudgement(lane, judgement);
     playFeedbackSound(judgement);
+    showComboMilestone(gameStateRef.current.combo + 1);
     setGameState(prev => {
       const newCombo = prev.combo + 1;
-      const multiplier = newCombo >= 20 ? 2 : newCombo >= 10 ? 1.5 : 1;
       return {
         ...prev,
-        score: prev.score + Math.floor((judgement === 'PERFECT' ? 100 : 50) * multiplier),
+        score: prev.score + getWeightedPoints(judgement, 0, newCombo),
         combo: newCombo,
         maxCombo: Math.max(prev.maxCombo, newCombo),
       };
@@ -402,12 +522,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     if (!isReplay) replayEventsRef.current.push({ time: currentTime, lane, type: 'HOLD_BREAK' });
     showJudgement(lane, 'MISS');
     playFeedbackSound('MISS');
+    recordJudgement('MISS', undefined, true);
     setGameState(prev => {
       const currentWeight = (prev.accuracy / 100) * prev.totalNotes;
       const correctedWeight = Math.max(0, currentWeight - (tracker?.headWeight ?? 0.5));
       return {
         ...prev,
         combo: 0,
+        health: applyMissHealth(prev.health, 12),
         hitNotes: Math.max(0, prev.hitNotes - 1),
         accuracy: prev.totalNotes > 0 ? (correctedWeight / prev.totalNotes) * 100 : 0,
       };
@@ -415,7 +537,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   };
 
   const checkRelease = (lane: number) => {
-    const currentTime = audioContext.currentTime - startTimeRef.current;
+    const currentTime = getCurrentSongTime() + activeGameplayOptions.inputOffsetMs / 1000;
     localNotesRef.current.forEach((note) => {
       if (!note.held || !note.duration) return;
       const requiredLane = getRequiredSlideLane(note, currentTime);
@@ -427,8 +549,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     });
   };
 
-  const checkHit = (lane: number) => {
-    const currentTime = audioContext.currentTime - startTimeRef.current;
+  const checkHit = (lane: number, automated = false) => {
+    const currentTime = getCurrentSongTime() + (automated ? 0 : activeGameplayOptions.inputOffsetMs / 1000);
     let targetNote: Note | null = null;
     let minDiff = Infinity;
 
@@ -446,7 +568,6 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const note = targetNote as Note;
     const diff = Math.abs(note.time - currentTime);
     const judgement: 'PERFECT' | 'GREAT' = diff <= perfectWindow ? 'PERFECT' : 'GREAT';
-    const points = judgement === 'PERFECT' ? 100 : 50;
     const accuracyWeight = judgement === 'PERFECT' ? 1 : 0.5;
     note.hit = true;
     if (note.duration) {
@@ -460,19 +581,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         headWeight: accuracyWeight,
       });
     }
-    if (!isReplay) replayEventsRef.current.push({ time: currentTime, lane, type: judgement });
+    if (!isReplay && !automated) replayEventsRef.current.push({ time: currentTime, lane, type: judgement });
     showJudgement(lane, judgement);
     playFeedbackSound(judgement);
+    recordJudgement(judgement, (currentTime - note.time) * 1000);
+    showComboMilestone(gameStateRef.current.combo + 1);
     setGameState(prev => {
       const newCombo = prev.combo + 1;
       const currentTotalWeight = (prev.accuracy / 100) * prev.totalNotes;
       const newAccuracy = prev.totalNotes > 0
         ? ((currentTotalWeight + accuracyWeight) / prev.totalNotes) * 100
         : 0;
-      const multiplier = newCombo >= 20 ? 2 : newCombo >= 10 ? 1.5 : 1;
       return {
         ...prev,
-        score: prev.score + Math.floor(points * multiplier),
+        score: prev.score + getWeightedPoints(judgement, diff, newCombo),
         combo: newCombo,
         maxCombo: Math.max(prev.maxCombo, newCombo),
         hitNotes: prev.hitNotes + 1,
@@ -481,10 +603,79 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     });
   };
 
+  const restartPracticeAt = (songTime: number) => {
+    if (!isPracticeMode && !isReplay) return;
+    if (sourceRef.current) {
+      sourceRef.current.onended = null;
+      sourceRef.current.stop();
+      sourceRef.current = null;
+    }
+    holdTrackersRef.current.clear();
+    keysPressed.current.clear();
+    localNotesRef.current.forEach((note) => {
+      note.hit = false;
+      note.missed = false;
+      note.held = false;
+    });
+    replayEventsRef.current = [];
+    triggeredEventsRef.current = new Set(replayEvents.flatMap((event, index) => event.time < songTime ? [index] : []));
+    judgementSummaryRef.current = emptyJudgements();
+    setGameState((previous) => ({
+      ...previous,
+      isPlaying: true,
+      score: 0,
+      combo: 0,
+      maxCombo: 0,
+      accuracy: 0,
+      health: 100,
+      hitNotes: 0,
+      currentTime: songTime,
+    }));
+    localNotesRef.current.forEach((note) => {
+      if (note.time < songTime - hitWindow) note.hit = true;
+    });
+    setIsPaused(false);
+    isPausedRef.current = false;
+    cancelAnimationFrame(requestRef.current);
+    startAudioAt(songTime);
+    requestRef.current = requestAnimationFrame(gameLoop);
+  };
+
+  const setReplaySpeed = (speed: number) => {
+    playbackRateRef.current = speed;
+    setReplayPlaybackSpeed(speed);
+  };
+
+  const previewPracticeSection = () => {
+    if (!isPracticeMode) return;
+    const start = practiceLoop?.start ?? Math.max(0, gameStateRef.current.currentTime);
+    const end = practiceLoop?.end ?? Math.min(audioBuffer.duration, start + 8);
+    autoPreviewUntilRef.current = Math.max(start + 0.5, end);
+    restartPracticeAt(start);
+  };
+
   const gameLoop = () => {
-    if (isPaused) return;
-    const currentTime = audioContext.currentTime - startTimeRef.current;
+    if (isPausedRef.current) return;
+    const currentTime = getCurrentSongTime();
     setGameState(prev => ({ ...prev, currentTime }));
+
+    const activeLoop = practiceLoopRef.current;
+    if (isPracticeMode && activeLoop?.end && currentTime >= activeLoop.end) {
+      restartPracticeAt(activeLoop.start);
+      return;
+    }
+
+    const autoPreviewUntil = autoPreviewUntilRef.current;
+    if (isPracticeMode && autoPreviewUntil !== null) {
+      if (currentTime >= autoPreviewUntil) {
+        autoPreviewUntilRef.current = null;
+        pauseGame();
+        return;
+      }
+      localNotesRef.current.forEach((note) => {
+        if (!note.hit && !note.missed && !note.held && currentTime >= note.time - 0.012) checkHit(note.lane, true);
+      });
+    }
     if (onMultiplayerProgress && Date.now() - lastProgressSentRef.current >= 750) {
       lastProgressSentRef.current = Date.now();
       const state = gameStateRef.current;
@@ -552,7 +743,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           targetNote.missed = true;
           showJudgement(e.lane, 'MISS');
           playFeedbackSound('MISS');
-          setGameState(prev => ({ ...prev, combo: 0 }));
+          recordJudgement('MISS');
+          setGameState(prev => ({ ...prev, combo: 0, health: applyMissHealth(prev.health, 10) }));
           return;
         }
 
@@ -572,13 +764,14 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         }
         showJudgement(e.lane, judgement);
         playFeedbackSound(judgement);
+        recordJudgement(judgement, (e.time - targetNote.time) * 1000);
+        showComboMilestone(gameStateRef.current.combo + 1);
         setGameState(prev => {
           const newCombo = prev.combo + 1;
-          const multiplier = newCombo >= 20 ? 2 : newCombo >= 10 ? 1.5 : 1;
           const currentWeight = (prev.accuracy / 100) * prev.totalNotes;
           return {
             ...prev,
-            score: prev.score + Math.floor((judgement === 'PERFECT' ? 100 : 50) * multiplier),
+            score: prev.score + getWeightedPoints(judgement, Math.abs(e.time - targetNote.time), newCombo),
             combo: newCombo,
             maxCombo: Math.max(prev.maxCombo, newCombo),
             hitNotes: prev.hitNotes + 1,
@@ -605,14 +798,15 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         replayEventsRef.current.push({ time: currentTime, lane: note.lane, type: 'MISS' });
         showJudgement(note.lane, 'MISS');
         playFeedbackSound('MISS');
-        setGameState(prev => ({ ...prev, combo: 0 }));
+        recordJudgement('MISS');
+        setGameState(prev => ({ ...prev, combo: 0, health: applyMissHealth(prev.health, 10) }));
       }
 
       if (!isReplay && note.hit && note.held && note.duration) {
         const tracker = holdTrackersRef.current.get(note.id);
         if (!tracker) return;
         const requiredLane = getRequiredSlideLane(note, currentTime);
-        const requiredKeyHeld = keysPressed.current.has(laneKeys[requiredLane]);
+        const requiredKeyHeld = autoPreviewUntilRef.current !== null || keysPressed.current.has(laneKeys[requiredLane]);
         if (requiredKeyHeld) tracker.lastValidTime = currentTime;
         tracker.lastRequiredLane = requiredLane;
 
@@ -645,7 +839,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
     const width = canvas.width;
     const height = canvas.height;
-    const currentTime = audioContext.currentTime - startTimeRef.current;
+    const currentTime = getCurrentSongTime();
     const laneWidth = width / LANE_COUNT;
     const hitLineY = height - 100;
     const beatPosition = (currentTime - visualBeat.origin) / visualBeat.interval;
@@ -703,7 +897,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.stroke();
     }
 
-    if (settings.visualEffects) {
+    if (settings.visualEffects && !settings.reducedMotion) {
       for (let wave = 0; wave < 2; wave++) {
         ctx.strokeStyle = wave === 0 ? 'rgba(0,243,255,0.035)' : 'rgba(188,19,254,0.03)';
         ctx.lineWidth = 1.5;
@@ -726,7 +920,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     ctx.fillRect(0, 0, width, height);
 
     ctx.shadowColor = '#a78bfa';
-    ctx.shadowBlur = settings.visualEffects ? 8 + beatPulse * 6 : 0;
+    ctx.shadowBlur = settings.visualEffects && !settings.reducedMotion ? 8 + beatPulse * 6 : 0;
     ctx.strokeStyle = `rgba(224, 231, 255, ${0.58 + beatPulse * 0.16})`;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -738,14 +932,16 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     laneKeys.forEach((key, i) => {
       const isPressed = keysPressed.current.has(key);
       const isMissed = Date.now() - (missedLanesRef.current[i] || 0) < 300;
-      const receptorX = i * laneWidth + 12;
+      const receptorInset = settings.largeNotes ? 8 : 12;
+      const receptorHeight = 26 * noteScale;
+      const receptorX = i * laneWidth + receptorInset;
       ctx.fillStyle = isPressed ? laneColors[i] : isMissed ? '#fb7185' : 'rgba(255,255,255,0.09)';
       if (isPressed && settings.visualEffects) {
         ctx.shadowColor = laneColors[i];
         ctx.shadowBlur = 18;
       }
       ctx.beginPath();
-      ctx.roundRect(receptorX, hitLineY - 13, laneWidth - 24, 26, 9);
+      ctx.roundRect(receptorX, hitLineY - receptorHeight / 2, laneWidth - receptorInset * 2, receptorHeight, 9);
       ctx.fill();
       ctx.shadowBlur = 0;
       ctx.strokeStyle = isPressed ? 'rgba(255,255,255,0.72)' : 'rgba(255,255,255,0.18)';
@@ -757,7 +953,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.fillText(key.toUpperCase(), i * laneWidth + laneWidth / 2, hitLineY + 40);
     });
 
-    const visibleNotes = localNotesRef.current.filter((note) => !note.missed && !(note.hit && !note.held));
+    const visibleNotes = localNotesRef.current.filter((note) => {
+      if (note.missed || (note.hit && !note.held)) return false;
+      return !activeGameplayOptions.hiddenNotes || note.held || note.time - currentTime > 1.1;
+    });
     visibleNotes.filter((note) => note.duration).forEach((note) => {
       const tailTime = note.time + (note.duration ?? 0);
       const visibleStartTime = note.held ? Math.max(note.time, Math.min(currentTime, tailTime)) : note.time;
@@ -788,8 +987,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.lineJoin = 'round';
       ctx.globalAlpha = note.held ? 0.82 : 0.5;
       ctx.strokeStyle = bodyGradient;
-      ctx.lineWidth = laneWidth * 0.48;
-      if (settings.visualEffects) {
+      ctx.lineWidth = Math.min(laneWidth * 0.58, laneWidth * 0.48 * noteScale);
+      if (settings.visualEffects && !settings.reducedMotion) {
         ctx.shadowColor = note.held ? '#ffffff' : startColor;
         ctx.shadowBlur = note.held ? 18 : 11;
       }
@@ -821,7 +1020,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       ctx.strokeStyle = 'rgba(255,255,255,0.72)';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.roundRect(tailX - laneWidth * 0.34, tailY - 11, laneWidth * 0.68, 22, 8);
+      const tailWidth = Math.min(laneWidth * 0.78, laneWidth * 0.68 * noteScale);
+      ctx.roundRect(tailX - tailWidth / 2, tailY - 11 * noteScale, tailWidth, 22 * noteScale, 8);
       ctx.fill();
       ctx.stroke();
 
@@ -833,7 +1033,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         headGradient.addColorStop(1, startColor);
         ctx.fillStyle = headGradient;
         ctx.beginPath();
-        ctx.roundRect(headX - laneWidth * 0.4, startY - 15, laneWidth * 0.8, 30, 10);
+        const headWidth = Math.min(laneWidth * 0.9, laneWidth * 0.8 * noteScale);
+        ctx.roundRect(headX - headWidth / 2, startY - 15 * noteScale, headWidth, 30 * noteScale, 10);
         ctx.fill();
       } else {
         const activeX = (getSlideLanePosition(note, currentTime) + 0.5) * laneWidth;
@@ -853,25 +1054,26 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       const timeDiff = note.time - currentTime;
       const y = hitLineY - currentNoteSpeed * timeDiff;
       if (y < -60 || y > height + 60) return;
-      const noteWidth = laneWidth - 30;
-      const x = note.lane * laneWidth + 15;
+      const noteInset = settings.largeNotes ? 8 : 15;
+      const noteWidth = laneWidth - noteInset * 2;
+      const x = note.lane * laneWidth + noteInset;
       const color = laneColors[note.lane];
       const gradient = ctx.createLinearGradient(x, y - 14, x, y + 14);
       gradient.addColorStop(0, '#ffffff');
       gradient.addColorStop(0.22, color);
       gradient.addColorStop(1, color);
       ctx.fillStyle = gradient;
-      if (settings.visualEffects) {
+      if (settings.visualEffects && !settings.reducedMotion) {
         ctx.shadowBlur = 13;
         ctx.shadowColor = color;
       }
       ctx.beginPath();
-      ctx.roundRect(x, y - 14, noteWidth, 28, 9);
+      ctx.roundRect(x, y - 14 * noteScale, noteWidth, 28 * noteScale, 9);
       ctx.fill();
       ctx.shadowBlur = 0;
       ctx.fillStyle = 'rgba(255,255,255,0.44)';
       ctx.beginPath();
-      ctx.roundRect(x + 8, y - 10, noteWidth - 16, 5, 3);
+      ctx.roundRect(x + 8, y - 10 * noteScale, noteWidth - 16, 5 * noteScale, 3);
       ctx.fill();
     });
 
@@ -886,8 +1088,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       data-slider-mode={movingSlidersEnabled ? 'moving' : 'straight'}
       className="relative flex h-[100dvh] min-h-[100dvh] w-full flex-col items-center justify-center overflow-hidden bg-[#02050b]"
     >
-      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_20%,rgba(99,102,241,0.12),transparent_38%),radial-gradient(circle_at_16%_75%,rgba(0,243,255,0.06),transparent_32%),radial-gradient(circle_at_84%_72%,rgba(188,19,254,0.07),transparent_32%)]" />
+      <div className="pointer-events-none absolute inset-0" style={{ background: VISUAL_BACKGROUNDS[settings.visualTheme] ?? VISUAL_BACKGROUNDS.pulse }} />
       <div className="pointer-events-none absolute inset-0 opacity-30 [background-image:linear-gradient(rgba(255,255,255,0.018)_1px,transparent_1px)] [background-size:100%_48px]" />
+      <AnimatePresence>
+        {screenPulse && <motion.div key={screenPulse.id} initial={{ opacity: 0.28, scale: 0.75 }} animate={{ opacity: 0, scale: 1.35 }} exit={{ opacity: 0 }} transition={{ duration: 0.34, ease: 'easeOut' }} className="pointer-events-none absolute inset-0 z-[2]" style={{ background: `radial-gradient(circle at 50% 68%, ${screenPulse.color}38, transparent 42%)` }} />}
+      </AnimatePresence>
       {/* HUD */}
       <div className="absolute left-4 top-4 z-10 flex min-w-36 flex-col gap-0.5 rounded-2xl border border-white/10 bg-[#050813]/70 px-4 py-3 shadow-xl backdrop-blur-xl md:left-8 md:top-8 md:min-w-44 md:px-5 md:py-4">
         <div className="text-[9px] font-black uppercase tracking-[0.24em] text-white/35">Score</div>
@@ -897,7 +1102,21 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-white/45 md:text-xs">
           Accuracy <span className="text-white/75">{gameState.accuracy.toFixed(1)}%</span>
         </div>
+        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-gradient-to-r from-neon-pink via-neon-purple to-neon-blue transition-[width] duration-200" style={{ width: `${gameState.health}%` }} /></div>
       </div>
+
+      {(isPracticeMode || activeGameplayOptions.hiddenNotes || activeGameplayOptions.mirrorLanes || activeGameplayOptions.randomLanes) && (
+        <div className="absolute left-1/2 top-20 z-10 flex max-w-[calc(100%-2rem)] -translate-x-1/2 flex-wrap justify-center gap-1.5 rounded-full border border-white/10 bg-[#050813]/75 px-3 py-2 text-[9px] font-black uppercase tracking-[0.13em] text-white/55 backdrop-blur-xl">
+          {isPracticeMode && <span className="text-neon-green">Practice {playbackRate.toFixed(2).replace(/0$/, '')}x</span>}
+          {activeGameplayOptions.hiddenNotes && <span>Hidden</span>}
+          {activeGameplayOptions.mirrorLanes && <span>Mirror</span>}
+          {activeGameplayOptions.randomLanes && <span>Random</span>}
+        </div>
+      )}
+
+      <AnimatePresence>
+        {comboMilestone && <motion.div initial={{ opacity: 0, y: 18, scale: 0.75 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: -16, scale: 1.1 }} className="pointer-events-none absolute left-1/2 top-36 z-20 -translate-x-1/2 text-center"><p className="font-display text-4xl font-black italic text-neon-orange drop-shadow-[0_0_16px_rgba(255,165,0,0.7)]">{comboMilestone} COMBO</p><p className="mt-1 text-[9px] font-black uppercase tracking-[0.3em] text-white/50">Keep the pulse</p></motion.div>}
+      </AnimatePresence>
 
       <div className="absolute right-4 top-4 z-10 min-w-32 rounded-2xl border border-white/10 bg-[#050813]/70 px-4 py-3 text-right shadow-xl backdrop-blur-xl md:right-8 md:top-8 md:min-w-40 md:px-5 md:py-4">
         <div className="text-4xl md:text-6xl font-display font-black text-neon-pink italic">
@@ -919,7 +1138,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             <span>Live standings</span><span className="text-neon-purple">{multiplayerRoom.code}</span>
           </div>
           <div className="space-y-1.5">
-            {[...multiplayerRoom.participants].sort((a, b) => b.score - a.score).slice(0, 5).map((player, index) => (
+            {multiplayerStandings.slice(0, 5).map((player, index) => (
               <div key={player.playerId} className="flex items-center justify-between rounded-lg bg-white/5 px-2.5 py-2 text-xs">
                 <span className="min-w-0 truncate text-white/65"><span className="mr-2 font-mono text-white/25">{index + 1}</span>{player.username}</span>
                 <span className="ml-2 font-mono text-neon-blue">{player.score.toLocaleString()}</span>
@@ -929,10 +1148,27 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         </div>
       )}
 
+      {multiplayerRoom && (
+        <div className="absolute left-1/2 top-4 z-20 -translate-x-1/2 rounded-full border border-neon-purple/25 bg-black/70 px-3 py-1.5 text-[10px] font-black uppercase tracking-wider text-white/65 backdrop-blur-xl lg:hidden">
+          <span className="text-neon-purple">#{localPlayerRank || '-'}</span><span className="mx-2 text-white/20">·</span>{multiplayerRoom.status === 'countdown' ? 'Match starting' : `${multiplayerStandings.length} players live`}
+        </div>
+      )}
+
+      {multiplayerRoom && gameState.currentTime < 0 && (
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/25 backdrop-blur-[2px]">
+          <div className="rounded-3xl border border-neon-purple/35 bg-black/70 px-8 py-6 text-center shadow-2xl">
+            <p className="text-[10px] font-black uppercase tracking-[0.3em] text-neon-purple">Match starts in</p>
+            <p className="mt-1 font-display text-6xl font-black text-white">{Math.max(1, Math.ceil(-gameState.currentTime))}</p>
+          </div>
+        </div>
+      )}
+
       {/* Progress Bar */}
-      <div className="absolute bottom-0 left-0 z-30 h-1 w-full bg-white/10">
+      {activeSection && <div className="pointer-events-none absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-white/10 bg-black/45 px-3 py-1 text-[9px] font-black uppercase tracking-[0.2em] text-white/60 backdrop-blur-md"><span className="mr-2 text-neon-purple">{activeSection.kind}</span>{activeSection.label}</div>}
+      <div className="absolute bottom-0 left-0 z-30 h-1.5 w-full overflow-hidden bg-white/10">
+        {sections.map((section) => <div key={section.id} title={section.label} className={`absolute top-0 h-full border-r border-black/45 ${activeSection?.id === section.id ? 'bg-neon-purple/40' : 'bg-white/10'}`} style={{ left: `${(section.start / gameState.duration) * 100}%`, width: `${((section.end - section.start) / gameState.duration) * 100}%` }} />)}
         <div 
-          className="h-full bg-gradient-to-r from-neon-blue via-neon-purple to-neon-green shadow-[0_0_12px_rgba(0,243,255,0.55)] transition-all duration-100 ease-linear"
+          className="relative h-full bg-gradient-to-r from-neon-blue via-neon-purple to-neon-green shadow-[0_0_12px_rgba(0,243,255,0.55)] transition-all duration-100 ease-linear"
           style={{ width: `${Math.max(0, (gameState.currentTime / gameState.duration) * 100)}%` }}
         />
       </div>
@@ -975,9 +1211,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             {hitEffects.map((effect) => (
               <motion.div
                 key={effect.id}
-                initial={{ opacity: 0, y: 20, scale: 0.5 }}
+                initial={settings.reducedMotion ? { opacity: 1, y: 0, scale: 1 } : { opacity: 0, y: 20, scale: 0.5 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: -20, scale: 0.5 }}
+                exit={settings.reducedMotion ? { opacity: 0 } : { opacity: 0, y: -20, scale: 0.5 }}
                 className="absolute flex flex-col items-center justify-center"
                 style={{
                   left: `${(effect.lane + 0.5) * 25}%`,
@@ -1007,7 +1243,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
           {/* Lane Flash */}
           <AnimatePresence>
-            {hitEffects.filter(e => e.type !== 'MISS').map((effect) => (
+            {!settings.reducedMotion && hitEffects.filter(e => e.type !== 'MISS').map((effect) => (
               <motion.div
                 key={`flash-${effect.id}`}
                 initial={{ opacity: 0.6, height: 0 }}
@@ -1059,27 +1295,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             {!multiplayerRoom && <button 
               onClick={() => {
                 if (sourceRef.current) {
-                  // Stop the current lead-in source
-                  sourceRef.current.onended = null; // Remove old listener to prevent double endGame
+                  sourceRef.current.onended = null;
                   sourceRef.current.stop();
-                  
-                  const source = audioContext.createBufferSource();
-                  const gainNode = audioContext.createGain();
-                  
-                  source.buffer = audioBuffer;
-                  gainNode.gain.value = settings.volume;
-                  
-                  source.connect(gainNode);
-                  gainNode.connect(audioContext.destination);
-                  
-                  // Start immediately
-                  startTimeRef.current = audioContext.currentTime;
-                  source.start(0);
-                  sourceRef.current = source;
-                  
-                  source.onended = () => {
-                    endGame();
-                  };
+                  sourceRef.current = null;
+                  startAudioAt(0);
                 }
               }}
               className="mt-12 px-6 py-2 rounded-full border border-white/20 text-white/40 text-xs font-bold uppercase tracking-widest hover:bg-white/10 hover:text-white transition-all pointer-events-auto"
@@ -1144,6 +1363,24 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
                 className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue"
               />
             </div>
+
+            {isReplay && <div className="mt-4 rounded-2xl border border-neon-blue/20 bg-neon-blue/[0.05] p-4">
+              <div className="flex items-start justify-between gap-3"><div><p className="text-sm font-bold text-white">Replay controls</p><p className="mt-1 text-xs text-white/40">Study the input stream at your own pace.</p></div><select aria-label="Replay speed" value={replayPlaybackSpeed} onChange={(event) => setReplaySpeed(Number(event.target.value))} className="rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 text-xs font-bold text-neon-blue outline-none"><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option></select></div>
+              <label className="mt-4 block text-[10px] font-black uppercase tracking-wider text-white/35">Timeline marker <span className="float-right font-mono text-neon-blue">{replaySeekTime.toFixed(1)}s</span><input aria-label="Replay timeline" type="range" min="0" max={Math.max(0, gameState.duration - 0.05)} step="0.1" value={replaySeekTime} onChange={(event) => setReplaySeekTime(Number(event.target.value))} className="mt-2 h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue" /></label>
+              <button type="button" onClick={() => restartPracticeAt(replaySeekTime)} className="mt-3 w-full rounded-xl border border-neon-blue/30 bg-neon-blue/10 px-3 py-2.5 text-[10px] font-black uppercase tracking-wider text-neon-blue transition hover:bg-neon-blue hover:text-black">Jump to marker</button>
+              <div className="mt-3 flex flex-wrap gap-1.5">{replayEvents.filter((event) => event.time >= replaySeekTime).slice(0, 6).map((event, index) => <span key={`${event.time}-${event.lane}-${index}`} className="rounded-lg border border-white/10 bg-black/25 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-white/55">{event.time.toFixed(1)}s · Lane {event.lane + 1} · {event.type.replace(/_/g, ' ')}</span>)}</div>
+            </div>}
+
+            {isPracticeMode && <div className="mt-4 rounded-2xl border border-neon-green/20 bg-neon-green/[0.05] p-4">
+              <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-bold text-white">Practice tools</p><p className="mt-1 text-xs text-white/40">Loop a rough spot or let BeatPulse demonstrate it.</p></div><span className="rounded-full border border-neon-green/25 bg-neon-green/10 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-neon-green">Unranked</span></div>
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                <button type="button" onClick={() => { const start = Math.max(0, gameStateRef.current.currentTime); updatePracticeLoop({ start, end: practiceLoopRef.current?.end && practiceLoopRef.current.end > start ? practiceLoopRef.current.end : undefined }); }} className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[10px] font-black uppercase tracking-wider text-white/65 hover:bg-white/10">Set A</button>
+                <button type="button" onClick={() => { const end = Math.min(audioBuffer.duration, gameStateRef.current.currentTime); const start = practiceLoopRef.current?.start ?? Math.max(0, end - 4); updatePracticeLoop({ start: Math.min(start, Math.max(0, end - 0.5)), end: Math.max(end, start + 0.5) }); }} className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[10px] font-black uppercase tracking-wider text-white/65 hover:bg-white/10">Set B</button>
+                <button type="button" disabled={!practiceLoop} onClick={() => restartPracticeAt(practiceLoop.start)} className="rounded-xl border border-neon-blue/25 bg-neon-blue/10 px-3 py-3 text-[10px] font-black uppercase tracking-wider text-neon-blue disabled:opacity-30">Restart loop</button>
+                <button type="button" onClick={previewPracticeSection} className="rounded-xl border border-neon-purple/25 bg-neon-purple/10 px-3 py-3 text-[10px] font-black uppercase tracking-wider text-neon-purple">Autoplay preview</button>
+              </div>
+              <p className="mt-3 text-[10px] text-white/35">{practiceLoop?.end ? `Looping ${practiceLoop.start.toFixed(1)}s–${practiceLoop.end.toFixed(1)}s.` : practiceLoop ? `Loop starts at ${practiceLoop.start.toFixed(1)}s. Set B to finish it.` : 'Set A and B to repeat a section.'}</p>
+            </div>}
 
             <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
               <div className="mb-4">

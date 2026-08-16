@@ -8,6 +8,7 @@ export interface NoteGenerationConfig {
   minNoteSpacing?: number;
   sliderProbability?: number;
   stamina?: number;
+  allowMovingSliders?: boolean;
 }
 
 interface AudioWindowFeature {
@@ -320,6 +321,7 @@ export async function generateNotesFromAudio(
   const minNoteSpacing = Math.max(0.055, typeof config === 'object' ? (config.minNoteSpacing ?? 0.08) : 0.08);
   const sliderProbability = clamp(typeof config === 'object' ? (config.sliderProbability ?? 0.3) : 0.3, 0, 1);
   const stamina = clamp(typeof config === 'object' ? (config.stamina ?? 0.5) : 0.5, 0, 1);
+  const allowMovingSliders = typeof config === 'object' ? (config.allowMovingSliders ?? true) : true;
 
   const monoData = mixToMono(audioBuffer);
   const random = createSeededRandom(hashAudio(monoData) ^ Math.round(complexity * 997) ^ Math.round(density * 7919));
@@ -531,7 +533,7 @@ export async function generateNotesFromAudio(
         tickInterval = clamp(beatInterval / (density > 0.72 ? 2 : 1), 0.14, 0.48);
 
         const moveChance = 0.18 + laneVariety * 0.62 + complexity * 0.08;
-        if (duration >= beatInterval * 0.95 && random() < moveChance) {
+        if (allowMovingSliders && duration >= beatInterval * 0.95 && random() < moveChance) {
           const destinations = [0, 1, 2, 3].filter((target) => target !== lane && Math.abs(target - lane) <= 2);
           if (destinations.length > 0) endLane = destinations[Math.floor(random() * destinations.length)];
         }

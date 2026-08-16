@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Music, Zap, Target, Trophy, ChevronRight, Check, Users } from 'lucide-react';
+import { prefersMovingSliders } from '../utils/device';
 
 interface TutorialProps {
   onComplete: () => void;
@@ -8,6 +9,7 @@ interface TutorialProps {
 
 export const Tutorial: React.FC<TutorialProps> = ({ onComplete }) => {
   const [step, setStep] = useState(0);
+  const movingSlidersEnabled = useMemo(prefersMovingSliders, []);
 
   const steps = [
     {
@@ -18,7 +20,9 @@ export const Tutorial: React.FC<TutorialProps> = ({ onComplete }) => {
     },
     {
       title: "Hit the Notes",
-      description: "Press D, F, J, or K as notes cross the target. For trails, keep holding; when a trail bends, move to the lane it points toward and release on its tail.",
+      description: movingSlidersEnabled
+        ? "Tap a lane as notes cross the target. Keep holding trails; when one bends, follow it into the next lane and release on its tail."
+        : "Press D, F, J, or K as notes cross the target. Hold straight trails in their lane and release when the tail reaches the line.",
       icon: <Target className="w-16 h-16 text-neon-pink" />,
       color: "text-neon-pink"
     },

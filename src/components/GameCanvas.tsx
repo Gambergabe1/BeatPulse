@@ -3,6 +3,7 @@ import { Note, GameState, Settings } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
 import { Home, Pause, Play } from 'lucide-react';
 import { MultiplayerRoom } from '../services/pulseApi';
+import { prefersMovingSliders } from '../utils/device';
 
 interface GameCanvasProps {
   notes: Note[];
@@ -78,6 +79,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   onMultiplayerProgress,
 }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const movingSlidersEnabled = useMemo(prefersMovingSliders, []);
   const [noteSpeedMultiplier, setNoteSpeedMultiplier] = useState(1);
   const [hitWindow, setHitWindow] = useState(0.15);
   const [perfectWindow, setPerfectWindow] = useState(0.05);
@@ -103,7 +105,13 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const replayEventsRef = useRef<{ time: number; lane: number; type: string }[]>([]);
   const triggeredEventsRef = useRef<Set<number>>(new Set());
   const missedLanesRef = useRef<Record<number, number>>({});
-  const localNotesRef = useRef<Note[]>(notes.map(n => ({ ...n, hit: false, missed: false, held: false })));
+  const localNotesRef = useRef<Note[]>(notes.map((note) => ({
+    ...note,
+    endLane: movingSlidersEnabled ? note.endLane : undefined,
+    hit: false,
+    missed: false,
+    held: false,
+  })));
   const holdTrackersRef = useRef<Map<string, HoldTracker>>(new Map());
   const replayHoldKeysRef = useRef<Set<string>>(new Set());
   const keysPressed = useRef<Set<string>>(new Set());
@@ -874,7 +882,10 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   };
 
   return (
-    <div className="relative flex h-[100dvh] min-h-[100dvh] w-full flex-col items-center justify-center overflow-hidden bg-[#02050b]">
+    <div
+      data-slider-mode={movingSlidersEnabled ? 'moving' : 'straight'}
+      className="relative flex h-[100dvh] min-h-[100dvh] w-full flex-col items-center justify-center overflow-hidden bg-[#02050b]"
+    >
       <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_20%,rgba(99,102,241,0.12),transparent_38%),radial-gradient(circle_at_16%_75%,rgba(0,243,255,0.06),transparent_32%),radial-gradient(circle_at_84%_72%,rgba(188,19,254,0.07),transparent_32%)]" />
       <div className="pointer-events-none absolute inset-0 opacity-30 [background-image:linear-gradient(rgba(255,255,255,0.018)_1px,transparent_1px)] [background-size:100%_48px]" />
       {/* HUD */}
@@ -1040,7 +1051,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
               </motion.div>
             </AnimatePresence>
             <div className="mt-5 rounded-full border border-white/10 bg-black/30 px-4 py-2 text-[10px] font-bold uppercase tracking-[0.18em] text-white/45 backdrop-blur-md">
-              Tap notes · hold trails · follow moving slides
+              {movingSlidersEnabled
+                ? 'Tap notes · hold trails · follow moving slides'
+                : 'Tap notes · hold straight trails · release on the tail'}
             </div>
             
             {!multiplayerRoom && <button 

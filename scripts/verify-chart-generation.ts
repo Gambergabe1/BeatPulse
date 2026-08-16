@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { generateNotesFromAudio } from '../src/utils/audio';
 import { DEFAULT_DIFFICULTY, DIFFICULTY_PRESETS, getChartSettingsForDifficulty, getDifficultyPreset } from '../src/utils/chartSettings';
+import { usesMovingSlidersForDevice } from '../src/utils/device';
 import type { Note } from '../src/types';
 
 const sampleRate = 22050;
@@ -63,6 +64,7 @@ const verifyChart = async (bpm: number) => {
     laneVariety: 0.82,
     sliderProbability: 0.82,
     stamina: 0.66,
+    allowMovingSliders: true,
   };
   const notes = await generateNotesFromAudio(buffer, config);
   const repeated = await generateNotesFromAudio(buffer, config);
@@ -98,6 +100,21 @@ const results = await Promise.all([verifyChart(80), verifyChart(128), verifyChar
 assert(results.some((result) => result.holds > 0), 'tempo-aware generator did not create any holds');
 assert(results.some((result) => result.movingSlides > 0), 'tempo-aware generator did not create any moving slides');
 assert(results[2].notes > results[0].notes, 'fast songs should support a higher average pace than slow songs');
+
+const desktopTrack = createSyntheticTrack(128);
+const desktopNotes = await generateNotesFromAudio(desktopTrack.buffer, {
+  complexity: 0.72,
+  density: 0.62,
+  laneVariety: 0.82,
+  sliderProbability: 0.82,
+  stamina: 0.66,
+  allowMovingSliders: false,
+});
+assert(desktopNotes.some((note) => note.duration), 'desktop charts should retain straight hold notes');
+assert(desktopNotes.every((note) => note.endLane === undefined), 'desktop charts must not contain moving sliders');
+assert.equal(usesMovingSlidersForDevice({ coarsePointer: false, noHover: false, maxTouchPoints: 0, viewportWidth: 1440 }), false);
+assert.equal(usesMovingSlidersForDevice({ coarsePointer: false, noHover: false, maxTouchPoints: 10, viewportWidth: 1440 }), false);
+assert.equal(usesMovingSlidersForDevice({ coarsePointer: true, noHover: true, maxTouchPoints: 5, viewportWidth: 430 }), true);
 
 assert.equal(getDifficultyPreset(DEFAULT_DIFFICULTY).id, 'normal', 'default difficulty should remain Normal');
 for (let index = 1; index < DIFFICULTY_PRESETS.length; index++) {

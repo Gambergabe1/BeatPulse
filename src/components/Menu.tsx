@@ -26,6 +26,7 @@ import {
 } from '../services/pulseApi';
 import { SocialHub } from './SocialHub';
 import { getPlayerId, getPlayerToken } from '../utils/playerIdentity';
+import { prefersMovingSliders } from '../utils/device';
 
 interface MenuProps {
   onStartGame: (songData: SongData, isReplay?: boolean, replayEvents?: any[], multiplayer?: MultiplayerRoom) => void;
@@ -119,6 +120,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [username, setUsername] = useState(localStorage.getItem('username') || 'Anonymous');
   const playerId = useMemo(() => getPlayerId(), []);
   const playerToken = useMemo(() => getPlayerToken(), []);
+  const movingSlidersEnabled = useMemo(prefersMovingSliders, []);
   const playerIdentity = useMemo<PlayerIdentity>(() => ({
     playerId,
     playerToken,
@@ -179,7 +181,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       accentClass: 'text-neon-pink',
     },
     {
-      label: 'Holds & Slides',
+      label: movingSlidersEnabled ? 'Holds & Slides' : 'Hold Notes',
       value: effectiveSliderProbability,
       summary: getSliderTier(effectiveSliderProbability),
       accentClass: 'text-neon-blue',
@@ -220,8 +222,10 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     },
     {
       id: 'sliderProbability',
-      label: 'Holds & Slides',
-      hint: 'How often sustained and moving notes appear.',
+      label: movingSlidersEnabled ? 'Holds & Slides' : 'Hold Notes',
+      hint: movingSlidersEnabled
+        ? 'How often sustained and moving notes appear.'
+        : 'How often straight single-lane holds appear.',
       value: sliderProbability,
       onChange: setSliderProbability,
       accentClass: 'accent-neon-blue',
@@ -372,7 +376,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
           density: effectiveDensity,
           laneVariety: effectiveLaneVariety,
           sliderProbability: effectiveSliderProbability,
-          stamina: effectiveStamina
+          stamina: effectiveStamina,
+          allowMovingSliders: movingSlidersEnabled
         });
         setReadySong(prev => prev ? {
           ...prev,
@@ -391,7 +396,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     }, 400); // 400ms debounce
 
     return () => clearTimeout(timer);
-  }, [complexity, effectiveDensity, effectiveLaneVariety, effectiveSliderProbability, effectiveStamina, readySong?.audioBuffer]);
+  }, [complexity, effectiveDensity, effectiveLaneVariety, effectiveSliderProbability, effectiveStamina, movingSlidersEnabled, readySong?.audioBuffer]);
 
   const loadStoredSongData = useCallback(async (
     song: any,
@@ -448,7 +453,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         density: densityValue,
         laneVariety: laneVarietyValue,
         sliderProbability: sliderProbabilityValue,
-        stamina: staminaValue
+        stamina: staminaValue,
+        allowMovingSliders: movingSlidersEnabled
       });
     }
 
@@ -464,7 +470,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       sliderProbability: sliderProbabilityValue,
       stamina: staminaValue
     };
-  }, [audioContext]);
+  }, [audioContext, movingSlidersEnabled]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -487,7 +493,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         density: effectiveDensity,
         laneVariety: effectiveLaneVariety,
         sliderProbability: effectiveSliderProbability,
-        stamina: effectiveStamina
+        stamina: effectiveStamina,
+        allowMovingSliders: movingSlidersEnabled
       });
 
       const fileName = file.name.replace(/\.[^/.]+$/, "");
@@ -1230,7 +1237,9 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
             
             <div className="mt-6 pt-6 border-t border-white/5">
               <p className="text-xs text-white/30 italic">
-                Tap at the line. Hold trails, follow curved slides across lanes, and release on the tail.
+                {movingSlidersEnabled
+                  ? 'Tap at the line. Hold trails, follow curved slides across lanes, and release on the tail.'
+                  : 'Tap at the line. Hold straight trails in their lane and release on the tail.'}
               </p>
             </div>
           </div>

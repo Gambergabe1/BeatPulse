@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import { Trophy, RotateCcw, Home, Star, Share2, Activity, List, Music, Save } from 'lucide-react';
 import { ReplayEvent } from '../types';
-import { getSongById, saveReplay, ScoreRecord } from '../services/pulseApi';
+import { getSocialSnapshot, getSongById, saveReplay, ScoreRecord, MultiplayerRoom } from '../services/pulseApi';
 import { getChartSettingsForDifficulty } from '../utils/chartSettings';
 
 type HighScore = ScoreRecord;
@@ -26,6 +26,9 @@ interface GameOverScreenProps {
   isReplay: boolean;
   replayEvents: ReplayEvent[];
   initialHighScores?: HighScore[];
+  multiplayerRoom?: MultiplayerRoom;
+  playerId?: string;
+  playerToken?: string;
 }
 
 export const GameOverScreen: React.FC<GameOverScreenProps> = ({
@@ -46,7 +49,10 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   onReplay,
   isReplay,
   replayEvents,
-  initialHighScores = []
+  initialHighScores = [],
+  multiplayerRoom,
+  playerId,
+  playerToken,
 }) => {
   const difficultyProfile = getChartSettingsForDifficulty(difficulty);
   const getGrade = () => {
@@ -58,11 +64,11 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   };
 
   const grade = getGrade();
-  const backgroundSeed = encodeURIComponent(songName);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isCopied, setIsCopied] = useState(false);
   const [isSaved, setIsSaved] = useState(false);
   const [highScores, setHighScores] = useState<HighScore[]>(initialHighScores);
+  const [matchRoom, setMatchRoom] = useState(multiplayerRoom);
 
   const handleSaveReplay = async () => {
     if (isSaved || !songId) return;
@@ -121,6 +127,32 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
       isCancelled = true;
     };
   }, [songId, initialHighScores]);
+
+  useEffect(() => {
+    setMatchRoom(multiplayerRoom);
+  }, [multiplayerRoom]);
+
+  useEffect(() => {
+    if (!multiplayerRoom || !playerId || !playerToken) return;
+    let cancelled = false;
+    const refreshStandings = async () => {
+      try {
+        const snapshot = await getSocialSnapshot({
+          playerId,
+          playerToken,
+          username: localStorage.getItem('username') || 'Anonymous',
+        });
+        if (!cancelled && snapshot.activeRoom?.id === multiplayerRoom.id) {
+          setMatchRoom(snapshot.activeRoom);
+        }
+      } catch (error) {
+        console.warn('Failed to refresh multiplayer standings:', error);
+      }
+    };
+    refreshStandings();
+    const timer = window.setInterval(refreshStandings, 2500);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [multiplayerRoom?.id, playerId, playerToken]);
 
   const handleShare = async () => {
     const shareText = `I just scored ${score.toLocaleString()} (${accuracy.toFixed(1)}%) with rank ${grade.label} on ${songName} in BeatPulse! 🎵🔥`;
@@ -301,12 +333,8 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
     <div className="min-h-screen w-full bg-[#050505] flex flex-col items-center justify-start md:justify-center p-6 md:p-12 font-sans relative overflow-y-auto overflow-x-hidden">
       {/* Dynamic Background */}
       <div className="absolute inset-0 z-0">
-        <img 
-          src={`https://picsum.photos/seed/${backgroundSeed}/1920/1080`}
-          alt=""
-          className="w-full h-full object-cover blur-[80px] opacity-20 scale-110"
-          referrerPolicy="no-referrer"
-        />
+        <div className="absolute left-[-10%] top-[-20%] h-[55%] w-[55%] rounded-full bg-neon-blue/10 blur-[140px]" />
+        <div className="absolute bottom-[-25%] right-[-10%] h-[60%] w-[60%] rounded-full bg-neon-purple/10 blur-[150px]" />
         <div className="absolute inset-0 bg-gradient-to-b from-black via-black/80 to-black" />
         <div className="absolute inset-0 bg-neon-blue/5 mix-blend-overlay" />
       </div>
@@ -343,7 +371,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
             animate={{ letterSpacing: "0.8em" }}
             className="text-xs font-black text-neon-blue uppercase mb-4 opacity-80"
           >
-            Session Complete
+            {multiplayerRoom ? 'Multiplayer Complete' : 'Session Complete'}
           </motion.h2>
           <h1 className="text-5xl md:text-7xl font-display font-black text-white tracking-tighter italic uppercase">
             Game Over
@@ -413,6 +441,28 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
           </div>
         </div>
 
+        {matchRoom && (
+          <motion.div
+            initial={{ y: 20, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            transition={{ delay: 0.55 }}
+            className="mb-6 rounded-3xl border border-neon-purple/25 bg-neon-purple/[0.07] p-6"
+          >
+            <div className="mb-5 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3"><Activity className="h-5 w-5 text-neon-purple" /><h3 className="font-display text-sm font-bold uppercase tracking-widest">Match standings</h3></div>
+              <span className="font-mono text-xs font-bold tracking-[0.2em] text-neon-blue">{matchRoom.code}</span>
+            </div>
+            <div className="space-y-2">
+              {[...matchRoom.participants].sort((a, b) => b.score - a.score).map((player, index) => (
+                <div key={player.playerId} className={`flex items-center justify-between rounded-2xl border p-4 ${player.playerId === playerId ? 'border-neon-blue/40 bg-neon-blue/10' : 'border-white/5 bg-black/20'}`}>
+                  <div className="flex items-center gap-4"><span className={`font-display text-xl font-black ${index === 0 ? 'text-neon-orange' : 'text-white/30'}`}>#{index + 1}</span><div><p className="font-bold">{player.username}{player.playerId === playerId ? ' · You' : ''}</p><p className="text-[10px] uppercase tracking-wider text-white/35">{player.finished ? 'Finished' : 'Still playing'}</p></div></div>
+                  <div className="text-right"><p className="font-mono font-bold text-neon-blue">{player.score.toLocaleString()}</p><p className="text-[10px] text-neon-green">{player.accuracy.toFixed(1)}%</p></div>
+                </div>
+              ))}
+            </div>
+          </motion.div>
+        )}
+
         {/* Leaderboard Section */}
         <motion.div 
           initial={{ y: 20, opacity: 0 }}
@@ -449,13 +499,13 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
         </motion.div>
 
         <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-5 gap-4 w-full">
-          <button 
+          {!multiplayerRoom && <button 
             onClick={onRetry}
             className="w-full px-6 py-5 rounded-full bg-white text-black font-display font-black uppercase tracking-widest hover:bg-neon-blue hover:text-white transition-all flex items-center justify-center gap-3 group text-sm"
           >
             <RotateCcw className="w-5 h-5 group-hover:rotate-[-180deg] transition-transform duration-500" />
             Retry
-          </button>
+          </button>}
           
           {!isReplay ? (
             <button 

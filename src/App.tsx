@@ -3,15 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import { Intro } from './components/Intro';
 import { Menu } from './components/Menu';
 import { GameCanvas } from './components/GameCanvas';
 import { GameOverScreen } from './components/GameOverScreen';
 import { Tutorial } from './components/Tutorial';
 import { SongData, Settings } from './types';
-import { saveGlobalScore, ScoreRecord } from './services/pulseApi';
+import { leaveMultiplayerRoom, saveGlobalScore, ScoreRecord, MultiplayerRoom, updateMultiplayerProgress } from './services/pulseApi';
 import { DEFAULT_DIFFICULTY, getChartSettingsForDifficulty } from './utils/chartSettings';
+import { getPlayerId, getPlayerToken } from './utils/playerIdentity';
 
 const defaultChartSettings = getChartSettingsForDifficulty(DEFAULT_DIFFICULTY);
 
@@ -51,8 +52,12 @@ export default function App() {
     maxCombo: number;
     replayEvents: { time: number; lane: number; type: string }[];
     highScores?: ScoreRecord[];
+    multiplayerRoom?: MultiplayerRoom;
   } | null>(null);
   const [isReplay, setIsReplay] = useState(false);
+  const [multiplayerRoom, setMultiplayerRoom] = useState<MultiplayerRoom | null>(null);
+  const playerId = useMemo(() => getPlayerId(), []);
+  const playerToken = useMemo(() => getPlayerToken(), []);
 
   const [audioContext] = useState(() => new (window.AudioContext || (window as any).webkitAudioContext)());
 
@@ -72,13 +77,15 @@ export default function App() {
   const handleStartGame = useCallback(async (
     data: SongData,
     replay = false,
-    replayEvents?: { time: number; lane: number; type: string }[]
+    replayEvents?: { time: number; lane: number; type: string }[],
+    matchRoom?: MultiplayerRoom
   ) => {
     if (audioContext.state === 'suspended') {
       await audioContext.resume();
     }
     setSongData(data);
     setIsReplay(replay);
+    setMultiplayerRoom(matchRoom || null);
     if (replay && replayEvents) {
       setLastResult(prev => ({
         score: prev?.score || 0,
@@ -92,8 +99,23 @@ export default function App() {
   }, [audioContext]);
 
   const handleGameEnd = useCallback(async (score: number, accuracy: number, maxCombo: number, replayEvents: { time: number; lane: number; type: string }[]) => {
-    setLastResult({ score, accuracy, maxCombo, replayEvents });
+    setLastResult({ score, accuracy, maxCombo, replayEvents, multiplayerRoom: multiplayerRoom || undefined });
     setView('RESULTS');
+
+    if (multiplayerRoom) {
+      try {
+        const username = localStorage.getItem('username') || 'Anonymous';
+        const updatedRoom = await updateMultiplayerProgress(
+          { playerId, playerToken, username },
+          multiplayerRoom.id,
+          { score, combo: maxCombo, accuracy, progress: 1, finished: true }
+        );
+        setMultiplayerRoom(updatedRoom);
+        setLastResult(prev => prev ? { ...prev, multiplayerRoom: updatedRoom } : prev);
+      } catch (err) {
+        console.error('Failed to submit multiplayer result:', err);
+      }
+    }
 
     if (songData && !isReplay) {
       try {
@@ -122,17 +144,36 @@ export default function App() {
         console.error("Failed to save score submission:", err);
       }
     }
-  }, [songData, isReplay]);
+  }, [songData, isReplay, multiplayerRoom, playerId, playerToken]);
 
   const handleRetry = useCallback(() => {
     setIsReplay(false);
+    setMultiplayerRoom(null);
     setView('GAME');
   }, []);
 
   const handleHome = useCallback(() => {
     setView('MENU');
     setSongData(null);
+    setMultiplayerRoom(null);
   }, []);
+
+  const handleExitGame = useCallback(() => {
+    if (multiplayerRoom) {
+      const username = localStorage.getItem('username') || 'Anonymous';
+      leaveMultiplayerRoom({ playerId, playerToken, username }, multiplayerRoom.id)
+        .catch((err) => console.warn('Failed to leave multiplayer room:', err));
+    }
+    handleHome();
+  }, [handleHome, multiplayerRoom?.id, playerId, playerToken]);
+
+  const handleMultiplayerProgress = useCallback((progress: { score: number; combo: number; accuracy: number; progress: number }) => {
+    if (!multiplayerRoom) return;
+    const username = localStorage.getItem('username') || 'Anonymous';
+    updateMultiplayerProgress({ playerId, playerToken, username }, multiplayerRoom.id, progress)
+      .then(setMultiplayerRoom)
+      .catch((err) => console.warn('Multiplayer progress update failed:', err));
+  }, [multiplayerRoom?.id, playerId, playerToken]);
 
   const handleSaveSettings = useCallback((newSettings: Settings) => {
     setSettings(newSettings);
@@ -154,6 +195,9 @@ export default function App() {
           onStartGame={handleStartGame} 
           audioContext={audioContext} 
           settings={settings}
+          multiplayerRoom={multiplayerRoom}
+          synchronizedStartAt={multiplayerRoom?.startAt}
+          onMultiplayerProgress={handleMultiplayerProgress}
           onSaveSettings={handleSaveSettings}
         />
       )}
@@ -165,7 +209,7 @@ export default function App() {
           audioBuffer={songData.audioBuffer}
           difficulty={songData.difficulty}
           onGameEnd={handleGameEnd}
-          onExit={handleHome}
+          onExit={handleExitGame}
           isReplay={isReplay}
           replayEvents={lastResult?.replayEvents || []}
           settings={settings}
@@ -192,6 +236,9 @@ export default function App() {
           isReplay={isReplay}
           replayEvents={lastResult.replayEvents}
           initialHighScores={lastResult.highScores}
+          multiplayerRoom={lastResult.multiplayerRoom}
+          playerId={playerId}
+          playerToken={playerToken}
         />
       )}
     </div>

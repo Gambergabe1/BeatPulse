@@ -2,10 +2,12 @@ export interface Note {
   id: string;
   time: number; // Time in seconds when the note should be hit
   lane: number; // 0, 1, 2, 3
-  duration?: number; // Duration of the slider in seconds, undefined for normal notes
+  duration?: number; // Duration of a hold or slide in seconds
+  endLane?: number; // Moving slides travel from lane to this lane; omitted for vertical holds
+  tickInterval?: number; // Musical sustain-check interval chosen by the chart generator
   hit: boolean;
   missed: boolean;
-  held?: boolean; // For slider tracking
+  held?: boolean; // Runtime sustain state
 }
 
 export interface CommunitySong {

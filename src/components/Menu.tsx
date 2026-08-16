@@ -1,8 +1,9 @@
 ﻿import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search, ArrowLeft, RefreshCw } from 'lucide-react';
+import { useMemo } from 'react';
+import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Users, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, Search, ArrowLeft, RefreshCw } from 'lucide-react';
 import { loadAudioFile, generateNotesFromAudio } from '../utils/audio';
-import { DEFAULT_DIFFICULTY, getChartSettingsForDifficulty, getDifficultyPreset } from '../utils/chartSettings';
+import { DEFAULT_DIFFICULTY, DIFFICULTY_PRESETS, getChartSettingsForDifficulty, getDifficultyPreset } from '../utils/chartSettings';
 import { SongData, Settings } from '../types';
 import {
   changeAdminPassword,
@@ -19,17 +20,21 @@ import {
   removeLeaderboardPlayer,
   ReplayLinkIssue,
   saveCommunitySong,
-  updateCommunitySong
+  updateCommunitySong,
+  MultiplayerRoom,
+  PlayerIdentity
 } from '../services/pulseApi';
+import { SocialHub } from './SocialHub';
+import { getPlayerId, getPlayerToken } from '../utils/playerIdentity';
 
 interface MenuProps {
-  onStartGame: (songData: SongData, isReplay?: boolean, replayEvents?: any[]) => void;
+  onStartGame: (songData: SongData, isReplay?: boolean, replayEvents?: any[], multiplayer?: MultiplayerRoom) => void;
   audioContext: AudioContext;
   settings: Settings;
   onSaveSettings: (settings: Settings) => void;
 }
 
-type MainTab = 'LOCAL' | 'COMMUNITY' | 'GLOBAL' | 'SETTINGS' | 'REPLAYS';
+type MainTab = 'LOCAL' | 'COMMUNITY' | 'SOCIAL' | 'GLOBAL' | 'SETTINGS' | 'REPLAYS';
 
 const LEADERBOARD_REMOVAL_REASONS = [
   'Inappropriate name',
@@ -48,6 +53,13 @@ const getSettingTier = (value: number, labels: [string, string, string, string])
   if (value < 0.5) return labels[1];
   if (value < 0.75) return labels[2];
   return labels[3];
+};
+
+const getSliderTier = (value: number) => {
+  if (value < 0.17) return 'Rare';
+  if (value < 0.28) return 'Occasional';
+  if (value < 0.39) return 'Frequent';
+  return 'Flowing';
 };
 
 const normalizeUsername = (value: string) => value.trim().toLowerCase();
@@ -105,6 +117,13 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [isSaving, setIsSaving] = useState(false);
   const [lastUploadedFile, setLastUploadedFile] = useState<File | null>(null);
   const [username, setUsername] = useState(localStorage.getItem('username') || 'Anonymous');
+  const playerId = useMemo(() => getPlayerId(), []);
+  const playerToken = useMemo(() => getPlayerToken(), []);
+  const playerIdentity = useMemo<PlayerIdentity>(() => ({
+    playerId,
+    playerToken,
+    username: username.trim() || 'Anonymous',
+  }), [playerId, playerToken, username]);
   
   // Admin states
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -131,6 +150,15 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
   const previewTimeoutRef = useRef<any>(null);
   const isAdminPage = activeTab === 'ADMIN';
+  const sectionMeta = ({
+    LOCAL: { lead: 'Play', accent: 'Studio', subtitle: 'Load a track and shape your chart', icon: Activity, color: 'text-neon-blue' },
+    COMMUNITY: { lead: 'Community', accent: 'Library', subtitle: 'Discover player-made rhythm charts', icon: Cloud, color: 'text-neon-blue' },
+    SOCIAL: { lead: 'Pulse', accent: 'Network', subtitle: 'Friends · Messages · Live Matches', icon: Users, color: 'text-neon-purple' },
+    GLOBAL: { lead: 'Global', accent: 'Rankings', subtitle: 'The best runs across every chart', icon: Trophy, color: 'text-neon-green' },
+    REPLAYS: { lead: 'Replay', accent: 'Vault', subtitle: 'Rewatch and study your saved performances', icon: Play, color: 'text-neon-blue' },
+    SETTINGS: { lead: 'Player', accent: 'Setup', subtitle: 'Tune controls, charts, visuals, and sound', icon: SettingsIcon, color: 'text-neon-purple' },
+  } satisfies Record<MainTab, { lead: string; accent: string; subtitle: string; icon: React.ElementType; color: string }>)[activeTab === 'ADMIN' ? 'LOCAL' : activeTab];
+  const SectionIcon = sectionMeta.icon;
   const chartSettings = getChartSettingsForDifficulty(complexity);
   const difficultyPreset = getDifficultyPreset(complexity);
   const effectiveDensity = advancedChartMode ? density : chartSettings.density;
@@ -151,9 +179,9 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       accentClass: 'text-neon-pink',
     },
     {
-      label: 'Hold Notes',
+      label: 'Holds & Slides',
       value: effectiveSliderProbability,
-      summary: getSettingTier(effectiveSliderProbability, ['Rare', 'Occasional', 'Frequent', 'Flowing'] as const),
+      summary: getSliderTier(effectiveSliderProbability),
       accentClass: 'text-neon-blue',
     },
     {
@@ -192,8 +220,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     },
     {
       id: 'sliderProbability',
-      label: 'Sliders',
-      hint: 'How often hold notes appear.',
+      label: 'Holds & Slides',
+      hint: 'How often sustained and moving notes appear.',
       value: sliderProbability,
       onChange: setSliderProbability,
       accentClass: 'accent-neon-blue',
@@ -201,7 +229,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       badgeClass: 'border-neon-blue/20 bg-neon-blue/10 text-neon-blue',
       minLabel: 'Rare',
       maxLabel: 'Frequent',
-      summary: getSettingTier(sliderProbability, ['Rare', 'Occasional', 'Frequent', 'Flowing'] as const),
+      summary: getSliderTier(sliderProbability),
     },
     {
       id: 'stamina',
@@ -230,16 +258,21 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   };
 
   const toggleAdvancedChartMode = () => {
-    const nextMode = !advancedChartMode;
-    if (!nextMode) {
+    if (!advancedChartMode) {
       applyChartProfile(getChartSettingsForDifficulty(complexity));
     }
-    setAdvancedChartMode(nextMode);
+    setAdvancedChartMode((current) => !current);
+  };
+
+  const selectDifficultyPreset = (value: number) => {
+    setComplexity(value);
+    setAdvancedChartMode(false);
   };
 
   const resetChartSettings = () => {
     setComplexity(DEFAULT_CHART_SETTINGS.complexity);
     applyChartProfile(DEFAULT_CHART_SETTINGS);
+    setAdvancedChartMode(false);
   };
 
   useEffect(() => {
@@ -269,12 +302,6 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   useEffect(() => {
     setLocalSettings(settings);
   }, [settings]);
-
-  useEffect(() => {
-    if (!advancedChartMode) {
-      applyChartProfile(chartSettings);
-    }
-  }, [advancedChartMode, complexity, chartSettings.density, chartSettings.laneVariety, chartSettings.sliderProbability, chartSettings.stamina]);
 
   // Sync generation settings to parent settings
   useEffect(() => {
@@ -550,6 +577,16 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       setError('Failed to load song audio.');
     }
   }, [loadStoredSongData]);
+
+  const handleLaunchMultiplayer = useCallback(async (room: MultiplayerRoom) => {
+    const song = communitySongs.find((entry) => entry.id === room.songId);
+    if (!song) {
+      throw new Error('The match song is no longer available.');
+    }
+    setError(null);
+    const songData = await loadStoredSongData(song);
+    onStartGame(songData, false, undefined, room);
+  }, [communitySongs, loadStoredSongData, onStartGame]);
 
   const handleLoadReplay = useCallback(async (replay: any) => {
     if (!replay.songId) {
@@ -987,7 +1024,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       <motion.div 
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="z-10 flex flex-col items-center max-w-2xl w-full"
+        className="z-10 flex flex-col items-center max-w-6xl w-full"
       >
         <div className="mb-12 text-center">
           <motion.div
@@ -997,17 +1034,22 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
           >
             <Disc className="w-16 h-16 text-neon-blue" />
           </motion.div>
-          <h1 className="text-7xl md:text-8xl font-display font-black tracking-tighter italic uppercase mb-2">
+          <h1 className="mb-2 font-display text-5xl font-black uppercase italic tracking-tighter sm:text-7xl md:text-8xl">
             Beat<span className="text-neon-pink">Pulse</span>
           </h1>
           <p className="text-white/40 font-display font-bold tracking-[0.3em] uppercase text-sm">
             Rhythm Evolution
           </p>
+          <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-[9px] font-black uppercase tracking-[0.18em] text-white/35">
+            <span className="rounded-full border border-neon-green/20 bg-neon-green/[0.07] px-3 py-1.5"><span className="mr-2 inline-block h-1.5 w-1.5 rounded-full bg-neon-green shadow-[0_0_8px_#39ff14]" />Live multiplayer</span>
+            <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">Auto charts</span>
+            <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">Up to 8 players</span>
+          </div>
         </div>
 
         {/* Top Utility Buttons */}
-        <div className="w-full flex items-center justify-between gap-3 mb-6">
-          <div className="flex items-center gap-3 px-4 py-2 rounded-xl border border-white/10 bg-white/5">
+        <div className="mb-6 flex w-full items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 sm:gap-3 sm:px-4">
             <div className="w-5 h-5 rounded-full bg-neon-purple/20 flex items-center justify-center">
               <User className="w-3 h-3 text-neon-purple" />
             </div>
@@ -1024,31 +1066,33 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
               Back
             </button>
           ) : (
-            <div className="flex gap-3">
+            <div className="flex shrink-0 gap-2 sm:gap-3">
               <button 
                 onClick={handleOpenAdminPage}
-                className="flex items-center gap-2 px-4 py-2 rounded-xl border transition-all font-display font-bold text-xs uppercase tracking-widest bg-white/5 text-white/40 border-white/10 hover:bg-white/10 hover:text-white hover:border-white/20"
+                aria-label="Open admin panel"
+                className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 font-display text-xs font-bold uppercase tracking-widest text-white/40 transition-all hover:border-white/20 hover:bg-white/10 hover:text-white sm:px-4"
               >
                 <Lock className="w-4 h-4" />
-                Admin
+                <span className="hidden sm:inline">Admin</span>
               </button>
               <button 
                 onClick={() => handleMainTabChange('SETTINGS')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-all font-display font-bold text-xs uppercase tracking-widest ${
+                aria-label="Open player settings"
+                className={`flex items-center gap-2 rounded-xl border px-3 py-2 font-display text-xs font-bold uppercase tracking-widest transition-all sm:px-4 ${
                   activeTab === 'SETTINGS' 
                     ? 'bg-neon-blue text-black border-neon-blue shadow-[0_0_15px_rgba(0,243,255,0.3)]' 
                     : 'bg-white/5 text-white/40 border-white/10 hover:bg-white/10 hover:text-white hover:border-white/20'
                 }`}
               >
                 <SettingsIcon className="w-4 h-4" />
-                Settings
+                <span className="hidden sm:inline">Settings</span>
               </button>
             </div>
           )}
         </div>
 
         <div className={`grid gap-6 w-full ${isAdminPage ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
-          {!isAdminPage && (
+          {!isAdminPage && activeTab === 'LOCAL' && (
             <>
           {/* Upload Card */}
           <div className="relative">
@@ -1186,7 +1230,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
             
             <div className="mt-6 pt-6 border-t border-white/5">
               <p className="text-xs text-white/30 italic">
-                Hit the keys when the notes cross the line.
+                Tap at the line. Hold trails, follow curved slides across lanes, and release on the tail.
               </p>
             </div>
           </div>
@@ -1194,7 +1238,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
           )}
 
           {/* Community Library Card */}
-          <div className="md:col-span-2 rounded-[2rem] bg-black/40 backdrop-blur-xl border border-white/10 p-8 flex flex-col shadow-2xl relative overflow-hidden">
+          <div className="md:col-span-2 rounded-[2rem] bg-black/40 backdrop-blur-xl border border-white/10 p-4 md:p-8 flex flex-col shadow-2xl relative overflow-hidden">
             <div className={`absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent ${isAdminPage ? 'via-neon-pink/50' : 'via-neon-blue/50'} to-transparent`} />
             
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 mb-8">
@@ -1202,7 +1246,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 <div className="relative">
                   <div className={`absolute inset-0 ${isAdminPage ? 'bg-neon-pink' : 'bg-neon-blue'} blur-lg opacity-20 animate-pulse`} />
                   <div className={`relative p-3 rounded-2xl border ${isAdminPage ? 'bg-neon-pink/10 border-neon-pink/20 text-neon-pink' : 'bg-neon-blue/10 border-neon-blue/20 text-neon-blue'}`}>
-                    {isAdminPage ? <Lock className="w-6 h-6" /> : <Cloud className="w-6 h-6" />}
+                    {isAdminPage ? <Lock className="w-6 h-6" /> : <SectionIcon className="w-6 h-6" />}
                   </div>
                 </div>
                 <div>
@@ -1216,19 +1260,20 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   ) : (
                     <>
                       <h3 className="text-2xl font-display font-black uppercase tracking-tight italic">
-                        Community <span className="text-neon-blue">Library</span>
+                        {sectionMeta.lead} <span className={sectionMeta.color}>{sectionMeta.accent}</span>
                       </h3>
-                      <p className="text-[10px] text-white/30 uppercase tracking-[0.2em] font-bold">Global Rhythm Database</p>
+                      <p className="text-[10px] text-white/30 uppercase tracking-[0.2em] font-bold">{sectionMeta.subtitle}</p>
                     </>
                   )}
                 </div>
               </div>
 
               {!isAdminPage && (
-              <div className="flex bg-white/5 backdrop-blur-md rounded-2xl p-1.5 border border-white/5 self-start lg:self-center">
+              <div className="flex max-w-full overflow-x-auto no-scrollbar bg-white/5 backdrop-blur-md rounded-2xl p-1.5 border border-white/5 self-start lg:self-center">
                 {[
                   { id: 'LOCAL', label: 'Local', icon: <Activity className="w-3.5 h-3.5" /> },
                   { id: 'COMMUNITY', label: 'Community', icon: <Cloud className="w-3.5 h-3.5" /> },
+                  { id: 'SOCIAL', label: 'Social', icon: <Users className="w-3.5 h-3.5" /> },
                   { id: 'GLOBAL', label: 'Global Scores', icon: <Trophy className="w-3.5 h-3.5" /> },
                   { id: 'REPLAYS', label: 'Replays', icon: <Play className="w-3.5 h-3.5" /> }
                 ].map((tab) => (
@@ -1254,7 +1299,13 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
               )}
             </div>
             
-            {activeTab === 'COMMUNITY' ? (
+            {activeTab === 'SOCIAL' ? (
+              <SocialHub
+                identity={playerIdentity}
+                songs={communitySongs}
+                onLaunchMatch={handleLaunchMultiplayer}
+              />
+            ) : activeTab === 'COMMUNITY' ? (
               <div className="flex flex-col gap-4">
                 <div className="relative">
                   <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30" />
@@ -1719,132 +1770,149 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
               <div className="py-4">
                 <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(280px,0.9fr)]">
                   <div className="space-y-6">
-                    <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">
-                      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between mb-6">
-                        <div>
-                          <h4 className="font-display font-bold text-white flex items-center gap-2">
-                            <Activity className="w-5 h-5 text-neon-blue" />
-                            Chart Difficulty
-                          </h4>
-                          <p className="text-white/50 text-sm mt-2">
-                            One slider now shapes the whole chart automatically, so new players can get into a song faster.
-                          </p>
-                        </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button
-                            onClick={toggleAdvancedChartMode}
-                            className={`px-4 py-2 rounded-xl border text-xs font-bold uppercase tracking-widest transition-all ${
-                              advancedChartMode
-                                ? 'border-neon-pink/40 bg-neon-pink/15 text-neon-pink hover:bg-neon-pink hover:text-white'
-                                : 'border-white/10 bg-white/5 text-white/70 hover:bg-white/10 hover:text-white'
-                            }`}
-                          >
-                            {advancedChartMode ? 'Advanced Mode On' : 'Activate Advanced Mode'}
-                          </button>
-                          <button
-                            onClick={resetChartSettings}
-                            className="px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-xs font-bold uppercase tracking-widest text-white/70 hover:bg-white/10 hover:text-white transition-all"
-                          >
-                            Reset to Balanced
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="rounded-[28px] border border-white/8 bg-black/20 p-5">
-                        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-                          <div>
-                            <p className="text-sm font-bold text-white">Difficulty</p>
-                            <p className="text-xs text-white/45 mt-1">{difficultyPreset.description}</p>
-                          </div>
-                          <div className="text-left lg:text-right">
-                            <span className="inline-flex items-center rounded-full border border-neon-purple/20 bg-neon-purple/10 px-3 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-neon-purple">
-                              {difficultyPreset.label}
-                            </span>
-                            <p className="mt-2 text-[11px] font-mono text-neon-purple">{formatPercentLabel(complexity)}</p>
-                          </div>
-                        </div>
-
-                        <div className="mt-5">
-                          <input
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.1"
-                            value={complexity}
-                            onChange={(e) => setComplexity(parseFloat(e.target.value))}
-                            className="w-full accent-neon-purple h-2 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                          />
-
-                          <div className="mt-3 flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-white/25">
-                            <span>Easy</span>
-                            <span>Expert</span>
-                          </div>
-                        </div>
-
-                        <div className="mt-6 grid gap-3 sm:grid-cols-2">
-                          {chartProfileRows.map((row) => (
-                            <div key={row.label} className="rounded-2xl border border-white/8 bg-black/30 px-4 py-3">
-                              <div className="flex items-center justify-between gap-3">
-                                <div>
-                                  <p className="text-[11px] font-bold uppercase tracking-[0.16em] text-white/35">{row.label}</p>
-                                  <p className={`mt-2 text-sm font-display font-bold ${row.accentClass}`}>{row.summary}</p>
-                                </div>
-                                <span className="text-[11px] font-mono text-white/45">{formatPercentLabel(row.value)}</span>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-
-                        <p className="mt-5 text-xs text-white/40">
-                          {advancedChartMode
-                            ? 'Manual chart tuning is active. The sliders below override the automatic profile.'
-                            : 'Density, lane movement, hold notes, and stamina are tuned automatically from this slider.'}
+                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5 sm:p-6">
+                      <div className="mb-6">
+                        <h4 className="flex items-center gap-2 font-display font-bold text-white">
+                          <Activity className="h-5 w-5 text-neon-blue" />
+                          Chart Difficulty
+                        </h4>
+                        <p className="mt-2 max-w-2xl text-sm text-white/50">
+                          Pick a level and play. BeatPulse still adjusts the chart to each song's BPM and changing pace.
                         </p>
                       </div>
 
-                      {advancedChartMode ? (
-                        <div className="mt-5 rounded-[28px] border border-neon-pink/15 bg-neon-pink/5 p-5">
-                          <div className="flex items-start justify-between gap-4 mb-5">
-                            <div>
-                              <p className="text-sm font-bold text-white">Advanced Mode</p>
-                              <p className="text-xs text-white/45 mt-1">
-                                Fine tune the chart exactly how you want without losing the main difficulty slider.
+                      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+                        {DIFFICULTY_PRESETS.map((preset) => {
+                          const isSelected = !advancedChartMode && difficultyPreset.id === preset.id;
+                          return (
+                            <button
+                              key={preset.id}
+                              type="button"
+                              aria-pressed={isSelected}
+                              onClick={() => selectDifficultyPreset(preset.value)}
+                              className={`group rounded-2xl border p-4 text-left transition-all ${
+                                isSelected
+                                  ? 'border-neon-blue/60 bg-neon-blue/10 shadow-[0_0_28px_rgba(0,243,255,0.1)]'
+                                  : 'border-white/10 bg-black/20 hover:border-white/25 hover:bg-white/[0.07]'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className={`font-display text-lg font-black ${isSelected ? 'text-neon-blue' : 'text-white'}`}>
+                                  {preset.label}
+                                </span>
+                                <span className={`h-2 w-2 rounded-full ${isSelected ? 'bg-neon-blue shadow-[0_0_10px_#00f3ff]' : 'bg-white/15'}`} />
+                              </div>
+                              <p className="mt-2 min-h-10 text-xs leading-relaxed text-white/45">{preset.description}</p>
+                              <p className={`mt-3 text-[9px] font-black uppercase tracking-[0.18em] ${isSelected ? 'text-neon-blue/80' : 'text-white/25'}`}>
+                                {preset.pace}
                               </p>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="mt-5 rounded-[24px] border border-white/8 bg-black/20 p-4 sm:p-5">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <p className="text-sm font-bold text-white">{advancedChartMode ? 'Custom profile' : `${difficultyPreset.label} profile`}</p>
+                              <span className="rounded-full border border-neon-purple/20 bg-neon-purple/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-[0.16em] text-neon-purple">
+                                BPM adaptive
+                              </span>
                             </div>
-                            <span className="inline-flex items-center rounded-full border border-neon-pink/20 bg-neon-pink/10 px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.2em] text-neon-pink">
-                              Manual Overrides
+                            <p className="mt-1 text-xs text-white/40">
+                              {advancedChartMode ? 'Manual values are active.' : difficultyPreset.description}
+                            </p>
+                          </div>
+                          <div className="flex gap-2">
+                            <button
+                              type="button"
+                              onClick={toggleAdvancedChartMode}
+                              className={`rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] transition-all ${
+                                advancedChartMode
+                                  ? 'border-neon-pink/35 bg-neon-pink/10 text-neon-pink hover:bg-neon-pink/20'
+                                  : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white'
+                              }`}
+                            >
+                              {advancedChartMode ? 'Use preset' : 'Customize'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={resetChartSettings}
+                              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-white/45 transition-all hover:bg-white/10 hover:text-white"
+                            >
+                              Reset
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                          {chartProfileRows.map((row) => (
+                            <div key={row.label} className="rounded-xl border border-white/5 bg-white/[0.025] px-3 py-2.5">
+                              <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-white/30">{row.label}</p>
+                              <p className={`mt-1 text-xs font-display font-bold ${row.accentClass}`}>{row.summary}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {advancedChartMode ? (
+                        <div className="mt-5 rounded-[24px] border border-neon-pink/15 bg-neon-pink/[0.045] p-4 sm:p-5">
+                          <div className="mb-5 flex items-start justify-between gap-4">
+                            <div>
+                              <p className="text-sm font-bold text-white">Customize chart</p>
+                              <p className="mt-1 text-xs text-white/45">Fine tune only what matters to you.</p>
+                            </div>
+                            <span className="rounded-full border border-neon-pink/20 bg-neon-pink/10 px-2.5 py-1 text-[9px] font-black uppercase tracking-[0.18em] text-neon-pink">
+                              Custom
                             </span>
                           </div>
 
-                          <div className="grid gap-4 lg:grid-cols-2">
+                          <div className="mb-4 rounded-2xl border border-white/8 bg-black/20 p-4">
+                            <div className="mb-4 flex items-center justify-between gap-3">
+                              <div>
+                                <p className="text-sm font-bold text-white">Base intensity</p>
+                                <p className="mt-1 text-xs text-white/45">Overall pattern complexity.</p>
+                              </div>
+                              <span className="font-mono text-xs text-neon-purple">{formatPercentLabel(complexity)}</span>
+                            </div>
+                            <input
+                              aria-label="Base chart intensity"
+                              type="range"
+                              min="0"
+                              max="1"
+                              step="0.05"
+                              value={complexity}
+                              onChange={(e) => setComplexity(parseFloat(e.target.value))}
+                              className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-purple"
+                            />
+                            <div className="mt-3 flex items-center justify-between text-[9px] font-bold uppercase tracking-widest text-white/25">
+                              <span>Simple</span><span>Complex</span>
+                            </div>
+                          </div>
+
+                          <div className="grid gap-3 lg:grid-cols-2">
                             {advancedControls.map((control) => (
                               <div key={control.id} className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                                <div className="flex items-start justify-between gap-3 mb-4">
+                                <div className="mb-4 flex items-start justify-between gap-3">
                                   <div>
                                     <p className="text-sm font-bold text-white">{control.label}</p>
-                                    <p className="text-xs text-white/45 mt-1">{control.hint}</p>
+                                    <p className="mt-1 text-xs text-white/45">{control.hint}</p>
                                   </div>
-                                  <div className="text-right">
-                                    <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.2em] ${control.badgeClass}`}>
-                                      {control.summary}
-                                    </span>
-                                    <p className={`mt-2 text-[11px] font-mono ${control.valueClass}`}>{formatPercentLabel(control.value)}</p>
-                                  </div>
+                                  <span className={`font-mono text-xs ${control.valueClass}`}>{formatPercentLabel(control.value)}</span>
                                 </div>
-
                                 <input
+                                  aria-label={control.label}
                                   type="range"
                                   min="0"
                                   max="1"
-                                  step="0.1"
+                                  step="0.05"
                                   value={control.value}
                                   onChange={(e) => control.onChange(parseFloat(e.target.value))}
-                                  className={`w-full ${control.accentClass} h-2 bg-white/10 rounded-lg appearance-none cursor-pointer`}
+                                  className={`h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 ${control.accentClass}`}
                                 />
-
-                                <div className="mt-3 flex items-center justify-between text-[10px] font-bold uppercase tracking-widest text-white/25">
-                                  <span>{control.minLabel}</span>
-                                  <span>{control.maxLabel}</span>
+                                <div className="mt-3 flex items-center justify-between text-[9px] font-bold uppercase tracking-widest text-white/25">
+                                  <span>{control.minLabel}</span><span>{control.maxLabel}</span>
                                 </div>
                               </div>
                             ))}
@@ -1963,8 +2031,22 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 </div>
               </div>
             ) : (
-              <div className="flex flex-col items-center justify-center py-12 text-white/20 border-2 border-dashed border-white/5 rounded-2xl">
-                <p className="text-sm font-bold uppercase tracking-widest">Local songs list would go here</p>
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="rounded-2xl border border-neon-blue/15 bg-neon-blue/[0.05] p-5">
+                  <span className="font-mono text-xs font-bold text-neon-blue">01</span>
+                  <h4 className="mt-3 font-display font-bold">Bring your music</h4>
+                  <p className="mt-2 text-xs leading-relaxed text-white/40">Drop an audio file into the Play Studio above. BeatPulse builds the chart locally in your browser.</p>
+                </div>
+                <button onClick={() => handleMainTabChange('COMMUNITY')} className="rounded-2xl border border-neon-purple/15 bg-neon-purple/[0.05] p-5 text-left transition hover:border-neon-purple/35 hover:bg-neon-purple/10">
+                  <span className="font-mono text-xs font-bold text-neon-purple">02</span>
+                  <h4 className="mt-3 font-display font-bold">Explore charts</h4>
+                  <p className="mt-2 text-xs leading-relaxed text-white/40">Load a community song, preview its audio, and chase the top five scores.</p>
+                </button>
+                <button onClick={() => handleMainTabChange('SOCIAL')} className="rounded-2xl border border-neon-green/15 bg-neon-green/[0.05] p-5 text-left transition hover:border-neon-green/35 hover:bg-neon-green/10">
+                  <span className="font-mono text-xs font-bold text-neon-green">03</span>
+                  <h4 className="mt-3 font-display font-bold">Race your crew</h4>
+                  <p className="mt-2 text-xs leading-relaxed text-white/40">Add friends, open a live room, ready up, and watch standings move in real time.</p>
+                </button>
               </div>
             )}
           </div>
@@ -2096,6 +2178,3 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     </div>
   );
 };
-
-
-

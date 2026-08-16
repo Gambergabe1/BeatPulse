@@ -1,5 +1,5 @@
 import express, { type NextFunction, type Request, type Response } from "express";
-import { sql } from "@vercel/postgres";
+import { db, sql, type VercelPoolClient } from "@vercel/postgres";
 import multer from "multer";
 import { put, del as deleteBlob } from "@vercel/blob";
 import * as crypto from "node:crypto";
@@ -81,6 +81,15 @@ interface GlobalScoreRecord {
   songName: string;
   artist: string;
 }
+
+type FriendshipStatus = "pending" | "accepted";
+type RoomStatus = "lobby" | "countdown" | "playing" | "results";
+interface PlayerProfile { id: string; username: string; friendCode: string; createdAt: string; lastSeen: string; blockedIds: string[]; credentialHash?: string; }
+interface FriendshipRecord { id: string; requesterId: string; addresseeId: string; status: FriendshipStatus; createdAt: string; updatedAt: string; }
+interface SocialMessageRecord { id: string; senderId: string; recipientId?: string; roomId?: string; body: string; kind: "text" | "invite" | "system"; roomCode?: string; createdAt: string; readAt?: string; }
+interface RoomParticipant { playerId: string; username: string; ready: boolean; score: number; combo: number; accuracy: number; progress: number; finished: boolean; joinedAt: string; updatedAt: string; }
+interface MultiplayerRoomRecord { id: string; code: string; hostId: string; songId: string; status: RoomStatus; startAt?: string; createdAt: string; updatedAt: string; maxPlayers: number; participants: RoomParticipant[]; }
+interface SocialState { profiles: PlayerProfile[]; friendships: FriendshipRecord[]; messages: SocialMessageRecord[]; rooms: MultiplayerRoomRecord[]; }
 
 interface LeaderboardModerationResult {
   username: string;
@@ -219,6 +228,13 @@ async function prepareStorageSchema() {
     CREATE TABLE IF NOT EXISTS storage_meta (
       key TEXT PRIMARY KEY,
       value JSONB NOT NULL DEFAULT '{}'::jsonb,
+      updated_at TIMESTAMPTZ NOT NULL
+    );
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS beatpulse_social (
+      id TEXT PRIMARY KEY,
+      state JSONB NOT NULL DEFAULT '{}'::jsonb,
       updated_at TIMESTAMPTZ NOT NULL
     );
   `;
@@ -624,6 +640,98 @@ function ok<T>(res: Response, data: T) {
 
 function fail(res: Response, status: number, error: string) {
   res.status(status).json({ success: false, error });
+}
+
+const EMPTY_SOCIAL_STATE: SocialState = { profiles: [], friendships: [], messages: [], rooms: [] };
+
+async function readSocialState(): Promise<SocialState> {
+  await ensureStorageReady();
+  const { rows } = await sql`SELECT state FROM beatpulse_social WHERE id = 'default' LIMIT 1`;
+  const raw = (rows[0]?.state || EMPTY_SOCIAL_STATE) as Partial<SocialState>;
+  return {
+    profiles: Array.isArray(raw.profiles) ? raw.profiles : [],
+    friendships: Array.isArray(raw.friendships) ? raw.friendships : [],
+    messages: Array.isArray(raw.messages) ? raw.messages : [],
+    rooms: Array.isArray(raw.rooms) ? raw.rooms : [],
+  };
+}
+
+async function writeSocialState(state: SocialState) {
+  const twelveHoursAgo = Date.now() - 1000 * 60 * 60 * 12;
+  const thirtyDaysAgo = Date.now() - 1000 * 60 * 60 * 24 * 30;
+  const compacted = {
+    ...state,
+    messages: state.messages.filter((message) => new Date(message.createdAt).getTime() > thirtyDaysAgo).slice(-5000),
+    rooms: state.rooms.filter((room) => new Date(room.updatedAt).getTime() > twelveHoursAgo),
+  };
+  const updatedAt = new Date().toISOString();
+  await sql`
+    INSERT INTO beatpulse_social (id, state, updated_at)
+    VALUES ('default', ${JSON.stringify(compacted)}::jsonb, ${updatedAt})
+    ON CONFLICT (id) DO UPDATE SET state = EXCLUDED.state, updated_at = EXCLUDED.updated_at
+  `;
+}
+
+function sanitizeUsername(value: unknown) {
+  return typeof value === "string" ? (value.trim().replace(/\s+/g, " ").slice(0, 24) || "Player") : "Player";
+}
+
+function createFriendCode(username: string, profiles: PlayerProfile[]) {
+  const prefix = username.replace(/[^a-z0-9]/gi, "").slice(0, 8).toUpperCase() || "PLAYER";
+  let code = "";
+  do { code = `${prefix}#${crypto.randomInt(1000, 10000)}`; }
+  while (profiles.some((profile) => profile.friendCode === code));
+  return code;
+}
+
+function touchSocialProfile(state: SocialState, playerId: unknown, username: unknown, playerToken: unknown): PlayerProfile | null {
+  if (typeof playerId !== "string" || !playerId.trim() || playerId.length > 100) return null;
+  if (typeof playerToken !== "string" || playerToken.length < 32 || playerToken.length > 200) return null;
+  const id = playerId.trim(); const now = new Date().toISOString(); const nextUsername = sanitizeUsername(username);
+  const credentialHash = crypto.createHash("sha256").update(playerToken).digest("hex");
+  let profile = state.profiles.find((entry) => entry.id === id);
+  if (!profile) {
+    profile = { id, username: nextUsername, friendCode: createFriendCode(nextUsername, state.profiles), createdAt: now, lastSeen: now, blockedIds: [], credentialHash };
+    state.profiles.push(profile);
+  } else {
+    if (profile.credentialHash) {
+      const provided = Buffer.from(credentialHash, "utf8"); const expected = Buffer.from(profile.credentialHash, "utf8");
+      if (provided.length !== expected.length || !crypto.timingSafeEqual(provided, expected)) return null;
+    } else profile.credentialHash = credentialHash;
+    profile.username = nextUsername; profile.lastSeen = now; profile.blockedIds = Array.isArray(profile.blockedIds) ? profile.blockedIds : [];
+    state.rooms.forEach((room) => room.participants.forEach((participant) => { if (participant.playerId === id) participant.username = nextUsername; }));
+  }
+  return profile;
+}
+
+function areFriends(state: SocialState, firstId: string, secondId: string) {
+  return state.friendships.some((friendship) => friendship.status === "accepted" && ((friendship.requesterId === firstId && friendship.addresseeId === secondId) || (friendship.requesterId === secondId && friendship.addresseeId === firstId)));
+}
+
+function publicProfile(profile: PlayerProfile, state: SocialState) {
+  const activeRoom = state.rooms.find((room) => room.status !== "results" && room.participants.some((participant) => participant.playerId === profile.id));
+  const age = Date.now() - new Date(profile.lastSeen).getTime();
+  return { id: profile.id, username: profile.username, friendCode: profile.friendCode, status: activeRoom?.status === "playing" || activeRoom?.status === "countdown" ? "in-game" : age < 45_000 ? "online" : "offline", lastSeen: profile.lastSeen };
+}
+
+function socialSnapshot(state: SocialState, playerId: string) {
+  const self = state.profiles.find((profile) => profile.id === playerId); if (!self) return null;
+  const friends = state.friendships.filter((friendship) => friendship.status === "accepted" && (friendship.requesterId === playerId || friendship.addresseeId === playerId)).flatMap((friendship) => {
+    const friendId = friendship.requesterId === playerId ? friendship.addresseeId : friendship.requesterId;
+    const profile = state.profiles.find((entry) => entry.id === friendId); if (!profile) return [];
+    const unread = state.messages.filter((message) => message.senderId === friendId && message.recipientId === playerId && !message.readAt).length;
+    return [{ ...publicProfile(profile, state), friendshipId: friendship.id, unread }];
+  });
+  const pending = (incoming: boolean) => state.friendships.filter((friendship) => friendship.status === "pending" && (incoming ? friendship.addresseeId === playerId : friendship.requesterId === playerId)).flatMap((friendship) => {
+    const id = incoming ? friendship.requesterId : friendship.addresseeId; const profile = state.profiles.find((entry) => entry.id === id);
+    return profile ? [{ ...publicProfile(profile, state), friendshipId: friendship.id }] : [];
+  });
+  return { self: publicProfile(self, state), friends, pendingIncoming: pending(true), pendingOutgoing: pending(false), activeRoom: state.rooms.find((room) => room.participants.some((participant) => participant.playerId === playerId)) || null, unreadCount: friends.reduce((sum, friend) => sum + friend.unread, 0) };
+}
+
+function getRoomForPlayer(state: SocialState, roomId: string, playerId: string) {
+  const room = state.rooms.find((entry) => entry.id === roomId);
+  return room?.participants.some((participant) => participant.playerId === playerId) ? room : null;
 }
 
 async function getAdminState(): Promise<PersistedAdminState> {
@@ -1094,6 +1202,171 @@ app.use(express.json({ limit: "2mb" }));
 app.get("/api/health", (_req, res) => {
   ok(res, { status: "ok", message: "BeatPulse server is healthy" });
 });
+
+const withSocial = (handler: (req: Request, res: Response) => Promise<unknown>) => async (req: Request, res: Response) => {
+  let client: VercelPoolClient | undefined;
+  try {
+    client = await db.connect();
+    await client.sql`BEGIN`;
+    // The social state is a compact JSON document. Serialize mutations so simultaneous
+    // score updates cannot overwrite another player's finish or message.
+    await client.sql`SELECT pg_advisory_xact_lock(20260815)`;
+    await handler(req, res);
+    await client.sql`COMMIT`;
+  } catch (error) {
+    if (client) {
+      try { await client.sql`ROLLBACK`; } catch { /* Connection may already be closed. */ }
+    }
+    if (!res.headersSent) fail(res, 500, error instanceof Error ? error.message : "Social service is unavailable.");
+  } finally {
+    client?.release();
+  }
+};
+
+app.post("/api/social/session", withSocial(async (req, res) => {
+  const state = await readSocialState(); const profile = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token"));
+  if (!profile) return fail(res, 400, "A valid player identity is required.");
+  await writeSocialState(state); return ok(res, socialSnapshot(state, profile.id));
+}));
+
+app.get("/api/social/snapshot", withSocial(async (req, res) => {
+  const state = await readSocialState(); const profile = touchSocialProfile(state, req.query.playerId, req.query.username, req.get("x-beatpulse-token"));
+  if (!profile) return fail(res, 400, "A valid player identity is required.");
+  state.rooms.forEach((room) => { if (room.status === "countdown" && room.startAt && Date.now() >= new Date(room.startAt).getTime()) room.status = "playing"; });
+  await writeSocialState(state); return ok(res, socialSnapshot(state, profile.id));
+}));
+
+app.post("/api/social/friends/request", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token"));
+  const targetCode = typeof req.body?.friendCode === "string" ? req.body.friendCode.trim().toUpperCase() : "";
+  if (!actor || !targetCode) return fail(res, 400, "Player identity and friend code are required.");
+  const target = state.profiles.find((profile) => profile.friendCode.toUpperCase() === targetCode);
+  if (!target) return fail(res, 404, "No player has that friend code.");
+  if (target.id === actor.id) return fail(res, 400, "You cannot add yourself.");
+  if (actor.blockedIds.includes(target.id) || target.blockedIds.includes(actor.id)) return fail(res, 403, "This player is unavailable.");
+  const existing = state.friendships.find((friendship) => (friendship.requesterId === actor.id && friendship.addresseeId === target.id) || (friendship.requesterId === target.id && friendship.addresseeId === actor.id));
+  if (existing?.status === "accepted") return fail(res, 409, "You are already friends.");
+  if (existing?.requesterId === target.id) { existing.status = "accepted"; existing.updatedAt = new Date().toISOString(); }
+  else if (!existing) { const now = new Date().toISOString(); state.friendships.push({ id: crypto.randomUUID(), requesterId: actor.id, addresseeId: target.id, status: "pending", createdAt: now, updatedAt: now }); }
+  else return fail(res, 409, "Friend request already sent.");
+  await writeSocialState(state); return ok(res, socialSnapshot(state, actor.id));
+}));
+
+app.post("/api/social/friends/respond", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token"));
+  const friendship = state.friendships.find((entry) => entry.id === req.body?.friendshipId);
+  if (!actor || !friendship || friendship.addresseeId !== actor.id || friendship.status !== "pending") return fail(res, 404, "Friend request not found.");
+  if (req.body?.accept === true) { friendship.status = "accepted"; friendship.updatedAt = new Date().toISOString(); }
+  else state.friendships = state.friendships.filter((entry) => entry.id !== friendship.id);
+  await writeSocialState(state); return ok(res, socialSnapshot(state, actor.id));
+}));
+
+app.post("/api/social/friends/remove", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const friendId = typeof req.body?.friendId === "string" ? req.body.friendId : "";
+  if (!actor || !friendId) return fail(res, 400, "Player and friend are required.");
+  state.friendships = state.friendships.filter((friendship) => !((friendship.requesterId === actor.id && friendship.addresseeId === friendId) || (friendship.requesterId === friendId && friendship.addresseeId === actor.id)));
+  await writeSocialState(state); return ok(res, socialSnapshot(state, actor.id));
+}));
+
+app.post("/api/social/block", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const targetId = typeof req.body?.targetId === "string" ? req.body.targetId : "";
+  if (!actor || !targetId || targetId === actor.id) return fail(res, 400, "A valid player is required.");
+  if (req.body?.blocked === false) actor.blockedIds = actor.blockedIds.filter((id) => id !== targetId);
+  else if (!actor.blockedIds.includes(targetId)) { actor.blockedIds.push(targetId); state.friendships = state.friendships.filter((friendship) => !((friendship.requesterId === actor.id && friendship.addresseeId === targetId) || (friendship.requesterId === targetId && friendship.addresseeId === actor.id))); }
+  await writeSocialState(state); return ok(res, socialSnapshot(state, actor.id));
+}));
+
+app.get("/api/social/messages", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.query.playerId, req.query.username, req.get("x-beatpulse-token")); const friendId = typeof req.query.friendId === "string" ? req.query.friendId : "";
+  if (!actor || !friendId || !areFriends(state, actor.id, friendId)) return fail(res, 403, "Messages are available between friends.");
+  const messages = state.messages.filter((message) => !message.roomId && ((message.senderId === actor.id && message.recipientId === friendId) || (message.senderId === friendId && message.recipientId === actor.id))).slice(-200);
+  const now = new Date().toISOString(); messages.forEach((message) => { if (message.recipientId === actor.id && !message.readAt) message.readAt = now; });
+  await writeSocialState(state); return ok(res, messages);
+}));
+
+app.post("/api/social/messages", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const recipientId = typeof req.body?.recipientId === "string" ? req.body.recipientId : ""; const body = typeof req.body?.body === "string" ? req.body.body.trim().slice(0, 500) : ""; const recipient = state.profiles.find((profile) => profile.id === recipientId);
+  if (!actor || !recipient || !body || !areFriends(state, actor.id, recipientId)) return fail(res, 400, "A friend and message are required.");
+  if (actor.blockedIds.includes(recipientId) || recipient.blockedIds.includes(actor.id)) return fail(res, 403, "Messages cannot be sent to this player.");
+  const kind = req.body?.kind === "invite" ? "invite" : "text"; const roomCode = kind === "invite" && typeof req.body?.roomCode === "string" ? req.body.roomCode : undefined;
+  const message: SocialMessageRecord = { id: crypto.randomUUID(), senderId: actor.id, recipientId, body, kind, roomCode, createdAt: new Date().toISOString() };
+  state.messages.push(message); await writeSocialState(state); return ok(res, message);
+}));
+
+app.post("/api/multiplayer/rooms", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const songId = typeof req.body?.songId === "string" ? req.body.songId : "";
+  if (!actor || !(await readSong(songId))) return fail(res, 400, "Choose a community song before creating a room.");
+  state.rooms.forEach((room) => { room.participants = room.participants.filter((participant) => participant.playerId !== actor.id); });
+  let code = ""; do { code = crypto.randomBytes(3).toString("hex").toUpperCase(); } while (state.rooms.some((room) => room.code === code));
+  const now = new Date().toISOString();
+  const room: MultiplayerRoomRecord = { id: crypto.randomUUID(), code, hostId: actor.id, songId, status: "lobby", createdAt: now, updatedAt: now, maxPlayers: 8, participants: [{ playerId: actor.id, username: actor.username, ready: true, score: 0, combo: 0, accuracy: 0, progress: 0, finished: false, joinedAt: now, updatedAt: now }] };
+  state.rooms.push(room); await writeSocialState(state); return ok(res, room);
+}));
+
+app.post("/api/multiplayer/rooms/join", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const code = typeof req.body?.code === "string" ? req.body.code.trim().toUpperCase() : ""; const room = state.rooms.find((entry) => entry.code === code);
+  if (!actor || !room) return fail(res, 404, "Room not found. Check the six-character code.");
+  if (room.status !== "lobby") return fail(res, 409, "That match has already started.");
+  if (room.participants.length >= room.maxPlayers) return fail(res, 409, "That room is full.");
+  state.rooms.forEach((entry) => { if (entry.id !== room.id) entry.participants = entry.participants.filter((participant) => participant.playerId !== actor.id); });
+  if (!room.participants.some((participant) => participant.playerId === actor.id)) { const now = new Date().toISOString(); room.participants.push({ playerId: actor.id, username: actor.username, ready: false, score: 0, combo: 0, accuracy: 0, progress: 0, finished: false, joinedAt: now, updatedAt: now }); room.updatedAt = now; }
+  await writeSocialState(state); return ok(res, room);
+}));
+
+app.post("/api/multiplayer/rooms/:id/ready", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const room = actor ? getRoomForPlayer(state, req.params.id, actor.id) : null;
+  if (!actor || !room || room.status !== "lobby") return fail(res, 404, "Open lobby not found.");
+  const participant = room.participants.find((entry) => entry.playerId === actor.id)!; participant.ready = actor.id === room.hostId || req.body?.ready === true; participant.updatedAt = new Date().toISOString(); room.updatedAt = participant.updatedAt;
+  await writeSocialState(state); return ok(res, room);
+}));
+
+app.post("/api/multiplayer/rooms/:id/start", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const room = actor ? getRoomForPlayer(state, req.params.id, actor.id) : null;
+  if (!actor || !room || room.hostId !== actor.id || room.status !== "lobby") return fail(res, 403, "Only the host can start an open lobby.");
+  if (room.participants.length < 2) return fail(res, 409, "At least two players are needed to start.");
+  if (room.participants.some((participant) => !participant.ready)) return fail(res, 409, "Everyone must be ready.");
+  const now = Date.now(); room.status = "countdown"; room.startAt = new Date(now + 15_000).toISOString(); room.updatedAt = new Date(now).toISOString();
+  room.participants.forEach((participant) => { participant.score = 0; participant.combo = 0; participant.accuracy = 0; participant.progress = 0; participant.finished = false; });
+  await writeSocialState(state); return ok(res, room);
+}));
+
+app.post("/api/multiplayer/rooms/:id/progress", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const room = actor ? getRoomForPlayer(state, req.params.id, actor.id) : null;
+  if (!actor || !room || !["countdown", "playing", "results"].includes(room.status)) return fail(res, 404, "Active match not found.");
+  const participant = room.participants.find((entry) => entry.playerId === actor.id)!; participant.score = Math.max(participant.score, clampNumber(req.body?.score, 0)); participant.combo = Math.max(0, clampNumber(req.body?.combo, 0)); participant.accuracy = Math.max(0, Math.min(100, clampNumber(req.body?.accuracy, 0))); participant.progress = Math.max(participant.progress, Math.min(1, clampNumber(req.body?.progress, 0))); participant.finished = participant.finished || req.body?.finished === true; participant.updatedAt = new Date().toISOString();
+  if (room.status === "countdown" && room.startAt && Date.now() >= new Date(room.startAt).getTime()) room.status = "playing";
+  if (room.participants.every((entry) => entry.finished)) room.status = "results"; room.updatedAt = participant.updatedAt;
+  await writeSocialState(state); return ok(res, room);
+}));
+
+app.post("/api/multiplayer/rooms/:id/rematch", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const room = actor ? getRoomForPlayer(state, req.params.id, actor.id) : null;
+  if (!actor || !room || room.hostId !== actor.id) return fail(res, 403, "Only the host can reset the room.");
+  room.status = "lobby"; room.startAt = undefined; room.updatedAt = new Date().toISOString(); room.participants.forEach((participant) => { participant.ready = participant.playerId === room.hostId; participant.score = 0; participant.combo = 0; participant.accuracy = 0; participant.progress = 0; participant.finished = false; });
+  await writeSocialState(state); return ok(res, room);
+}));
+
+app.post("/api/multiplayer/rooms/:id/leave", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const room = actor ? getRoomForPlayer(state, req.params.id, actor.id) : null;
+  if (!actor || !room) return fail(res, 404, "Room not found.");
+  room.participants = room.participants.filter((participant) => participant.playerId !== actor.id);
+  if (room.participants.length === 0) state.rooms = state.rooms.filter((entry) => entry.id !== room.id);
+  else if (room.hostId === actor.id) { room.hostId = room.participants[0].playerId; room.participants[0].ready = true; }
+  await writeSocialState(state); return ok(res, { left: true });
+}));
+
+app.get("/api/multiplayer/rooms/:id/messages", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.query.playerId, req.query.username, req.get("x-beatpulse-token")); const room = actor ? getRoomForPlayer(state, req.params.id, actor.id) : null;
+  if (!actor || !room) return fail(res, 404, "Room not found.");
+  return ok(res, state.messages.filter((message) => message.roomId === room.id).slice(-100));
+}));
+
+app.post("/api/multiplayer/rooms/:id/messages", withSocial(async (req, res) => {
+  const state = await readSocialState(); const actor = touchSocialProfile(state, req.body?.playerId, req.body?.username, req.get("x-beatpulse-token")); const room = actor ? getRoomForPlayer(state, req.params.id, actor.id) : null; const body = typeof req.body?.body === "string" ? req.body.body.trim().slice(0, 500) : "";
+  if (!actor || !room || !body) return fail(res, 400, "Room and message are required.");
+  const message: SocialMessageRecord = { id: crypto.randomUUID(), senderId: actor.id, roomId: room.id, body, kind: "text", createdAt: new Date().toISOString() };
+  state.messages.push(message); room.updatedAt = message.createdAt; await writeSocialState(state); return ok(res, message);
+}));
 
 app.post("/api/blob/upload", async (req, res) => {
   return handleBlobUploadRequest(req, res);

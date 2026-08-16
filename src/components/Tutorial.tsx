@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Music, Zap, Target, Trophy, ChevronRight, Check } from 'lucide-react';
+import { Music, Zap, Target, Trophy, ChevronRight, Check, Users } from 'lucide-react';
 
 interface TutorialProps {
   onComplete: () => void;
@@ -18,7 +18,7 @@ export const Tutorial: React.FC<TutorialProps> = ({ onComplete }) => {
     },
     {
       title: "Hit the Notes",
-      description: "Notes will fall down 4 lanes. Press D, F, J, or K when they cross the target line at the bottom.",
+      description: "Press D, F, J, or K as notes cross the target. For trails, keep holding; when a trail bends, move to the lane it points toward and release on its tail.",
       icon: <Target className="w-16 h-16 text-neon-pink" />,
       color: "text-neon-pink"
     },
@@ -33,6 +33,12 @@ export const Tutorial: React.FC<TutorialProps> = ({ onComplete }) => {
       description: "Upload any MP3/WAV file to auto-generate beats. Save it to the community and compete on the global leaderboard!",
       icon: <Trophy className="w-16 h-16 text-neon-green" />,
       color: "text-neon-green"
+    },
+    {
+      title: "Bring Your Crew",
+      description: "Add friends by code, message them, and race together in live rooms with shared countdowns and real-time standings.",
+      icon: <Users className="w-16 h-16 text-neon-blue" />,
+      color: "text-neon-blue"
     }
   ];
 
@@ -73,6 +79,7 @@ export const Tutorial: React.FC<TutorialProps> = ({ onComplete }) => {
             Skip
           </button>
         </div>
+        <p className="mb-3 text-right font-mono text-[10px] font-bold uppercase tracking-widest text-white/25">Step {step + 1} / {steps.length}</p>
 
         <div className="relative h-[400px] w-full bg-white/5 border border-white/10 rounded-3xl p-8 flex flex-col items-center text-center overflow-hidden">
           <AnimatePresence mode="wait">

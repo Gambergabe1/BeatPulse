@@ -2,6 +2,8 @@ node_modules/
 build/
 dist/
 coverage/
+.server-data/
+uploads/
 .DS_Store
 *.log
 .env*

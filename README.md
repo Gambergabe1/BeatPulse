@@ -1,26 +1,45 @@
-﻿
+# BeatPulse
 
-Done By Gabriel Baca (Kirigaya) Please Make sure if you are viewing thing you are truely locked in
+BeatPulse is a full-stack rhythm game that turns local audio into playable charts, publishes community songs, saves replays, and supports a live social multiplayer network.
 
+## What is included
 
-## Admin panel
+- Automatic four-lane chart generation with difficulty and advanced chart controls
+- Community song library, per-song scores, global rankings, and replay playback
+- Stable player profiles with protected device credentials and shareable friend codes
+- Friend requests, accept/decline, online and in-game presence, removal, and blocking
+- Private direct messages with unread counts and match invites
+- Two-to-eight-player rooms with join codes, ready checks, lobby chat, host migration, and rematches
+- Shared countdown timing plus live score, combo, accuracy, progress, and final standings
+- Local JSON/file persistence for development and Postgres + Vercel Blob support for deployment
+- Responsive layouts, keyboard focus states, reduced-motion support, and touch controls
 
-The project now ships with working admin endpoints in `server.ts`. On first server start, the app creates `.admin-state.json` and uses `admin1234` as the default password unless `ADMIN_PASSWORD` is set in your environment. Change it immediately from the in-app admin screen after logging in.
+## Run locally
 
+1. Install dependencies with `npm install`.
+2. Copy `.env.example` to `.env.local` and set a strong `ADMIN_PASSWORD`.
+3. Start BeatPulse with `npm run dev`.
+4. Open `http://localhost:3000`.
 
-## Local storage backend
+Use `npm run lint` for TypeScript validation and `npm run build` for a production build.
 
-This project now uses the built-in local backend in `server.ts` for songs, scores, replays, and admin actions.
-No external managed backend service is required for save/load or admin login flows.
+## Friends and multiplayer
 
-Admin sign-in uses `ADMIN_PASSWORD` from `.env.local` or `.env` (falls back to `admin1234` if not set).
+Each browser creates a stable player ID and a separate private credential. The server stores only a SHA-256 hash of that credential. Players can exchange the friend code shown in **Social → Friends**. Accepted friends can message each other and receive room invitations.
 
-### Persistence guarantees
+Multiplayer rooms use community songs so every participant receives the same stored audio and chart. The host chooses a song, shares the six-character room code, waits for all players to ready up, and starts a shared 15-second load/countdown window. Live match state is refreshed throughout play and rooms automatically move to results once everyone finishes.
 
-Song audio files are stored under `uploads/<songId>/...` and metadata is stored in `.server-data/songs.json` by default.
-Both are only removed when `/api/songs/:id` is called from an authenticated admin session (the admin panel delete button).
-Uploads are written with atomic file writes, so a failed upload does not leave partial or orphaned song records.
+## Persistence
 
-If you want persistence across restarts on a platform with ephemeral disks, point the server at a mounted volume by setting:
-- `BEATPULSE_DATA_DIR` (metadata)
-- `BEATPULSE_UPLOAD_DIR` (audio + notes files)
+The local server stores metadata in `.server-data/` and song assets in `uploads/`. Both directories are ignored by Git. Writes are atomic, and old chat/room data is compacted automatically.
+
+For a mounted local production volume, configure:
+
+- `BEATPULSE_DATA_DIR` for JSON metadata
+- `BEATPULSE_UPLOAD_DIR` for audio and note assets
+
+The serverless route creates the required Postgres tables automatically and uses the existing `DATABASE_URL`/`POSTGRES_URL` and `BLOB_READ_WRITE_TOKEN` variables.
+
+## Admin
+
+The first local start creates `.admin-state.json`. Admin access uses `ADMIN_PASSWORD` from `.env.local` or `.env`; the fallback is `admin1234`, which should only be used for the first local login and changed immediately from the admin panel.

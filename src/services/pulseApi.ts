@@ -142,6 +142,71 @@ export interface IntegrityReport {
   configurationIssues: string[];
 }
 
+export type PlayerPresence = 'online' | 'offline' | 'in-game';
+
+export interface SocialPlayer {
+  id: string;
+  username: string;
+  friendCode: string;
+  status: PlayerPresence;
+  lastSeen: string;
+  friendshipId?: string;
+  unread?: number;
+}
+
+export interface SocialMessage {
+  id: string;
+  senderId: string;
+  recipientId?: string;
+  roomId?: string;
+  body: string;
+  kind: 'text' | 'invite' | 'system';
+  roomCode?: string;
+  createdAt: string;
+  readAt?: string;
+}
+
+export interface MultiplayerParticipant {
+  playerId: string;
+  username: string;
+  ready: boolean;
+  score: number;
+  combo: number;
+  accuracy: number;
+  progress: number;
+  finished: boolean;
+  joinedAt: string;
+  updatedAt: string;
+}
+
+export interface MultiplayerRoom {
+  id: string;
+  code: string;
+  hostId: string;
+  songId: string;
+  status: 'lobby' | 'countdown' | 'playing' | 'results';
+  startAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  maxPlayers: number;
+  participants: MultiplayerParticipant[];
+}
+
+export interface SocialSnapshot {
+  self: SocialPlayer;
+  friends: SocialPlayer[];
+  pendingIncoming: SocialPlayer[];
+  pendingOutgoing: SocialPlayer[];
+  activeRoom: MultiplayerRoom | null;
+  unreadCount: number;
+}
+
+export interface PlayerIdentity {
+  playerId: string;
+  playerToken: string;
+  username: string;
+}
+
 interface ApiErrorResponse {
   success: false;
   error: string;
@@ -558,3 +623,90 @@ export const forceStorageUpdate = async (token: string): Promise<ForcedStorageUp
 export const getIntegrityReport = async (): Promise<IntegrityReport> => {
   return parseApiResponse<IntegrityReport>(await fetch('/api/integrity'));
 };
+
+async function postJson<T>(url: string, payload: Record<string, unknown>): Promise<T> {
+  const { playerToken, ...body } = payload;
+  return parseApiResponse<T>(await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(typeof playerToken === 'string' ? { 'X-BeatPulse-Token': playerToken } : {}),
+    },
+    body: JSON.stringify(body),
+  }));
+}
+
+export const startSocialSession = (identity: PlayerIdentity) =>
+  postJson<SocialSnapshot>('/api/social/session', { ...identity });
+
+export const getSocialSnapshot = async (identity: PlayerIdentity) => {
+  const search = new URLSearchParams({ playerId: identity.playerId, username: identity.username });
+  return parseApiResponse<SocialSnapshot>(await fetch(`/api/social/snapshot?${search}`, {
+    headers: { 'X-BeatPulse-Token': identity.playerToken },
+  }));
+};
+
+export const sendFriendRequest = (identity: PlayerIdentity, friendCode: string) =>
+  postJson<SocialSnapshot>('/api/social/friends/request', { ...identity, friendCode });
+
+export const respondToFriendRequest = (identity: PlayerIdentity, friendshipId: string, accept: boolean) =>
+  postJson<SocialSnapshot>('/api/social/friends/respond', { ...identity, friendshipId, accept });
+
+export const removeFriend = (identity: PlayerIdentity, friendId: string) =>
+  postJson<SocialSnapshot>('/api/social/friends/remove', { ...identity, friendId });
+
+export const blockPlayer = (identity: PlayerIdentity, targetId: string, blocked = true) =>
+  postJson<SocialSnapshot>('/api/social/block', { ...identity, targetId, blocked });
+
+export const getDirectMessages = async (identity: PlayerIdentity, friendId: string) => {
+  const search = new URLSearchParams({ playerId: identity.playerId, username: identity.username, friendId });
+  return parseApiResponse<SocialMessage[]>(await fetch(`/api/social/messages?${search}`, {
+    headers: { 'X-BeatPulse-Token': identity.playerToken },
+  }));
+};
+
+export const sendDirectMessage = (
+  identity: PlayerIdentity,
+  recipientId: string,
+  body: string,
+  invite?: { roomCode: string }
+) => postJson<SocialMessage>('/api/social/messages', {
+  ...identity,
+  recipientId,
+  body,
+  ...(invite ? { kind: 'invite', roomCode: invite.roomCode } : {}),
+});
+
+export const createMultiplayerRoom = (identity: PlayerIdentity, songId: string) =>
+  postJson<MultiplayerRoom>('/api/multiplayer/rooms', { ...identity, songId });
+
+export const joinMultiplayerRoom = (identity: PlayerIdentity, code: string) =>
+  postJson<MultiplayerRoom>('/api/multiplayer/rooms/join', { ...identity, code });
+
+export const setMultiplayerReady = (identity: PlayerIdentity, roomId: string, ready: boolean) =>
+  postJson<MultiplayerRoom>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/ready`, { ...identity, ready });
+
+export const startMultiplayerRoom = (identity: PlayerIdentity, roomId: string) =>
+  postJson<MultiplayerRoom>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/start`, { ...identity });
+
+export const updateMultiplayerProgress = (
+  identity: PlayerIdentity,
+  roomId: string,
+  progress: { score: number; combo: number; accuracy: number; progress: number; finished?: boolean }
+) => postJson<MultiplayerRoom>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/progress`, { ...identity, ...progress });
+
+export const requestMultiplayerRematch = (identity: PlayerIdentity, roomId: string) =>
+  postJson<MultiplayerRoom>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/rematch`, { ...identity });
+
+export const leaveMultiplayerRoom = (identity: PlayerIdentity, roomId: string) =>
+  postJson<{ left: true }>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/leave`, { ...identity });
+
+export const getRoomMessages = async (identity: PlayerIdentity, roomId: string) => {
+  const search = new URLSearchParams({ playerId: identity.playerId, username: identity.username });
+  return parseApiResponse<SocialMessage[]>(await fetch(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/messages?${search}`, {
+    headers: { 'X-BeatPulse-Token': identity.playerToken },
+  }));
+};
+
+export const sendRoomMessage = (identity: PlayerIdentity, roomId: string, body: string) =>
+  postJson<SocialMessage>(`/api/multiplayer/rooms/${encodeURIComponent(roomId)}/messages`, { ...identity, body });

@@ -5,8 +5,8 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
-      "source": "/api/songs/:songId/scores",
-      "destination": "/api/global-scores?songId=:songId"
+      "source": "/api/:path*",
+      "destination": "/api?__route=:path*"
     },
     {
       "source": "/:path((?!api/).*)",

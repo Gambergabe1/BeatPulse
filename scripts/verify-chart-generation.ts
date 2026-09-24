@@ -125,5 +125,72 @@ for (let index = 1; index < DIFFICULTY_PRESETS.length; index++) {
   assert(current.stamina > previous.stamina, 'difficulty presets must increase stamina demand');
 }
 
+// Long songs at tempos that are not on the coarse 0.5 BPM grid, with a slow tempo drift:
+// the snapped grid must stay locked to the music all the way to the end.
+const createLongTrack = (startBpm: number, endBpm: number, duration: number, breakdown?: [number, number]) => {
+  const data = new Float32Array(Math.floor(sampleRate * duration));
+  for (let index = 0; index < data.length; index++) {
+    const time = index / sampleRate;
+    data[index] = Math.sin(2 * Math.PI * 110 * time) * 0.03 + Math.sin(2 * Math.PI * 220 * time) * 0.012;
+  }
+  const pulses: Array<{ time: number; main: boolean }> = [];
+  let time = 0.37;
+  let half = 0;
+  while (time < duration - 0.5) {
+    pulses.push({ time, main: half % 2 === 0 });
+    const bpm = startBpm + (endBpm - startBpm) * (time / duration);
+    time += 60 / bpm / 2;
+    half += 1;
+  }
+  pulses.forEach((pulse) => {
+    if (breakdown && pulse.time > breakdown[0] && pulse.time < breakdown[1]) return;
+    const length = Math.floor(sampleRate * (pulse.main ? 0.09 : 0.05));
+    for (let offset = 0; offset < length; offset++) {
+      const sampleIndex = Math.floor(pulse.time * sampleRate) + offset;
+      if (sampleIndex >= data.length) break;
+      const age = offset / sampleRate;
+      const envelope = Math.exp(-age * (pulse.main ? 28 : 50));
+      data[sampleIndex] += (Math.sin(2 * Math.PI * 74 * age) * 0.5 + Math.sin((offset + 1) * 1.9) * 0.16) * envelope * (pulse.main ? 1 : 0.5);
+    }
+  });
+  const buffer = { length: data.length, duration, sampleRate, numberOfChannels: 1, getChannelData: () => data } as unknown as AudioBuffer;
+  return { buffer, pulseTimes: pulses.map((pulse) => pulse.time) };
+};
+
+const nearestPulseDistance = (time: number, pulseTimes: number[]) => {
+  let low = 0;
+  let high = pulseTimes.length - 1;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (pulseTimes[middle] < time) low = middle + 1;
+    else high = middle;
+  }
+  return Math.min(Math.abs(pulseTimes[low] - time), Math.abs((pulseTimes[low - 1] ?? -Infinity) - time));
+};
+
+for (const [startBpm, endBpm] of [[127.3, 127.3], [143.7, 143.7], [118, 121.5]]) {
+  const { buffer, pulseTimes } = createLongTrack(startBpm, endBpm, 150);
+  const counts: number[] = [];
+  for (const preset of DIFFICULTY_PRESETS) {
+    const notes = await generateNotesFromAudio(buffer, { ...getChartSettingsForDifficulty(preset.value), allowMovingSliders: false });
+    counts.push(notes.length);
+    const lateNotes = notes.filter((note) => note.time > 110);
+    const locked = lateNotes.filter((note) => nearestPulseDistance(note.time, pulseTimes) <= 0.03).length;
+    assert(lateNotes.length > 0 && locked / lateNotes.length >= 0.88, `${startBpm}->${endBpm} BPM ${preset.id} chart drifted off the beat late in the song`);
+  }
+  for (let index = 1; index < counts.length; index++) {
+    assert(counts[index] > counts[index - 1], `${startBpm}->${endBpm} BPM: ${DIFFICULTY_PRESETS[index].id} must be denser than ${DIFFICULTY_PRESETS[index - 1].id} (${counts.join(' / ')})`);
+  }
+}
+
+// A drumless breakdown should become a few sustained holds, not a stream of ghost notes.
+{
+  const { buffer } = createLongTrack(120, 120, 100, [40, 70]);
+  const notes = await generateNotesFromAudio(buffer, getChartSettingsForDifficulty(DEFAULT_DIFFICULTY));
+  const breakdownNotes = notes.filter((note) => note.time > 41 && note.time < 69);
+  assert(breakdownNotes.length > 0, 'breakdowns should still give the player something to hold');
+  assert(breakdownNotes.length <= 16 && breakdownNotes.every((note) => note.duration), 'breakdowns must not be filled with ghost taps');
+}
+
 console.table(results.map(({ chart: _chart, ...summary }) => summary));
 console.log('Chart generation checks passed.');

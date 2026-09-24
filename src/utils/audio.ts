@@ -1,4 +1,5 @@
 import type { Note, SongSection, SongSectionKind } from '../types';
+import { mixAudioBufferToMono } from './monoAudio';
 
 export interface NoteGenerationConfig {
   complexity?: number;
@@ -89,15 +90,7 @@ const createSeededRandom = (seed: number) => {
   };
 };
 
-const mixToMono = (audioBuffer: AudioBuffer) => {
-  const mono = new Float32Array(audioBuffer.length);
-  const channelCount = Math.max(1, audioBuffer.numberOfChannels);
-  for (let channelIndex = 0; channelIndex < channelCount; channelIndex++) {
-    const channelData = audioBuffer.getChannelData(channelIndex);
-    for (let i = 0; i < channelData.length; i++) mono[i] += channelData[i] / channelCount;
-  }
-  return mono;
-};
+const mixToMono = mixAudioBufferToMono;
 
 /**
  * Finds broad musical phrases from the energy envelope. It intentionally uses
@@ -313,6 +306,163 @@ const estimateTempo = (
   return { bpm: winner.bpm, confidence, origin: findGridOrigin(candidates, beatInterval) };
 };
 
+interface BeatSegment {
+  center: number;
+  /** A beat time close to `center`. */
+  anchor: number;
+  interval: number;
+  /** Running beat count of `anchor` from the start of the song. */
+  beatIndex: number;
+}
+
+interface GridPoint {
+  time: number;
+  /** Unique id of the grid cell for the requested subdivision. */
+  cell: number;
+  /** Beat index of the grid cell (fractional for off-beat subdivisions). */
+  beat: number;
+}
+
+interface BeatGrid {
+  beatInterval: number;
+  /** Beat index (0-3) inside the bar that carries the strongest accents. */
+  downbeatPhase: number;
+  snap: (time: number, subdivision: number) => GridPoint;
+}
+
+const strongOnsets = (candidates: OnsetCandidate[]) => {
+  const threshold = percentile(candidates.map((candidate) => candidate.strength), 0.45);
+  return candidates.filter((candidate) => candidate.strength >= threshold);
+};
+
+const phaseVector = (onsets: OnsetCandidate[], period: number, origin = 0, weightAt?: (candidate: OnsetCandidate) => number) => {
+  let re = 0;
+  let im = 0;
+  let total = 0;
+  for (const onset of onsets) {
+    // Log-compressed so one very loud hit cannot outvote a whole bar of steady ones.
+    const weight = (weightAt ? weightAt(onset) : 1) * Math.log1p(onset.strength);
+    if (weight <= 0) continue;
+    const angle = (2 * Math.PI * (onset.time - origin)) / period;
+    re += weight * Math.cos(angle);
+    im += weight * Math.sin(angle);
+    total += weight;
+  }
+  return { magnitude: total > 0 ? Math.hypot(re, im) / total : 0, angle: Math.atan2(im, re), total };
+};
+
+/**
+ * The coarse estimator works in 0.5 BPM steps, which is enough to drift a full
+ * beat over a few minutes. This sharpens the tempo to 0.01 BPM by maximising how
+ * tightly the strong onsets line up with the beat period, then derives the phase.
+ */
+const refineTempo = (candidates: OnsetCandidate[], estimate: TempoEstimate): TempoEstimate => {
+  const onsets = strongOnsets(candidates);
+  if (onsets.length < 8) return estimate;
+  let bestBpm = estimate.bpm;
+  let best = phaseVector(onsets, 60 / estimate.bpm);
+  for (let bpm = estimate.bpm - 1.2; bpm <= estimate.bpm + 1.2; bpm += 0.01) {
+    const vector = phaseVector(onsets, 60 / bpm);
+    if (vector.magnitude > best.magnitude) {
+      best = vector;
+      bestBpm = bpm;
+    }
+  }
+  const period = 60 / bestBpm;
+  let origin = ((best.angle / (2 * Math.PI)) * period) % period;
+  if (origin < 0) origin += period;
+  return {
+    bpm: bestBpm,
+    origin,
+    confidence: clamp(Math.max(estimate.confidence, best.magnitude), 0.2, 0.97),
+  };
+};
+
+/**
+ * Real recordings rarely hold a perfectly fixed tempo, so the beat phase and period
+ * are re-fitted every two bars. Snapping then follows the band instead of a grid
+ * that slowly slides off the music.
+ */
+const buildBeatGrid = (candidates: OnsetCandidate[], tempo: TempoEstimate, duration: number): BeatGrid => {
+  const beatInterval = 60 / tempo.bpm;
+  const onsets = strongOnsets(candidates);
+  const segmentLength = beatInterval * 8;
+  const reach = beatInterval * 5;
+  const segmentCount = Math.max(1, Math.ceil((duration - tempo.origin) / segmentLength));
+  const centers: number[] = [];
+  const fittedAnchors: Array<number | null> = [];
+
+  // Fit only the phase in each window: over a few beats a slightly wrong period barely
+  // smears the fit, and the local period falls out of the spacing between anchors below.
+  // The fit runs on the half-beat lattice so loud off-beats reinforce instead of cancel;
+  // beat parity is then carried forward from the previous anchor.
+  const halfBeat = beatInterval / 2;
+  let cursor = 0;
+  let predicted = tempo.origin;
+  for (let segment = 0; segment < segmentCount; segment++) {
+    const center = tempo.origin + (segment + 0.5) * segmentLength;
+    centers.push(center);
+    while (cursor < onsets.length && onsets[cursor].time < center - reach) cursor += 1;
+    const local: OnsetCandidate[] = [];
+    for (let i = cursor; i < onsets.length && onsets[i].time <= center + reach; i++) local.push(onsets[i]);
+    const vector = phaseVector(local, halfBeat, center, (onset) => 1 - Math.abs(onset.time - center) / (reach * 1.05));
+    const expected = predicted + Math.round((center - predicted) / beatInterval) * beatInterval;
+    if (local.length >= 4 && vector.magnitude >= 0.35) {
+      const halfAnchor = center + (vector.angle / (2 * Math.PI)) * halfBeat;
+      const anchor = halfAnchor + Math.round((expected - halfAnchor) / beatInterval) * beatInterval;
+      const alternate = anchor + (expected >= anchor ? halfBeat : -halfBeat);
+      const chosen = Math.abs(alternate - expected) < Math.abs(anchor - expected) ? alternate : anchor;
+      fittedAnchors.push(chosen);
+      predicted = chosen;
+    } else {
+      fittedAnchors.push(null);
+    }
+  }
+
+  // Quiet segments inherit the nearest earlier fit (or the global phase before any fit).
+  const anchors: number[] = [];
+  fittedAnchors.forEach((anchor, index) => {
+    const reference = anchor ?? (index > 0 ? anchors[index - 1] : tempo.origin);
+    anchors.push(anchor ?? reference + Math.round((centers[index] - reference) / beatInterval) * beatInterval);
+  });
+  const beatsBetween = anchors.slice(1).map((anchor, index) => Math.max(1, Math.round((anchor - anchors[index]) / beatInterval)));
+  const spanInterval = (index: number) => {
+    if (index < 0 || index >= beatsBetween.length) return null;
+    const interval = (anchors[index + 1] - anchors[index]) / beatsBetween[index];
+    return Math.abs(interval / beatInterval - 1) <= 0.05 ? interval : null;
+  };
+  let beatIndex = Math.round((anchors[0] - tempo.origin) / beatInterval);
+  const segments: BeatSegment[] = anchors.map((anchor, index) => {
+    if (index > 0) beatIndex += beatsBetween[index - 1];
+    const around = [spanInterval(index - 1), spanInterval(index)].filter((value): value is number => value !== null);
+    const interval = around.length > 0 ? around.reduce((sum, value) => sum + value, 0) / around.length : beatInterval;
+    return { center: centers[index], anchor, interval, beatIndex };
+  });
+
+  const segmentAt = (time: number) => segments[clamp(Math.floor((time - tempo.origin) / segmentLength), 0, segments.length - 1)];
+  const snap = (time: number, subdivision: number): GridPoint => {
+    const segment = segmentAt(time);
+    const step = segment.interval / subdivision;
+    const offset = Math.round((time - segment.anchor) / step);
+    return {
+      time: segment.anchor + offset * step,
+      cell: segment.beatIndex * subdivision + offset,
+      beat: segment.beatIndex + offset / subdivision,
+    };
+  };
+
+  const phaseWeights = [0, 0, 0, 0];
+  onsets.forEach((onset) => {
+    const point = snap(onset.time, 1);
+    if (Math.abs(onset.time - point.time) <= beatInterval * 0.12) {
+      phaseWeights[((point.beat % 4) + 4) % 4] += onset.strength * (0.6 + onset.peak);
+    }
+  });
+  const downbeatPhase = phaseWeights.indexOf(Math.max(...phaseWeights));
+
+  return { beatInterval, downbeatPhase, snap };
+};
+
 const chooseSingleLane = (
   availableLanes: number[],
   lastLane: number,
@@ -465,32 +615,46 @@ export async function generateNotesFromAudio(
   if (roughCandidates.length === 0) return [];
 
   const fallbackBpm = clamp(78 + density * 62 + complexity * 30, 72, 178);
-  const tempo = estimateTempo(roughCandidates, onsetScores, windowDuration, onsetThreshold) ?? {
+  const coarseTempo = estimateTempo(roughCandidates, onsetScores, windowDuration, onsetThreshold);
+  const tempo = coarseTempo ? refineTempo(roughCandidates, coarseTempo) : {
     bpm: fallbackBpm,
     confidence: 0.2,
     origin: roughCandidates[0].time,
   };
   const estimatedBpm = tempo.bpm;
-  const beatInterval = 60 / estimatedBpm;
+  const grid = buildBeatGrid(roughCandidates, tempo, audioBuffer.duration);
+  const beatInterval = grid.beatInterval;
   const tempoFactor = clamp((estimatedBpm - 105) / 90, 0, 1);
   let subdivision = density > 0.76 || complexity > 0.82 ? 4 : density > 0.3 || complexity > 0.4 ? 2 : 1;
   while (subdivision > 1 && beatInterval / subdivision < minNoteSpacing * 1.08) subdivision /= 2;
   const gridInterval = beatInterval / subdivision;
   const snapTolerance = gridInterval * (0.28 + tempo.confidence * 0.18);
-  const candidateRate = roughCandidates.length / Math.max(1, audioBuffer.duration);
+  // Drop marginal onsets that are dwarfed by nearby hits; they are usually bleed or
+  // noise and would otherwise make quiet passages look as busy as loud ones.
+  const strongReference = percentile(roughCandidates.map((candidate) => candidate.strength), 0.95);
+  const salientCandidates = roughCandidates.filter((candidate, index) => {
+    if (candidate.strength >= 1.35) return true;
+    if (candidate.strength * 20 < strongReference) return false;
+    let localMax = candidate.strength;
+    for (let i = index - 1; i >= 0 && candidate.time - roughCandidates[i].time <= beatInterval * 2; i--) localMax = Math.max(localMax, roughCandidates[i].strength);
+    for (let i = index + 1; i < roughCandidates.length && roughCandidates[i].time - candidate.time <= beatInterval * 2; i++) localMax = Math.max(localMax, roughCandidates[i].strength);
+    return candidate.strength * 10 >= localMax;
+  });
+  const candidateRate = salientCandidates.length / Math.max(1, audioBuffer.duration);
   const phraseWindow = Math.max(1, Math.round((beatInterval * 4) / windowDuration));
   const candidateWindow = Math.max(0.75, beatInterval * 2);
   const quantizedByCell = new Map<number, OnsetCandidate>();
+  const isDownbeat = (beatPosition: number) => (((beatPosition - grid.downbeatPhase) % 4) + 4) % 4 === 0;
 
-  roughCandidates.forEach((candidate, index) => {
-    const gridPosition = (candidate.time - tempo.origin) / gridInterval;
-    const cell = Math.round(gridPosition);
-    const snapped = tempo.origin + cell * gridInterval;
+  salientCandidates.forEach((candidate, index) => {
+    const point = grid.snap(candidate.time, subdivision);
+    const cell = point.cell;
+    const snapped = point.time;
     const time = Math.abs(snapped - candidate.time) <= snapTolerance || candidate.strength < 1.55 ? snapped : candidate.time;
     let left = index;
     let right = index;
-    while (left > 0 && candidate.time - roughCandidates[left - 1].time <= candidateWindow) left -= 1;
-    while (right + 1 < roughCandidates.length && roughCandidates[right + 1].time - candidate.time <= candidateWindow) right += 1;
+    while (left > 0 && candidate.time - salientCandidates[left - 1].time <= candidateWindow) left -= 1;
+    while (right + 1 < salientCandidates.length && salientCandidates[right + 1].time - candidate.time <= candidateWindow) right += 1;
     const sectionEnergy = averageFromPrefix(rmsPrefix, candidate.sourceIndex - phraseWindow, candidate.sourceIndex + phraseWindow) / Math.max(0.00001, globalRms);
     const futureEnergy = averageFromPrefix(rmsPrefix, candidate.sourceIndex, candidate.sourceIndex + phraseWindow / 2);
     const futureLow = averageFromPrefix(lowPrefix, candidate.sourceIndex, candidate.sourceIndex + phraseWindow / 2);
@@ -501,11 +665,11 @@ export async function generateNotesFromAudio(
       localPace: (right - left + 1) / Math.max(0.25, candidateWindow * 2),
       sectionEnergy,
       sustain: (futureEnergy / Math.max(0.00001, globalRms)) * 0.55 + (futureLow / Math.max(0.00001, localLow)) * 0.45,
-      beatPosition: Math.round((time - tempo.origin) / beatInterval),
+      beatPosition: point.beat,
     };
     const existing = quantizedByCell.get(cell);
-    const phraseAccent = enriched.beatPosition! % 4 === 0 ? 0.14 : 0;
-    if (!existing || enriched.strength + phraseAccent > existing.strength + (existing.beatPosition! % 4 === 0 ? 0.14 : 0)) {
+    const phraseAccent = isDownbeat(enriched.beatPosition!) ? 0.14 : 0;
+    if (!existing || enriched.strength + phraseAccent > existing.strength + (isDownbeat(existing.beatPosition!) ? 0.14 : 0)) {
       quantizedByCell.set(cell, enriched);
     }
   });
@@ -517,12 +681,16 @@ export async function generateNotesFromAudio(
   const recentNoteTimes: number[] = [];
   const laneHistory: number[] = [];
   const simultaneousWindow = Math.max(0.035, gridInterval * 0.24);
-  const targetNotesPerSecond = clamp((estimatedBpm / 60) * (0.48 + density * 0.78 + complexity * 0.16), 0.8, 7.2);
+  const targetNotesPerSecond = clamp((estimatedBpm / 60) * (0.42 + density * 1.02 + complexity * 0.26), 0.8, 7.2);
   const staminaLimit = targetNotesPerSecond * (1.05 + stamina * 0.55);
   let lastNoteTime = -Infinity;
   let lastLane = -1;
   let streamDirection = random() > 0.5 ? 1 : -1;
   let patternRemaining = 0;
+  let longNoteEnd = -Infinity;
+  const burstCapacity = 1.6 + stamina * 1.6;
+  let noteBudget = 1;
+  let budgetClock = candidates[0]?.time ?? 0;
 
   for (let index = 0; index < candidates.length; index++) {
     const candidate = candidates[index];
@@ -533,16 +701,27 @@ export async function generateNotesFromAudio(
     const edgeDistance = Math.min(candidate.time, audioBuffer.duration - candidate.time) / Math.max(1, audioBuffer.duration);
     const isIntroOrOutro = edgeDistance < 0.11;
     const chorusLift = clamp((phraseEnergy - 0.42) / 0.58, 0, 1);
-    const downbeat = ((candidate.beatPosition ?? 0) % 4 + 4) % 4 === 0;
-    const dynamicGap = Math.max(
-      minNoteSpacing,
-      1 / (targetNotesPerSecond * (0.78 + fastSection * 0.3 + chorusLift * 0.42 - (isIntroOrOutro ? 0.16 : 0)))
-    );
+    const downbeat = isDownbeat(candidate.beatPosition ?? 0);
+    const localRate = targetNotesPerSecond * (0.78 + fastSection * 0.3 + chorusLift * 0.42 - (isIntroOrOutro ? 0.16 : 0));
+    const dynamicGap = Math.max(minNoteSpacing, 1 / localRate);
     const strongPeak = candidate.strength >= (downbeat ? 0.96 : 1.08);
-    if (candidate.time - lastNoteTime < dynamicGap && candidate.strength < 1.32 + fastSection * 0.16) continue;
-    if (recentNoteTimes.length > staminaLimit && candidate.strength < 1.48) continue;
+    // A note budget refills at the difficulty's target rate. Averaging over time (instead of
+    // a hard minimum gap) keeps each difficulty distinct even when onsets sit on a coarse grid.
+    noteBudget = Math.min(burstCapacity, noteBudget + Math.max(0, candidate.time - budgetClock) * localRate);
+    budgetClock = candidate.time;
+    const onBeat = Number.isInteger(candidate.beatPosition ?? 0.5);
+    // Pronounced accents are cheaper so genuinely busy passages read busier than calm ones.
+    const noteCost = candidate.strength >= 1.6 ? 0.6 : downbeat || candidate.strength >= 1.32 ? 1 : onBeat ? 1.12 : 1.3;
+    const gapSinceLast = candidate.time - lastNoteTime;
+    if (noteBudget < noteCost || gapSinceLast < dynamicGap * (0.55 - complexity * 0.25)) continue;
+    if (recentNoteTimes.length > staminaLimit
+      && (candidate.strength < 1.48 || recentNoteTimes.length > staminaLimit * (1.08 + stamina * 0.22))) continue;
 
-    const simultaneous = notes.filter((note) => Math.abs(note.time - candidate.time) < simultaneousWindow);
+    const simultaneous: Note[] = [];
+    for (let noteIndex = notes.length - 1; noteIndex >= 0; noteIndex--) {
+      if (candidate.time - notes[noteIndex].time >= simultaneousWindow) break;
+      simultaneous.push(notes[noteIndex]);
+    }
     const maxAtMoment = estimatedBpm > 165 || fastSection > 0.58 ? 1 : 2;
     if (simultaneous.length >= maxAtMoment) continue;
     const occupiedLanes = new Set(simultaneous.map((note) => note.lane));
@@ -582,7 +761,7 @@ export async function generateNotesFromAudio(
     let created = false;
     for (const lane of lanes) {
       if (!availableLanes.includes(lane)) continue;
-      const noActiveLongNote = !notes.some((note) => note.duration && note.time + note.duration > candidate.time);
+      const noActiveLongNote = longNoteEnd <= candidate.time;
       const sliderChance = sliderProbability
         * (0.28 + phraseEnergy * 0.46 + clamp((candidate.sustain ?? 1) - 0.65, 0, 0.42))
         * (1 - fastSection * 0.46)
@@ -624,6 +803,7 @@ export async function generateNotesFromAudio(
       notes.push(note);
       laneLastTime[lane] = candidate.time;
       if (duration) {
+        longNoteEnd = Math.max(longNoteEnd, candidate.time + duration);
         const destination = endLane ?? lane;
         for (let pathLane = Math.min(lane, destination); pathLane <= Math.max(lane, destination); pathLane++) {
           laneOccupancy[pathLane] = Math.max(laneOccupancy[pathLane], candidate.time + duration);
@@ -635,14 +815,49 @@ export async function generateNotesFromAudio(
       recentNoteTimes.push(candidate.time);
       created = true;
     }
-    if (created) lastNoteTime = candidate.time;
+    if (created) {
+      lastNoteTime = candidate.time;
+      noteBudget -= 1;
+    }
   }
 
+  // Long stretches with sound but no rhythmic hits (pads, breakdowns, ambient intros)
+  // become slow sustained holds so the player keeps playing along with the music.
+  const breakdownGap = beatInterval * 6;
+  const anchors = [0, ...notes.map((note) => note.time + (note.duration ?? 0)), audioBuffer.duration];
+  const nextStarts = [...notes.map((note) => note.time), audioBuffer.duration];
+  let fillLane = 1;
+  for (let i = 0; i < nextStarts.length; i++) {
+    const gapStart = Math.max(anchors[i], i === 0 ? 1.5 : anchors[i]);
+    const gapEnd = nextStarts[i] - beatInterval;
+    if (gapEnd - gapStart < breakdownGap) continue;
+    for (let time = grid.snap(gapStart + beatInterval, 1).time; ; time = grid.snap(time + beatInterval * 4, 1).time) {
+      const holdLength = beatInterval * 2;
+      if (time + holdLength > gapEnd) break;
+      const index = Math.floor(time / windowDuration);
+      const energy = averageFromPrefix(rmsPrefix, index, index + holdLength / windowDuration);
+      if (energy < globalRms * 0.3) continue;
+      notes.push({
+        id: createNoteId(),
+        time,
+        lane: fillLane,
+        duration: holdLength,
+        tickInterval: clamp(beatInterval, 0.14, 0.48),
+        hit: false,
+        missed: false,
+      });
+      fillLane = fillLane === 1 ? 2 : 1;
+    }
+  }
+
+  const lastTimeInLane = [-Infinity, -Infinity, -Infinity, -Infinity];
   return notes
     .sort((a, b) => a.time - b.time || a.lane - b.lane)
-    .filter((note, index, sorted) => !sorted.slice(0, index).some((previous) =>
-      previous.lane === note.lane && Math.abs(previous.time - note.time) < 0.025
-    ));
+    .filter((note) => {
+      if (note.time - lastTimeInLane[note.lane] < 0.025) return false;
+      lastTimeInLane[note.lane] = note.time;
+      return true;
+    });
 }
 
 export async function loadAudioFile(source: File | string, audioContext: AudioContext): Promise<AudioBuffer> {

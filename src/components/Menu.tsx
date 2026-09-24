@@ -2,7 +2,8 @@
 import { motion, AnimatePresence } from 'motion/react';
 import { useMemo } from 'react';
 import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Users, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, ArrowLeft, RefreshCw } from 'lucide-react';
-import { analyzeSongSections, loadAudioFile, generateNotesFromAudio } from '../utils/audio';
+import { loadAudioFile } from '../utils/audio';
+import { generateChart } from '../utils/chartGenerator';
 import { DEFAULT_DIFFICULTY, DIFFICULTY_PRESETS, getChartSettingsForDifficulty, getDifficultyPreset } from '../utils/chartSettings';
 import { DEFAULT_GAMEPLAY_OPTIONS, GameplayOptions, SongData, Settings } from '../types';
 import {
@@ -418,10 +419,11 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   useEffect(() => {
     if (!readySong) return;
 
+    let cancelled = false;
     const timer = setTimeout(async () => {
       setIsRegenerating(true);
       try {
-        const newNotes = await generateNotesFromAudio(readySong.audioBuffer, {
+        const { notes: newNotes } = await generateChart(readySong.audioBuffer, {
           complexity,
           density: effectiveDensity,
           laneVariety: effectiveLaneVariety,
@@ -429,6 +431,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
           stamina: effectiveStamina,
           allowMovingSliders: movingSlidersEnabled
         });
+        if (cancelled) return;
         setReadySong(prev => prev ? {
           ...prev,
           notes: newNotes,
@@ -441,11 +444,14 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       } catch (err) {
         console.error("Failed to regenerate notes:", err);
       } finally {
-        setIsRegenerating(false);
+        if (!cancelled) setIsRegenerating(false);
       }
     }, 400); // 400ms debounce
 
-    return () => clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [complexity, effectiveDensity, effectiveLaneVariety, effectiveSliderProbability, effectiveStamina, movingSlidersEnabled, readySong?.audioBuffer]);
 
   const loadStoredSongData = useCallback(async (
@@ -464,7 +470,6 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
 
     const arrayBuffer = await response.arrayBuffer();
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-    const sections = analyzeSongSections(audioBuffer);
 
     const difficulty = chartOverrides?.difficulty ?? song.difficulty;
     const fallbackProfile = getChartSettingsForDifficulty(difficulty);
@@ -498,16 +503,18 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       }
     }
 
-    if (notes.length === 0) {
-      notes = await generateNotesFromAudio(audioBuffer, {
-        complexity: difficulty,
-        density: densityValue,
-        laneVariety: laneVarietyValue,
-        sliderProbability: sliderProbabilityValue,
-        stamina: staminaValue,
-        allowMovingSliders: movingSlidersEnabled
-      });
-    }
+    const chartConfig = {
+      complexity: difficulty,
+      density: densityValue,
+      laneVariety: laneVarietyValue,
+      sliderProbability: sliderProbabilityValue,
+      stamina: staminaValue,
+      allowMovingSliders: movingSlidersEnabled
+    };
+    // Sections are always derived locally; the chart is only regenerated when none was stored.
+    const generated = await generateChart(audioBuffer, chartConfig, { includeNotes: notes.length === 0, includeSections: true });
+    const sections = generated.sections;
+    if (notes.length === 0) notes = generated.notes;
 
     return {
       id: song.id,
@@ -542,15 +549,14 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
 
     try {
       const audioBuffer = await loadAudioFile(file, audioContext);
-      const notes = await generateNotesFromAudio(audioBuffer, {
+      const { notes, sections } = await generateChart(audioBuffer, {
         complexity,
         density: effectiveDensity,
         laneVariety: effectiveLaneVariety,
         sliderProbability: effectiveSliderProbability,
         stamina: effectiveStamina,
         allowMovingSliders: movingSlidersEnabled
-      });
-      const sections = analyzeSongSections(audioBuffer);
+      }, { includeSections: true });
 
       const fileName = file.name.replace(/\.[^/.]+$/, "");
       let name = fileName;

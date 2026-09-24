@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_GAMEPLAY_OPTIONS, GameplayOptions, JudgementSummary, Note, GameState, Settings, SongSection } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
-import { Home, Pause, Play } from 'lucide-react';
+import { FastForward, Home, Pause, Play, RotateCcw } from 'lucide-react';
 import { MultiplayerRoom } from '../services/pulseApi';
 import { prefersMovingSliders } from '../utils/device';
 
@@ -13,6 +13,8 @@ interface GameCanvasProps {
   difficulty: number;
   onGameEnd: (score: number, accuracy: number, maxCombo: number, replayEvents: { time: number; lane: number; type: string }[], fullCombo: boolean, judgements: JudgementSummary) => void;
   onExit: () => void;
+  /** Instant restart of a solo run; omitted in multiplayer. */
+  onRestart?: () => void;
   isReplay?: boolean;
   replayEvents?: { time: number; lane: number; type: string }[];
   settings: Settings;
@@ -26,6 +28,9 @@ interface GameCanvasProps {
 const LANE_COUNT = 4;
 const NOTE_SPEED = 600; // pixels per second
 const HOLD_GRACE_SECONDS = 0.115;
+const SOLO_LEAD_IN_SECONDS = 3;
+/** Intros longer than this (before the first note) can be skipped. */
+const SKIPPABLE_INTRO_SECONDS = 6;
 const LANE_THEMES = {
   pulse: ['#00f3ff', '#a855f7', '#ff4fcf', '#65ff8f'],
   colorblind: ['#56b4e9', '#e69f00', '#009e73', '#cc79a7'],
@@ -103,6 +108,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   difficulty,
   onGameEnd,
   onExit,
+  onRestart,
   isReplay = false,
   replayEvents = [],
   settings,
@@ -173,6 +179,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const judgementSummaryRef = useRef<JudgementSummary>(emptyJudgements());
   const autoPreviewUntilRef = useRef<number | null>(null);
 
+  const onRestartRef = useRef(onRestart);
+  onRestartRef.current = onRestart;
+  const firstNoteTime = useMemo(() => notes.reduce((first, note) => Math.min(first, note.time), Infinity), [notes]);
   const isExitingRef = useRef(false);
   const hasEndedRef = useRef(false);
   const isPausedRef = useRef(false);
@@ -236,6 +245,19 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     let activeMouseLane: string | null = null;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !multiplayerRoom && !hasEndedRef.current) {
+        e.preventDefault();
+        if (isPausedRef.current) resumeGame();
+        else pauseGame();
+        return;
+      }
+      // Backquote restarts instantly; it sits away from the lane keys so it is hard to hit by accident.
+      if (e.code === 'Backquote' && !e.repeat && onRestartRef.current && !hasEndedRef.current) {
+        e.preventDefault();
+        stopGame();
+        onRestartRef.current();
+        return;
+      }
       if (isReplay) return;
       const key = e.key.toLowerCase();
       if (laneKeys.includes(key)) {
@@ -329,6 +351,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       canvas.addEventListener('mousedown', handleMouseDown);
     }
 
+    // StrictMode runs this effect's cleanup once in development; clear the exit flag
+    // it leaves behind or the run could never reach the results screen.
+    isExitingRef.current = false;
     startGame();
 
     return () => {
@@ -367,7 +392,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     // Solo play keeps the familiar lead-in. Multiplayer uses the shared server timestamp.
     const scheduledStart = synchronizedStartAt ? new Date(synchronizedStartAt).getTime() : null;
     const lateBy = scheduledStart ? Math.max(0, (Date.now() - scheduledStart) / 1000) : 0;
-    const leadInTime = scheduledStart ? Math.max(0.15, (scheduledStart - Date.now()) / 1000) : 10;
+    // Short solo lead-in keeps retries snappy; notes are already visible while it counts down.
+    const leadInTime = scheduledStart ? Math.max(0.15, (scheduledStart - Date.now()) / 1000) : SOLO_LEAD_IN_SECONDS;
     const playbackOffset = scheduledStart ? Math.min(lateBy, Math.max(0, audioBuffer.duration - 0.05)) : 0;
     startAudioAt(playbackOffset, leadInTime);
     setGameState(prev => ({ ...prev, isPlaying: true }));
@@ -377,6 +403,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const stopGame = () => {
     isExitingRef.current = true;
     if (sourceRef.current) {
+      // Detach first: a stopped source still fires onended, which would end the next run.
+      sourceRef.current.onended = null;
       sourceRef.current.stop();
       sourceRef.current = null;
     }
@@ -1309,6 +1337,24 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         )}
       </AnimatePresence>
 
+      {!multiplayerRoom && !isPaused && gameState.currentTime >= 0 && Number.isFinite(firstNoteTime)
+        && firstNoteTime >= SKIPPABLE_INTRO_SECONDS && firstNoteTime - gameState.currentTime > 4 && (
+        <button
+          type="button"
+          onClick={() => {
+            if (sourceRef.current) {
+              sourceRef.current.onended = null;
+              sourceRef.current.stop();
+              sourceRef.current = null;
+            }
+            startAudioAt(Math.max(0, firstNoteTime - 2.5));
+          }}
+          className="absolute bottom-20 right-4 z-20 flex items-center gap-2 rounded-full border border-white/15 bg-black/50 px-4 py-2 text-[10px] font-black uppercase tracking-[0.18em] text-white/70 backdrop-blur-lg transition-colors hover:bg-white/10 hover:text-white md:bottom-24 md:right-8"
+        >
+          <FastForward className="h-4 w-4" /> Skip intro
+        </button>
+      )}
+
       {!multiplayerRoom && <button 
         aria-label={isPaused ? 'Resume game' : 'Pause game'}
         onClick={() => {
@@ -1455,6 +1501,20 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
             >
               <Play className="h-5 w-5 fill-current" /> Resume
             </button>
+            {onRestart && (
+              <button
+                onClick={() => {
+                  stopGame();
+                  onRestart();
+                }}
+                className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/5 px-8 py-3.5 font-display font-black uppercase tracking-widest text-white transition-all hover:bg-white/10"
+              >
+                <RotateCcw className="h-5 w-5" /> Restart
+              </button>
+            )}
+            <p className="mt-4 text-center text-[10px] font-bold uppercase tracking-[0.18em] text-white/30">
+              Esc resume{onRestart ? ' · ` restart' : ''}
+            </p>
           </div>
         </div>
       )}

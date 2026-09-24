@@ -12,6 +12,9 @@ import { Tutorial } from './components/Tutorial';
 import { DEFAULT_GAMEPLAY_OPTIONS, GameplayOptions, JudgementSummary, SongData, Settings } from './types';
 import { getSocialSnapshot, leaveMultiplayerRoom, saveGlobalScore, ScoreRecord, MultiplayerRoom, updateMultiplayerProgress } from './services/pulseApi';
 import { DEFAULT_DIFFICULTY, getChartSettingsForDifficulty } from './utils/chartSettings';
+import { getNextDifficulty, recordRun, RecordUpdate } from './utils/chartRecords';
+import { generateChart } from './utils/chartGenerator';
+import { prefersMovingSliders } from './utils/device';
 import { getPlayerId, getPlayerToken } from './utils/playerIdentity';
 import { awardRunProgress, LevelReward, loadPlayerProgress, MissionProgress, rateMap, PlayerProgress } from './utils/progression';
 
@@ -80,7 +83,12 @@ export default function App() {
     levelUpRewards?: LevelReward[];
     previousLevel?: number;
     completedMissions?: MissionProgress[];
+    milestoneBonuses?: { label: string; xp: number; shards: number }[];
+    recordUpdate?: RecordUpdate;
   } | null>(null);
+  // Bumped to remount the game for an instant restart.
+  const [runNonce, setRunNonce] = useState(0);
+  const [isPreparingStepUp, setIsPreparingStepUp] = useState(false);
   const [isReplay, setIsReplay] = useState(false);
   const [multiplayerRoom, setMultiplayerRoom] = useState<MultiplayerRoom | null>(null);
   const [gameplayOptions, setGameplayOptions] = useState<GameplayOptions>({ ...DEFAULT_GAMEPLAY_OPTIONS });
@@ -135,6 +143,12 @@ export default function App() {
 
   const handleGameEnd = useCallback(async (score: number, accuracy: number, maxCombo: number, replayEvents: { time: number; lane: number; type: string }[], fullCombo: boolean, judgements: JudgementSummary) => {
     const isModifiedRun = gameplayOptions.practiceMode || gameplayOptions.hiddenNotes || gameplayOptions.mirrorLanes || gameplayOptions.randomLanes || gameplayOptions.practiceSpeed !== 1;
+    const recordUpdate = songData && !isReplay && !isModifiedRun
+      ? recordRun(
+        { songId: songData.id, name: songData.name, artist: songData.artist, duration: songData.audioBuffer.duration, difficulty: songData.difficulty },
+        { score, accuracy, maxCombo, fullCombo }
+      )
+      : undefined;
     const progressionUpdate = !isReplay && !gameplayOptions.practiceMode
       ? awardRunProgress({
         score,
@@ -145,6 +159,11 @@ export default function App() {
         song: songData ? { id: songData.id, name: songData.name, artist: songData.artist } : undefined,
         multiplayer: Boolean(multiplayerRoom),
         ranked: !isModifiedRun && !multiplayerRoom,
+        milestones: recordUpdate ? {
+          newBest: recordUpdate.isNewBest && recordUpdate.previous !== null,
+          firstClear: recordUpdate.firstClear,
+          firstFullCombo: recordUpdate.firstFullCombo,
+        } : undefined,
       })
       : null;
     if (progressionUpdate) setProgress(progressionUpdate.progress);
@@ -159,6 +178,8 @@ export default function App() {
       levelUpRewards: progressionUpdate?.levelUpRewards,
       previousLevel: progressionUpdate?.previousLevel,
       completedMissions: progressionUpdate?.completedMissions,
+      milestoneBonuses: progressionUpdate?.milestoneBonuses,
+      recordUpdate,
       replayEvents,
       leaderboardStatus: songData && !isReplay ? (isModifiedRun ? 'unranked' : 'saving') : 'idle',
       multiplayerRoom: multiplayerRoom || undefined,
@@ -224,8 +245,46 @@ export default function App() {
   const handleRetry = useCallback(() => {
     setIsReplay(false);
     setMultiplayerRoom(null);
+    setRunNonce(nonce => nonce + 1);
     setView('GAME');
   }, []);
+
+  // Instant restart from inside a run (pause menu or hotkey).
+  const handleRestart = useCallback(() => {
+    if (multiplayerRoom) return;
+    setRunNonce(nonce => nonce + 1);
+  }, [multiplayerRoom]);
+
+  // Local uploads can be re-charted on the next difficulty straight from the results screen.
+  const handleStepUp = useCallback(async () => {
+    if (!songData || songData.id) return;
+    const next = getNextDifficulty(songData.difficulty);
+    if (!next) return;
+    setIsPreparingStepUp(true);
+    try {
+      const profile = getChartSettingsForDifficulty(next.value);
+      const { notes } = await generateChart(songData.audioBuffer, {
+        ...profile,
+        allowMovingSliders: prefersMovingSliders(),
+      });
+      setSongData({
+        ...songData,
+        notes,
+        difficulty: next.value,
+        density: profile.density,
+        laneVariety: profile.laneVariety,
+        sliderProbability: profile.sliderProbability,
+        stamina: profile.stamina,
+      });
+      setIsReplay(false);
+      setRunNonce(nonce => nonce + 1);
+      setView('GAME');
+    } catch (err) {
+      console.error('Failed to build the next difficulty:', err);
+    } finally {
+      setIsPreparingStepUp(false);
+    }
+  }, [songData]);
 
   const handleHome = useCallback(() => {
     setView('MENU');
@@ -306,6 +365,7 @@ export default function App() {
 
       {view === 'GAME' && songData && (
         <GameCanvas 
+          key={runNonce}
           notes={songData.notes}
           sections={songData.sections}
           audioContext={audioContext}
@@ -313,6 +373,7 @@ export default function App() {
           difficulty={songData.difficulty}
           onGameEnd={handleGameEnd}
           onExit={handleExitGame}
+          onRestart={multiplayerRoom ? undefined : handleRestart}
           isReplay={isReplay}
           replayEvents={lastResult?.replayEvents || []}
           settings={settings}
@@ -349,6 +410,10 @@ export default function App() {
           levelUpRewards={lastResult.levelUpRewards}
           previousLevel={lastResult.previousLevel}
           completedMissions={lastResult.completedMissions}
+          milestoneBonuses={lastResult.milestoneBonuses}
+          recordUpdate={lastResult.recordUpdate}
+          onStepUp={!songData.id && !isReplay && !lastResult.multiplayerRoom && getNextDifficulty(songData.difficulty) ? handleStepUp : undefined}
+          isPreparingStepUp={isPreparingStepUp}
           mapRating={songData.id ? progress.mapRatings[songData.id] : undefined}
           onRateMap={handleRateMap}
           initialHighScores={lastResult.highScores}

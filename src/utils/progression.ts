@@ -393,13 +393,23 @@ export const awardRunProgress = (input: {
   song?: { id?: string; name: string; artist: string };
   multiplayer?: boolean;
   ranked?: boolean;
+  /** Milestones on this specific chart; rewarding them makes replaying a song worthwhile. */
+  milestones?: { newBest?: boolean; firstClear?: boolean; firstFullCombo?: boolean };
 }) => {
   const current = loadPlayerProgress();
   const cleanAccuracy = Math.max(0, Math.min(100, input.accuracy));
-  const earnedXp = Math.max(25, Math.round(35 + cleanAccuracy * 0.7 + Math.min(80, input.maxCombo) * 0.35 + (input.fullCombo ? 55 : 0)));
+  const milestoneBonuses = [
+    input.milestones?.newBest ? { label: 'Personal best', xp: 40, shards: 20 } : null,
+    input.milestones?.firstClear ? { label: 'First clear', xp: 30, shards: 15 } : null,
+    input.milestones?.firstFullCombo ? { label: 'First full combo', xp: 60, shards: 40 } : null,
+  ].filter((bonus): bonus is { label: string; xp: number; shards: number } => bonus !== null);
+  const bonusXp = milestoneBonuses.reduce((total, bonus) => total + bonus.xp, 0);
+  const bonusShards = milestoneBonuses.reduce((total, bonus) => total + bonus.shards, 0);
+  const earnedXp = Math.max(25, Math.round(35 + cleanAccuracy * 0.7 + Math.min(80, input.maxCombo) * 0.35 + (input.fullCombo ? 55 : 0))) + bonusXp;
   const next: PlayerProgress = {
     ...current,
     xp: current.xp + earnedXp,
+    pulseShards: current.pulseShards + bonusShards,
     runs: current.runs + 1,
     fullCombos: current.fullCombos + (input.fullCombo ? 1 : 0),
   };
@@ -437,7 +447,7 @@ export const awardRunProgress = (input: {
   next.seasonRuns = current.seasonRuns + (input.ranked === false ? 0 : 1);
   const progress = persist(normalize(next));
   const levelUpRewards = LEVEL_REWARDS.filter((reward) => reward.level > current.level && reward.level <= progress.level);
-  return { progress, earnedXp, levelUpRewards, previousLevel: current.level, completedMissions: missionUpdate.completed, seasonPoints };
+  return { progress, earnedXp, levelUpRewards, previousLevel: current.level, completedMissions: missionUpdate.completed, seasonPoints, milestoneBonuses, bonusShards };
 };
 
 export const rateMap = (songId: string, rating: number) => {

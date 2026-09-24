@@ -23,6 +23,12 @@ BeatPulse is a full-stack rhythm game that turns local audio into playable chart
 
 Use `npm run lint` for TypeScript validation and `npm run build` for a production build.
 
+## Chart generation and replay loop
+
+Uploaded songs are charted in the browser (in a Web Worker, so the menu stays responsive). The generator estimates the tempo, refines it to 0.01 BPM and re-fits the beat phase every two bars, so charts stay on the beat for the whole song even when a recording drifts. Each difficulty targets its own note rate, strong accents are favoured, faint bleed is ignored, and drumless breakdowns become slow sustained holds. `npm run test:charts` checks alignment, tempo drift, difficulty ordering and breakdown handling on synthetic tracks.
+
+Every song and difficulty keeps a local record (best score, rank, combo, full combo, attempts). The results screen shows the next goal for that chart, awards bonus XP and Pulse Shards for a new personal best, a first clear or a first full combo, and can re-chart a local upload one difficulty up. Press **R** on the results screen to retry, **Esc** in a run to pause, and **`** (backquote) to restart instantly.
+
 ## Friends and multiplayer
 
 Each browser creates a stable player ID and a separate private credential. The server stores only a SHA-256 hash of that credential. Players can exchange the friend code shown in **Social → Friends**. Accepted friends can message each other and receive room invitations.
@@ -39,6 +45,10 @@ For a mounted local production volume, configure:
 - `BEATPULSE_UPLOAD_DIR` for audio and note assets
 
 The serverless route creates the required Postgres tables automatically and uses the existing `DATABASE_URL`/`POSTGRES_URL` and `BLOB_READ_WRITE_TOKEN` variables.
+
+### Vercel function budget
+
+The Vercel Hobby plan allows at most 12 Serverless Functions per deployment, and every file in `api/` counts as one. The whole API therefore ships as a **single function**: `api/index.ts` dispatches to the handlers in `serverless/routes/`, and `vercel.json` rewrites `/api/<path>` to it. To add an endpoint, add a handler under `serverless/routes/` and register it in the `ROUTES` table in `api/index.ts`. Do not add new files to `api/`.
 
 ## Admin
 

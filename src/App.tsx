@@ -384,10 +384,6 @@ export default function App() {
           onStartGame={handleStartGame} 
           audioContext={audioContext} 
           settings={settings}
-          multiplayerRoom={multiplayerRoom}
-          multiplayerPlayerId={playerId}
-          synchronizedStartAt={multiplayerRoom?.startAt}
-          onMultiplayerProgress={handleMultiplayerProgress}
           onSaveSettings={handleSaveSettings}
           progress={progress}
           onUpdateProgress={setProgress}

@@ -1,21 +1,10 @@
 import * as crypto from "node:crypto";
 import { sql } from "@vercel/postgres";
+import { isAuthorizedAdmin } from "../../lib/admin.js";
 
-const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
-const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7;
 const STORAGE_SCHEMA_VERSION = 3;
 
 type Json = Record<string, unknown> | unknown[] | string | number | boolean | null;
-
-interface AdminState {
-  passwordHash: string;
-  tokenSecret: string;
-  updatedAt: string;
-}
-
-interface PersistedAdminState extends AdminState {
-  rowRef: string | null;
-}
 
 interface ScoreRecord {
   score: number;
@@ -330,63 +319,9 @@ function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
   };
 }
 
-function createPasswordHash(password: string) {
-  const salt = crypto.randomBytes(16).toString("hex");
-  const derived = crypto.scryptSync(password, salt, 64).toString("hex");
-  return `${salt}:${derived}`;
-}
-
-function verifyPassword(password: string, storedHash: string) {
-  const [salt, expectedHash] = storedHash.split(":");
-  if (!salt || !expectedHash) return false;
-  const actualHash = crypto.scryptSync(password, salt, 64).toString("hex");
-  const a = Buffer.from(actualHash, "hex");
-  const b = Buffer.from(expectedHash, "hex");
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-
-function verifyAdminToken(token: string, secret: string) {
-  try {
-    const normalized = token.replace(/-/g, "+").replace(/_/g, "/");
-    const padding = (4 - (normalized.length % 4)) % 4;
-    const decoded = Buffer.from(`${normalized}${"=".repeat(padding)}`, "base64").toString("utf8");
-    const [expiresAtRaw, signature] = decoded.split(".");
-    if (!expiresAtRaw || !signature) return false;
-    const expiresAt = Number(expiresAtRaw);
-    if (!Number.isFinite(expiresAt) || Date.now() > expiresAt) return false;
-    const expectedSignature = crypto.createHmac("sha256", secret).update(expiresAtRaw).digest("hex");
-    const a = Buffer.from(signature, "utf8");
-    const b = Buffer.from(expectedSignature, "utf8");
-    return a.length === b.length && crypto.timingSafeEqual(a, b);
-  } catch {
-    return false;
-  }
-}
-
-function extractBearerToken(req: any) {
-  const header = req.headers?.authorization;
-  if (!header || typeof header !== "string") return null;
-  const [scheme, token] = header.split(" ");
-  if (scheme !== "Bearer" || !token) return null;
-  return token;
-}
-
-async function prepareAdminStateSchema() {
-  ensureDatabaseConfig();
-  await sql`
-    CREATE TABLE IF NOT EXISTS admin_state (
-      id TEXT PRIMARY KEY,
-      password_hash TEXT NOT NULL,
-      token_secret TEXT NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL
-    );
-  `;
-}
-
 async function prepareStorageSchema() {
   ensureDatabaseConfig();
 
-  await prepareAdminStateSchema();
   await sql`
     CREATE TABLE IF NOT EXISTS songs (
       id TEXT PRIMARY KEY,
@@ -476,60 +411,6 @@ async function prepareStorageSchema() {
   await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS stamina REAL`;
   await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
   await sql`ALTER TABLE replays ADD COLUMN IF NOT EXISTS events JSONB`;
-}
-
-async function getAdminState(): Promise<PersistedAdminState> {
-  const { rows } = await sql`
-    SELECT ctid::text AS row_ref, password_hash, token_secret, updated_at
-    FROM admin_state
-    ORDER BY updated_at DESC NULLS LAST
-    LIMIT 1
-  `;
-  if (rows.length === 0) {
-    const initialState: AdminState = {
-      passwordHash: createPasswordHash(ADMIN_DEFAULT_PASSWORD),
-      tokenSecret: crypto.randomBytes(32).toString("hex"),
-      updatedAt: new Date().toISOString(),
-    };
-    try {
-      await sql`
-        INSERT INTO admin_state (id, password_hash, token_secret, updated_at)
-        VALUES ('default', ${initialState.passwordHash}, ${initialState.tokenSecret}, ${initialState.updatedAt})
-      `;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "";
-      if (!message.includes("invalid input syntax for type integer")) {
-        throw error;
-      }
-
-      await sql`
-        INSERT INTO admin_state (id, password_hash, token_secret, updated_at)
-        VALUES (1, ${initialState.passwordHash}, ${initialState.tokenSecret}, ${initialState.updatedAt})
-      `;
-    }
-
-    return getAdminState();
-  }
-
-  const state = rows[0] as { row_ref: string; password_hash: string; token_secret: string; updated_at: Date };
-  const resolvedState: PersistedAdminState = {
-    passwordHash: state.password_hash,
-    tokenSecret: state.token_secret,
-    updatedAt: new Date(state.updated_at).toISOString(),
-    rowRef: state.row_ref,
-  };
-
-  if (process.env.ADMIN_PASSWORD && !verifyPassword(process.env.ADMIN_PASSWORD, resolvedState.passwordHash)) {
-    resolvedState.passwordHash = createPasswordHash(process.env.ADMIN_PASSWORD);
-    resolvedState.updatedAt = new Date().toISOString();
-    await sql`
-      UPDATE admin_state
-      SET password_hash = ${resolvedState.passwordHash}, updated_at = ${resolvedState.updatedAt}
-      WHERE ctid::text = ${resolvedState.rowRef}
-    `;
-  }
-
-  return resolvedState;
 }
 
 async function getStoredSchemaVersion() {
@@ -778,11 +659,7 @@ export default async function handler(req: any, res: any) {
 
   try {
     ensureDatabaseConfig();
-    await prepareAdminStateSchema();
-
-    const token = extractBearerToken(req);
-    const adminState = await getAdminState();
-    if (!token || !verifyAdminToken(token, adminState.tokenSecret)) {
+    if (!(await isAuthorizedAdmin(req))) {
       return fail(res, 401, "Unauthorized.");
     }
 

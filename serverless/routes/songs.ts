@@ -1,5 +1,6 @@
 import * as crypto from "node:crypto";
 import { sql } from "@vercel/postgres";
+import { isAuthorizedAdmin } from "../lib/admin.js";
 import multer from "multer";
 import { del, put } from "@vercel/blob";
 
@@ -51,7 +52,6 @@ interface SongInsertColumn {
 
 const uploader = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 150 } });
 const BLOB_WRITE_TOKEN = process.env.BLOB_READ_WRITE_TOKEN;
-const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
 
 function ok(res: any, data: unknown) {
   return res.status(200).json({ success: true, data });
@@ -79,53 +79,6 @@ function queryValue(req: any, key: string) {
   if (value !== undefined && value !== null) return String(value);
   try { return new URL(typeof req.url === "string" ? req.url : "/api/songs", "http://localhost").searchParams.get(key) || ""; }
   catch { return ""; }
-}
-
-function isPasswordHash(value: unknown) {
-  if (typeof value !== "string") return false;
-  const [salt, hash] = value.split(":");
-  return Boolean(salt && hash);
-}
-
-function createPasswordHash(password: string) {
-  const salt = crypto.randomBytes(16).toString("hex");
-  return `${salt}:${crypto.scryptSync(password, salt, 64).toString("hex")}`;
-}
-
-function verifyPassword(password: string, storedHash: string) {
-  const [salt, expectedHash] = storedHash.split(":");
-  if (!salt || !expectedHash) return false;
-  const actual = crypto.scryptSync(password, salt, 64).toString("hex");
-  const received = Buffer.from(actual, "hex");
-  const expected = Buffer.from(expectedHash, "hex");
-  return received.length === expected.length && crypto.timingSafeEqual(received, expected);
-}
-
-function decodeBase64Url(value: string) {
-  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-  const padding = (4 - (normalized.length % 4)) % 4;
-  return Buffer.from(`${normalized}${"=".repeat(padding)}`, "base64").toString("utf8");
-}
-
-function verifyAdminToken(token: string, secret: string) {
-  try {
-    const [expiresAtRaw, signature] = decodeBase64Url(token).split(".");
-    const expiresAt = Number(expiresAtRaw);
-    if (!expiresAtRaw || !signature || !Number.isFinite(expiresAt) || Date.now() > expiresAt) return false;
-    const expectedSignature = crypto.createHmac("sha256", secret).update(expiresAtRaw).digest("hex");
-    const received = Buffer.from(signature, "utf8");
-    const expected = Buffer.from(expectedSignature, "utf8");
-    return received.length === expected.length && crypto.timingSafeEqual(received, expected);
-  } catch {
-    return false;
-  }
-}
-
-function extractBearerToken(req: any) {
-  const header = req.headers?.authorization;
-  if (typeof header !== "string") return null;
-  const [scheme, token] = header.split(" ");
-  return scheme === "Bearer" && token ? token : null;
 }
 
 function clampNumber(value: unknown, fallback: number) {
@@ -466,56 +419,6 @@ async function prepareSongsSchema() {
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS status TEXT`;
   await ensureSongIdUsesText();
-}
-
-async function prepareAdminStateSchema() {
-  await sql`
-    CREATE TABLE IF NOT EXISTS admin_state (
-      id TEXT PRIMARY KEY,
-      password_hash TEXT NOT NULL,
-      token_secret TEXT NOT NULL,
-      updated_at TIMESTAMPTZ NOT NULL
-    )
-  `;
-  await sql`ALTER TABLE admin_state ADD COLUMN IF NOT EXISTS password_hash TEXT`;
-  await sql`ALTER TABLE admin_state ADD COLUMN IF NOT EXISTS token_secret TEXT`;
-  await sql`ALTER TABLE admin_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ`;
-}
-
-async function getAdminState() {
-  const { rows } = await sql`
-    SELECT ctid::text AS row_ref, password_hash, token_secret, updated_at
-    FROM admin_state
-    ORDER BY updated_at DESC NULLS LAST
-    LIMIT 1
-  `;
-  if (rows.length === 0) {
-    const passwordHash = createPasswordHash(ADMIN_DEFAULT_PASSWORD);
-    const tokenSecret = crypto.randomBytes(32).toString("hex");
-    const updatedAt = new Date().toISOString();
-    try {
-      await sql`INSERT INTO admin_state (id, password_hash, token_secret, updated_at) VALUES ('default', ${passwordHash}, ${tokenSecret}, ${updatedAt})`;
-    } catch (error) {
-      if (!(error instanceof Error) || !error.message.includes("invalid input syntax for type integer")) throw error;
-      await sql`INSERT INTO admin_state (id, password_hash, token_secret, updated_at) VALUES (1, ${passwordHash}, ${tokenSecret}, ${updatedAt})`;
-    }
-    return getAdminState();
-  }
-  const row = rows[0] as { row_ref?: string; password_hash?: string | null; token_secret?: string | null };
-  const passwordHash = isPasswordHash(row.password_hash) ? row.password_hash! : createPasswordHash(ADMIN_DEFAULT_PASSWORD);
-  const tokenSecret = typeof row.token_secret === "string" && row.token_secret.trim() ? row.token_secret.trim() : crypto.randomBytes(32).toString("hex");
-  if ((!isPasswordHash(row.password_hash) || !row.token_secret?.trim()) && row.row_ref) {
-    await sql`UPDATE admin_state SET password_hash = ${passwordHash}, token_secret = ${tokenSecret}, updated_at = ${new Date().toISOString()} WHERE ctid::text = ${row.row_ref}`;
-  }
-  return { passwordHash, tokenSecret };
-}
-
-async function isAuthorizedAdmin(req: any) {
-  await prepareAdminStateSchema();
-  const token = extractBearerToken(req);
-  if (!token) return false;
-  const state = await getAdminState();
-  return verifyAdminToken(token, state.tokenSecret);
 }
 
 async function tableExists(tableName: "global_scores" | "replays") {

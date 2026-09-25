@@ -1349,6 +1349,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
           isReplay={isReplay}
           noteSpeedMultiplier={noteSpeedMultiplier}
           onRestart={onRestart}
+          onQuit={onExit}
           perfectWindow={perfectWindow}
           practiceLoop={practiceLoop}
           practiceLoopRef={practiceLoopRef}

@@ -23,9 +23,20 @@ BeatPulse is a full-stack rhythm game that turns local audio into playable chart
 
 Use `npm run lint` for TypeScript validation and `npm run build` for a production build.
 
+## Tests
+
+- `npm test` runs the unit tests (`tests/`: admin auth rules, chart format and score checks, daily challenge, records and ghosts, the API router and proxy) and the chart generator checks (`scripts/verify-chart-generation.ts`).
+- `npm run test:e2e` drives a real browser through the core loop against a running server: upload → auto-chart → publish with four official charts → play the stored Hard chart → verified leaderboard submission → retry with the personal-best ghost, plus the daily challenge, social hub and admin tools. Start `npm run dev` on a fresh data directory first. It needs Playwright with Chromium (`npm i -D playwright && npx playwright install chromium`), or set `PLAYWRIGHT_CHROMIUM` to an existing Chromium binary.
+
+`npm run dev` serves the same API surface as the Vercel deployment. Social and multiplayer run the deployed rules (`dispatchSocialAction` in `serverless/routes/social.ts`) against the local JSON store, and scores go through the same chart checks (`shared/chartFormat.ts`).
+
 ## Chart generation and replay loop
 
 Uploaded songs are charted in the browser (in a Web Worker, so the menu stays responsive). The generator estimates the tempo, refines it to 0.01 BPM and re-fits the beat phase every two bars, so charts stay on the beat for the whole song even when a recording drifts. Each difficulty targets its own note rate, strong accents are favoured, faint bleed is ignored, and drumless breakdowns become slow sustained holds. `npm run test:charts` checks alignment, tempo drift, difficulty ordering and breakdown handling on synthetic tracks.
+
+Community songs store official Easy, Normal, Hard and Expert charts in one bundle, so every player of a difficulty plays the same notes and each difficulty has its own leaderboard. Song scores are checked on the server against the stored chart (maximum reachable score, accuracy and full combo consistency). Custom chart settings stay unranked. Admins can rebuild charts made by an older generator from the admin panel. Charts also follow the music: bass hits lean to the left lanes and bright hits to the right, repeated sections reuse their patterns, and intense passages get trills and jumps.
+
+A daily challenge picks one library song and difficulty per UTC day, identical for every player, with its own board and a daily mission. Beating your best saves a per-second ghost, and later attempts show a live "vs PB" delta.
 
 Every song and difficulty keeps a local record (best score, rank, combo, full combo, attempts). The results screen shows the next goal for that chart, awards bonus XP and Pulse Shards for a new personal best, a first clear or a first full combo, and can re-chart a local upload one difficulty up. Press **R** on the results screen to retry, **Esc** in a run to pause, and **`** (backquote) to restart instantly.
 

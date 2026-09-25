@@ -13,7 +13,8 @@
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "lint": "tsc --noEmit",
     "test:charts": "tsx scripts/verify-chart-generation.ts",
-    "test": "tsx --test tests/*.test.ts && npm run test:charts"
+    "test": "tsx --test tests/*.test.ts && npm run test:charts",
+    "test:e2e": "node scripts/e2e-smoke.mjs"
   },
   "dependencies": {
     "@vercel/blob": "^2.3.1",

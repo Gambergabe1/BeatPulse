@@ -12,10 +12,10 @@ interface SocialMessage { id: string; senderId: string; recipientId?: string; ro
 interface RoomParticipant { playerId: string; username: string; ready: boolean; score: number; combo: number; accuracy: number; progress: number; finished: boolean; joinedAt: string; updatedAt: string; }
 interface RoomSpectator { playerId: string; username: string; joinedAt: string; }
 interface MultiplayerRoom { id: string; code: string; hostId: string; songId: string; status: RoomStatus; startAt?: string; createdAt: string; updatedAt: string; maxPlayers: number; participants: RoomParticipant[]; spectators?: RoomSpectator[]; rematchVotes?: string[]; }
-interface SocialState { profiles: PlayerProfile[]; friendships: FriendshipRecord[]; messages: SocialMessage[]; rooms: MultiplayerRoom[]; }
-interface ApiResult { status: number; data?: unknown; error?: string; persist?: boolean; }
+export interface SocialState { profiles: PlayerProfile[]; friendships: FriendshipRecord[]; messages: SocialMessage[]; rooms: MultiplayerRoom[]; }
+export interface ApiResult { status: number; data?: unknown; error?: string; persist?: boolean; }
 
-const EMPTY_STATE: SocialState = { profiles: [], friendships: [], messages: [], rooms: [] };
+export const EMPTY_STATE: SocialState = { profiles: [], friendships: [], messages: [], rooms: [] };
 
 function ok(data: unknown, persist = true): ApiResult {
   return { status: 200, data, persist };
@@ -237,7 +237,12 @@ async function songExists(client: VercelPoolClient, songId: string) {
   }
 }
 
-async function dispatch(req: any, state: SocialState, client: VercelPoolClient): Promise<ApiResult> {
+/**
+ * All social and multiplayer rules, independent of storage: mutates `state` and says
+ * whether it must be persisted. The local dev server runs this same function against
+ * its JSON file, so local and deployed behaviour cannot drift apart.
+ */
+export async function dispatchSocialAction(req: any, state: SocialState, hasSong: (songId: string) => Promise<boolean>): Promise<ApiResult> {
   const action = queryValue(req, "action");
   const body = parseBody(req);
   const method = String(req.method || "GET").toUpperCase();
@@ -329,7 +334,7 @@ async function dispatch(req: any, state: SocialState, client: VercelPoolClient):
   }
   if (action === "multiplayer/rooms" && method === "POST") {
     const songId = text(body.songId);
-    if (!actor || !(await songExists(client, songId))) return fail(400, "Choose a community song before creating a room.", Boolean(actor));
+    if (!actor || !(await hasSong(songId))) return fail(400, "Choose a community song before creating a room.", Boolean(actor));
     state.rooms.forEach((room) => { room.participants = room.participants.filter((participant) => participant.playerId !== actor.id); room.spectators = (room.spectators || []).filter((spectator) => spectator.playerId !== actor.id); });
     let code = "";
     do { code = crypto.randomBytes(3).toString("hex").toUpperCase(); } while (state.rooms.some((room) => room.code === code));
@@ -375,7 +380,7 @@ async function dispatch(req: any, state: SocialState, client: VercelPoolClient):
     if (!actor || !room || room.hostId !== actor.id || room.status !== "lobby") {
       return fail(403, "Only the host can change the song in an open lobby.", Boolean(actor));
     }
-    if (!(await songExists(client, songId))) return fail(400, "Choose a valid community song.", true);
+    if (!(await hasSong(songId))) return fail(400, "Choose a valid community song.", true);
     if (room.songId === songId) return ok(room);
 
     const now = new Date().toISOString();
@@ -482,7 +487,7 @@ export default async function handler(req: any, res: any) {
     await client.sql`SELECT pg_advisory_xact_lock(20260816)`;
     await prepareSchema(client);
     const state = await readState(client);
-    const result = await dispatch(req, state, client);
+    const result = await dispatchSocialAction(req, state, (songId) => songExists(client!, songId));
     if (result.persist) await writeState(client, state);
     await client.sql`COMMIT`;
     return result.error

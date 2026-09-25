@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, RotateCcw } from 'lucide-react';
+import { Home, Play, RotateCcw } from 'lucide-react';
 import type { GameState } from '../../types';
 import { TIMING_PRESETS } from './gameplayRules';
 
@@ -17,6 +17,7 @@ export interface PauseMenuProps {
   isReplay: boolean;
   noteSpeedMultiplier: number;
   onRestart: (() => void) | undefined;
+  onQuit: () => void;
   perfectWindow: number;
   practiceLoop: PracticeLoop | null;
   practiceLoopRef: React.RefObject<PracticeLoop | null>;
@@ -47,6 +48,7 @@ export const PauseMenu: React.FC<PauseMenuProps> = ({
   isReplay,
   noteSpeedMultiplier,
   onRestart,
+  onQuit,
   perfectWindow,
   practiceLoop,
   practiceLoopRef,
@@ -198,6 +200,15 @@ export const PauseMenu: React.FC<PauseMenuProps> = ({
                 <RotateCcw className="h-5 w-5" /> Restart
               </button>
             )}
+            <button
+              onClick={() => {
+                stopGame();
+                onQuit();
+              }}
+              className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl px-8 py-3 font-display text-sm font-bold uppercase tracking-widest text-white/55 transition-all hover:bg-white/5 hover:text-white"
+            >
+              <Home className="h-4 w-4" /> Quit to menu
+            </button>
             <p className="mt-4 text-center text-[10px] font-bold uppercase tracking-[0.18em] text-white/30">
               Esc resume{onRestart ? ' · ` restart' : ''}
             </p>

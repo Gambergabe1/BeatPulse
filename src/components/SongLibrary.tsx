@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Heart, Music, Play, Search, Sparkles, Star, Volume2, X } from 'lucide-react';
+import { getSongRecords } from '../utils/chartRecords';
 import { CommunitySongRecord, getMapReviews, MapReview, saveMapReview } from '../services/pulseApi';
 
 interface PersonalBest {
@@ -19,9 +20,13 @@ interface SongLibraryProps {
 
 type SortMode = 'featured' | 'top-score' | 'newest';
 
-const readPersonalBest = (songId: string): PersonalBest | null => {
+/** Best score across the song's difficulties, falling back to the pre-difficulty record. */
+const readPersonalBest = (song: CommunitySongRecord): (PersonalBest & { label?: string }) | null => {
+  const records = getSongRecords({ songId: song.id, name: song.name, artist: song.artist, duration: 0 });
+  const top = records.sort((a, b) => b.record.bestScore - a.record.bestScore)[0];
+  if (top) return { score: top.record.bestScore, accuracy: top.record.bestAccuracy, maxCombo: top.record.bestCombo, label: `${top.preset.label} ${top.record.bestRank}` };
   try {
-    const value = JSON.parse(localStorage.getItem(`beatpulse_personal_best:${songId}`) || 'null') as PersonalBest | null;
+    const value = JSON.parse(localStorage.getItem(`beatpulse_personal_best:${song.id}`) || 'null') as PersonalBest | null;
     return value && Number.isFinite(value.score) ? value : null;
   } catch {
     return null;
@@ -104,7 +109,7 @@ export const SongLibrary: React.FC<SongLibraryProps> = ({
   }, [selectedSongId, visibleSongs]);
 
   const selectedSong = songs.find((song) => song.id === selectedSongId) || null;
-  const selectedBest = selectedSong ? readPersonalBest(selectedSong.id) : null;
+  const selectedBest = selectedSong ? readPersonalBest(selectedSong) : null;
 
   const loadSong = (song: CommunitySongRecord) => {
     onPreviewStop();
@@ -149,7 +154,7 @@ export const SongLibrary: React.FC<SongLibraryProps> = ({
 
       {visibleSongs.length === 0 ? <div className="flex min-h-56 flex-col items-center justify-center rounded-3xl border border-dashed border-white/10 px-6 text-center"><Music className="mb-3 h-8 w-8 text-white/20" /><p className="font-display font-bold text-white/60">{favoritesOnly ? 'No favorite songs yet' : query ? 'No songs match that search' : 'No songs shared yet'}</p><p className="mt-1 text-xs text-white/30">{favoritesOnly ? 'Use the heart on any map to keep it close.' : 'Upload a song to begin the collection.'}</p></div> : <div className="grid max-h-[520px] gap-3 overflow-y-auto pr-1 custom-scrollbar sm:grid-cols-2 xl:grid-cols-3">
         {visibleSongs.map((song) => {
-          const best = readPersonalBest(song.id);
+          const best = readPersonalBest(song);
           const isSelected = song.id === selectedSongId;
           const isFavorite = favoriteSet.has(song.id);
           return <article key={song.id} className={`group relative overflow-hidden rounded-2xl border p-3 transition ${isSelected ? 'border-neon-blue/45 bg-neon-blue/[0.09]' : 'border-white/8 bg-black/20 hover:border-white/20 hover:bg-white/[0.06]'}`}>
@@ -157,7 +162,7 @@ export const SongLibrary: React.FC<SongLibraryProps> = ({
               <div className={`relative flex h-14 w-14 shrink-0 overflow-hidden rounded-xl bg-gradient-to-br ${artStyle(`${song.name}${song.artist}`)}`}>{song.coverUrl ? <img src={song.coverUrl} alt="" className="absolute inset-0 h-full w-full object-cover" /> : <><Music className="m-auto h-5 w-5 text-white/80" /><span className="absolute bottom-1 left-1.5 font-display text-sm font-black italic text-white/65">{song.name.charAt(0).toUpperCase()}</span></>}</div>
               <div className="min-w-0 flex-1"><h5 className="truncate font-display text-sm font-bold text-white">{song.name}</h5><p className="mt-0.5 truncate text-xs text-white/40">{song.artist}</p><div className="mt-2 flex items-center justify-between gap-2"><DifficultyStars value={song.difficulty} /><span className="font-mono text-[10px] text-neon-pink">{(song.topScore || 0).toLocaleString()}</span></div></div>
             </button>
-            <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2.5"><span className="text-[9px] font-bold uppercase tracking-wider text-white/30">{best ? `PB ${best.score.toLocaleString()}` : 'No personal best'}</span><div className="flex items-center gap-1"><button type="button" onClick={() => onToggleFavorite(song.id)} aria-label={isFavorite ? `Remove ${song.name} from favorites` : `Favorite ${song.name}`} className={`rounded-lg p-1.5 transition ${isFavorite ? 'text-neon-pink' : 'text-white/25 hover:text-neon-pink'}`}><Heart className={`h-4 w-4 ${isFavorite ? 'fill-current' : ''}`} /></button><button type="button" onClick={() => loadSong(song)} aria-label={`Play ${song.name}`} className="rounded-lg bg-white/7 p-1.5 text-white/45 transition hover:bg-neon-blue hover:text-black"><Play className="h-4 w-4 fill-current" /></button></div></div>
+            <div className="mt-3 flex items-center justify-between border-t border-white/5 pt-2.5"><span className="text-[9px] font-bold uppercase tracking-wider text-white/30">{best ? `PB ${best.score.toLocaleString()}${best.label ? ` · ${best.label}` : ''}` : 'No personal best'}</span><div className="flex items-center gap-1"><button type="button" onClick={() => onToggleFavorite(song.id)} aria-label={isFavorite ? `Remove ${song.name} from favorites` : `Favorite ${song.name}`} className={`rounded-lg p-1.5 transition ${isFavorite ? 'text-neon-pink' : 'text-white/25 hover:text-neon-pink'}`}><Heart className={`h-4 w-4 ${isFavorite ? 'fill-current' : ''}`} /></button><button type="button" onClick={() => loadSong(song)} aria-label={`Play ${song.name}`} className="rounded-lg bg-white/7 p-1.5 text-white/45 transition hover:bg-neon-blue hover:text-black"><Play className="h-4 w-4 fill-current" /></button></div></div>
           </article>;
         })}
       </div>}

@@ -704,7 +704,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         if (!note.hit && !note.missed && !note.held && currentTime >= note.time - 0.012) checkHit(note.lane, true);
       });
     }
-    if (onMultiplayerProgress && Date.now() - lastProgressSentRef.current >= 750) {
+    if (onMultiplayerProgress && Date.now() - lastProgressSentRef.current >= 1000) {
       lastProgressSentRef.current = Date.now();
       const state = gameStateRef.current;
       onMultiplayerProgress({

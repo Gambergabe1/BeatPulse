@@ -343,8 +343,9 @@ export default function App() {
         console.warn('Failed to refresh live multiplayer standings:', error);
       }
     };
+    // Progress posts already return the live room, so this is only a slow safety net.
     syncMatch();
-    const timer = window.setInterval(syncMatch, 1250);
+    const timer = window.setInterval(syncMatch, 5000);
     return () => { cancelled = true; window.clearInterval(timer); };
   }, [view, multiplayerRoom?.id, playerId, playerToken]);
 

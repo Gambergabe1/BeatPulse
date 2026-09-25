@@ -1,3 +1,4 @@
+import { useAdaptivePoll } from '../utils/useAdaptivePoll';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
 import {
@@ -29,6 +30,10 @@ import {
   startMultiplayerRoom,
   startSocialSession,
 } from '../services/pulseApi';
+
+/** Snapshot identity for polling back-off; lastSeen changes on every poll, so it is ignored. */
+const snapshotSignature = (snapshot: unknown) =>
+  JSON.stringify(snapshot ?? null, (key, value) => (key === 'lastSeen' ? undefined : value));
 
 type SocialView = 'profile' | 'friends' | 'messages' | 'multiplayer';
 
@@ -97,6 +102,7 @@ export const SocialHub: React.FC<SocialHubProps> = ({ identity, songs, onLaunchM
       setSnapshot(next);
       setLatencyMs(Math.round(performance.now() - startedAt));
       setError(null);
+      return next;
     } catch (caught) {
       showError(caught);
     } finally {
@@ -112,9 +118,11 @@ export const SocialHub: React.FC<SocialHubProps> = ({ identity, songs, onLaunchM
       .then((next) => { if (!cancelled) { setSnapshot(next); setLatencyMs(Math.round(performance.now() - startedAt)); setError(null); } })
       .catch((caught) => { if (!cancelled) showError(caught); })
       .finally(() => { if (!cancelled) setLoading(false); });
-    const timer = window.setInterval(() => refresh(true), 3000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [identity.playerId, identity.username, refresh]);
+    return () => { cancelled = true; };
+  }, [identity.playerId, identity.username]);
+
+  // Presence goes stale after 45s on the server, so the idle back-off stays well under that.
+  useAdaptivePoll(async () => snapshotSignature(await refresh(true)), { baseMs: 3000, maxMs: 20000 });
 
   useEffect(() => {
     if (!selectedFriend) return;
@@ -126,30 +134,31 @@ export const SocialHub: React.FC<SocialHubProps> = ({ identity, songs, onLaunchM
   const loadDirectMessages = useCallback(async () => {
     if (!selectedFriend) return;
     try {
-      setMessages(await getDirectMessages(identity, selectedFriend.id));
-      await refresh(true);
+      const next = await getDirectMessages(identity, selectedFriend.id);
+      setMessages(next);
+      return next.length ? next[next.length - 1].id : null;
     } catch (caught) { showError(caught); }
-  }, [identity, selectedFriend?.id, refresh]);
+  }, [identity, selectedFriend?.id]);
 
   useEffect(() => {
-    if (!selectedFriend || view !== 'messages') return;
-    loadDirectMessages();
-    const timer = window.setInterval(loadDirectMessages, 2500);
-    return () => window.clearInterval(timer);
+    if (selectedFriend && view === 'messages') loadDirectMessages();
   }, [selectedFriend?.id, view, loadDirectMessages]);
+  useAdaptivePoll(loadDirectMessages, { baseMs: 2500, maxMs: 12000, enabled: Boolean(selectedFriend) && view === 'messages' });
 
   const loadLobbyMessages = useCallback(async () => {
     if (!room) return;
-    try { setRoomMessages(await getRoomMessages(identity, room.id)); }
+    try {
+      const next = await getRoomMessages(identity, room.id);
+      setRoomMessages(next);
+      return next.length ? next[next.length - 1].id : null;
+    }
     catch (caught) { showError(caught); }
   }, [identity, room?.id]);
 
   useEffect(() => {
-    if (!room || view !== 'multiplayer') return;
-    loadLobbyMessages();
-    const timer = window.setInterval(loadLobbyMessages, 2500);
-    return () => window.clearInterval(timer);
+    if (room && view === 'multiplayer') loadLobbyMessages();
   }, [room?.id, view, loadLobbyMessages]);
+  useAdaptivePoll(loadLobbyMessages, { baseMs: 2500, maxMs: 12000, enabled: Boolean(room) && view === 'multiplayer' });
 
   useEffect(() => {
     if (!room?.startAt || room.status !== 'countdown') return;

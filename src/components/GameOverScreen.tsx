@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useAdaptivePoll } from '../utils/useAdaptivePoll';
 import { motion } from 'motion/react';
 import { Trophy, RotateCcw, Home, Star, Share2, Activity, List, Music, Save, Sparkles, Gift, Gem, Palette, BadgeCheck, CheckCircle2, Target, ChevronsUp } from 'lucide-react';
 import { GameplayOptions, JudgementSummary, ReplayEvent } from '../types';
@@ -283,27 +284,24 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
     setMatchRoom(multiplayerRoom);
   }, [multiplayerRoom]);
 
-  useEffect(() => {
-    if (!multiplayerRoom || !playerId || !playerToken) return;
-    let cancelled = false;
-    const refreshStandings = async () => {
-      try {
-        const snapshot = await getSocialSnapshot({
-          playerId,
-          playerToken,
-          username: localStorage.getItem('username') || 'Anonymous',
-        });
-        if (!cancelled && snapshot.activeRoom?.id === multiplayerRoom.id) {
-          setMatchRoom(snapshot.activeRoom);
-        }
-      } catch (error) {
-        console.warn('Failed to refresh multiplayer standings:', error);
-      }
-    };
-    refreshStandings();
-    const timer = window.setInterval(refreshStandings, 2500);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [multiplayerRoom?.id, playerId, playerToken]);
+  const multiplayerRoomId = multiplayerRoom?.id;
+  const refreshStandings = useCallback(async () => {
+    if (!multiplayerRoomId || !playerId || !playerToken) return null;
+    try {
+      const snapshot = await getSocialSnapshot({
+        playerId,
+        playerToken,
+        username: localStorage.getItem('username') || 'Anonymous',
+      });
+      if (snapshot.activeRoom?.id === multiplayerRoomId) setMatchRoom(snapshot.activeRoom);
+      return snapshot.activeRoom?.updatedAt ?? null;
+    } catch (error) {
+      console.warn('Failed to refresh multiplayer standings:', error);
+      return null;
+    }
+  }, [multiplayerRoomId, playerId, playerToken]);
+  useEffect(() => { void refreshStandings(); }, [refreshStandings]);
+  useAdaptivePoll(refreshStandings, { baseMs: 2500, maxMs: 15000, enabled: Boolean(multiplayerRoomId) });
 
   const handleShare = async () => {
     const shareText = `I just scored ${score.toLocaleString()} (${accuracy.toFixed(1)}%) with rank ${grade.label} on ${songName} in BeatPulse! 🎵🔥`;

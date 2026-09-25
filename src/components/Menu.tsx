@@ -1,7 +1,23 @@
-﻿import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useMemo } from 'react';
-import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Users, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, ArrowLeft, RefreshCw } from 'lucide-react';
+import {
+  Music,
+  Upload,
+  Play,
+  Trophy,
+  Disc,
+  Cloud,
+  Save,
+  User,
+  Users,
+  Lock,
+  Edit2,
+  Check,
+  Activity,
+  Settings as SettingsIcon,
+  ArrowLeft
+} from 'lucide-react';
 import { loadAudioFile } from '../utils/audio';
 import { generateChart } from '../utils/chartGenerator';
 import { generateChartBundle, pickOfficialChart, toPlayableCharts } from '../utils/storedCharts';
@@ -32,10 +48,12 @@ import {
   replaceSongCharts
 } from '../services/pulseApi';
 import { SocialHub } from './SocialHub';
+import { AdminPanel } from './AdminPanel';
+import { SettingsPanel } from './SettingsPanel';
+import { IntegrityResultRow, MainTab } from './menuShared';
 import { DailyChallengeCard } from './DailyChallengeCard';
 import { SongLibrary } from './SongLibrary';
 import { BeatmapEditor } from './BeatmapEditor';
-import { TimingCalibration } from './TimingCalibration';
 import { ProgressionHub } from './ProgressionHub';
 import { getPlayerId, getPlayerToken } from '../utils/playerIdentity';
 import { prefersMovingSliders } from '../utils/device';
@@ -50,7 +68,6 @@ interface MenuProps {
   onUpdateProgress: (progress: PlayerProgress) => void;
 }
 
-type MainTab = 'LOCAL' | 'COMMUNITY' | 'SOCIAL' | 'PROGRESS' | 'GLOBAL' | 'SETTINGS' | 'REPLAYS';
 
 const LEADERBOARD_REMOVAL_REASONS = [
   'Inappropriate name',
@@ -62,7 +79,6 @@ const LEADERBOARD_REMOVAL_REASONS = [
 
 const DEFAULT_CHART_SETTINGS = getChartSettingsForDifficulty(DEFAULT_DIFFICULTY);
 
-const formatPercentLabel = (value: number) => `${Math.round(value * 100)}%`;
 
 const getSettingTier = (value: number, labels: [string, string, string, string]) => {
   if (value < 0.25) return labels[0];
@@ -83,11 +99,6 @@ const normalizeUsername = (value: string) => value.trim().toLowerCase();
 const getTopScoreFromEntries = (entries: Array<{ score: number }>) =>
   entries.reduce((max, entry) => Math.max(max, Number(entry.score) || 0), 0);
 
-type IntegrityResultRow = {
-  name: string;
-  status: 'OK' | 'WARN' | 'ERROR';
-  details: string;
-};
 
 const describeReplayLinkIssue = (issue: ReplayLinkIssue) => {
   if (issue.issue === 'missing-song') {
@@ -1601,674 +1612,70 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 </div>
               )
             ) : activeTab === 'ADMIN' ? (
-              !adminToken ? (
-                <div className="flex flex-col items-center justify-center py-12">
-                  <div className="p-4 rounded-full bg-neon-pink/10 text-neon-pink mb-6">
-                    <Lock className="w-8 h-8" />
-                  </div>
-                  <h3 className="text-xl font-display font-bold text-white mb-2">Admin Access</h3>
-                  <p className="text-white/40 text-sm mb-6">Enter password to manage songs and leaderboard</p>
-                  <form onSubmit={handleAdminLogin} className="w-full max-w-xs flex flex-col gap-4">
-                    <input 
-                      type="password"
-                      value={adminPassword}
-                      onChange={(e) => setAdminPassword(e.target.value)}
-                      placeholder="Password"
-                      className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white text-center focus:border-neon-pink outline-none"
-                    />
-                    <button 
-                      type="submit"
-                      disabled={isAdminLoading}
-                      className={`w-full py-3 rounded-xl font-bold uppercase tracking-widest transition-all flex items-center justify-center gap-2 ${
-                        isAdminLoading 
-                          ? 'bg-white/10 text-white/40 cursor-not-allowed' 
-                          : 'bg-neon-pink text-white hover:bg-white hover:text-black'
-                      }`}
-                    >
-                      {isAdminLoading ? (
-                        <>
-                          <Check className="w-4 h-4 animate-spin" />
-                          Logging in...
-                        </>
-                      ) : 'Login'}
-                    </button>
-                  </form>
-                </div>
-              ) : (
-                <div className="flex flex-col h-full">
-                  <div className="flex justify-between items-center mb-4">
-                    <p className="text-sm font-bold text-neon-pink uppercase tracking-widest">Manage Songs + Leaderboard</p>
-                    <div className="flex gap-4">
-                      <button 
-                        onClick={() => handleMainTabChange('LOCAL')}
-                        className="text-xs text-neon-blue hover:text-white uppercase tracking-widest flex items-center gap-1"
-                      >
-                        <Upload className="w-3 h-3" />
-                        Add New Song
-                      </button>
-                      <button 
-                        onClick={() => setIsChangingPassword(!isChangingPassword)}
-                        className="text-xs text-white/40 hover:text-white uppercase tracking-widest"
-                      >
-                        Change Password
-                      </button>
-                      <button 
-                        onClick={runIntegrityCheck}
-                        disabled={isCheckingIntegrity || isForcingStorageUpdate}
-                        className={`text-xs uppercase tracking-widest flex items-center gap-1 ${
-                          isCheckingIntegrity || isForcingStorageUpdate ? 'text-white/20' : 'text-neon-green hover:text-white'
-                        }`}
-                      >
-                        <Check className={`w-3 h-3 ${isCheckingIntegrity ? 'animate-spin' : ''}`} />
-                        Integrity Check
-                      </button>
-                      <button
-                        onClick={handleForceStorageUpdate}
-                        disabled={isForcingStorageUpdate || isCheckingIntegrity}
-                        className={`text-xs uppercase tracking-widest flex items-center gap-1 ${
-                          isForcingStorageUpdate || isCheckingIntegrity ? 'text-white/20' : 'text-neon-blue hover:text-white'
-                        }`}
-                      >
-                        <RefreshCw className={`w-3 h-3 ${isForcingStorageUpdate ? 'animate-spin' : ''}`} />
-                        Force Update
-                      </button>
-                      <button
-                        onClick={handleRebuildOutdatedCharts}
-                        disabled={Boolean(chartRebuildStatus) || outdatedChartSongs.length === 0}
-                        title={chartRebuildStatus || 'Regenerate official charts made with an older chart generator'}
-                        className={`text-xs uppercase tracking-widest flex items-center gap-1 ${
-                          chartRebuildStatus || outdatedChartSongs.length === 0 ? 'text-white/20' : 'text-neon-blue hover:text-white'
-                        }`}
-                      >
-                        <RefreshCw className={`w-3 h-3 ${chartRebuildStatus ? 'animate-spin' : ''}`} />
-                        {chartRebuildStatus ?? `Rebuild Charts (${outdatedChartSongs.length})`}
-                      </button>
-                      <button 
-                        onClick={handleAdminLogout}
-                        className="text-xs text-white/40 hover:text-white uppercase tracking-widest"
-                      >
-                        Logout
-                      </button>
-                    </div>
-                  </div>
-                  
-                  {isChangingPassword && (
-                    <form onSubmit={handleChangeAdminPassword} className="mb-6 p-4 rounded-2xl bg-white/5 border border-white/10 flex flex-col gap-3">
-                      <p className="text-xs font-bold text-white uppercase tracking-widest">New Admin Password</p>
-                      <div className="flex gap-2">
-                        <input 
-                          type="password"
-                          value={newAdminPassword}
-                          onChange={(e) => setNewAdminPassword(e.target.value)}
-                          placeholder="Enter new password"
-                          className="flex-1 bg-black/50 border border-white/20 rounded-xl p-2 text-sm text-white focus:border-neon-pink outline-none"
-                        />
-                        <button 
-                          type="submit"
-                          disabled={isAdminLoading}
-                          className={`px-4 py-2 rounded-xl font-bold uppercase tracking-widest transition-all text-xs flex items-center gap-2 ${
-                            isAdminLoading 
-                              ? 'bg-white/10 text-white/40 cursor-not-allowed' 
-                              : 'bg-neon-pink text-white hover:bg-white hover:text-black'
-                          }`}
-                        >
-                          {isAdminLoading ? 'Saving...' : 'Save'}
-                        </button>
-                      </div>
-                    </form>
-                  )}
-
-                  {integrityResults && (
-                    <div className="mb-6 p-4 rounded-2xl bg-black/40 border border-white/10">
-                      <div className="flex justify-between items-center mb-3">
-                        <p className="text-xs font-bold text-white uppercase tracking-widest">Integrity Report</p>
-                        <button onClick={() => setIntegrityResults(null)} className="text-white/40 hover:text-white">
-                          <X className="w-4 h-4" />
-                        </button>
-                      </div>
-                      <div className="space-y-2 max-h-[150px] overflow-y-auto pr-2 custom-scrollbar">
-                        {integrityResults.map((res) => (
-                          <div key={`${res.name}-${res.status}`} className="rounded bg-white/5 p-2 space-y-1">
-                            <div className="flex justify-between items-center text-[10px] font-mono">
-                              <span className="text-white truncate max-w-[200px]">{res.name}</span>
-                              <span className={
-                                res.status === 'OK'
-                                  ? 'text-neon-green'
-                                  : res.status === 'WARN'
-                                  ? 'text-yellow-400'
-                                  : 'text-neon-pink'
-                              }>
-                                {res.status}
-                              </span>
-                            </div>
-                            <p className="text-white/40 text-[10px]">{res.details}</p>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="mb-6 p-4 rounded-2xl bg-white/5 border border-white/10">
-                    <div className="flex items-start justify-between gap-4 mb-3">
-                      <div>
-                        <p className="text-xs font-bold text-white uppercase tracking-widest">Leaderboard Moderation</p>
-                        <p className="text-white/40 text-xs mt-1">Remove a username from the global leaderboard and matching song leaderboards.</p>
-                      </div>
-                      <span className="text-[10px] font-mono text-white/40 uppercase tracking-widest">
-                        {globalScores.length} loaded
-                      </span>
-                    </div>
-
-                    {globalScores.length === 0 ? (
-                      <div className="rounded-2xl border border-dashed border-white/10 px-4 py-6 text-center text-white/30 text-xs uppercase tracking-widest">
-                        No leaderboard entries loaded yet
-                      </div>
-                    ) : (
-                      <div className="space-y-2 max-h-[220px] overflow-y-auto pr-2 custom-scrollbar">
-                        {globalScores.map((score) => (
-                          <div key={score.id} className="flex items-center justify-between gap-3 rounded-2xl bg-black/30 border border-white/5 px-3 py-3">
-                            <div className="min-w-0">
-                              <p className="font-display font-bold text-white truncate">{score.username}</p>
-                              <p className="text-[10px] text-white/40 uppercase tracking-wider truncate">
-                                {score.songName} • {score.score.toLocaleString()} • {score.accuracy.toFixed(1)}%
-                              </p>
-                            </div>
-                            <button
-                              onClick={() => openLeaderboardRemoval(score)}
-                              disabled={isModeratingLeaderboard}
-                              className="shrink-0 px-3 py-2 rounded-xl bg-neon-pink/10 text-neon-pink hover:bg-neon-pink hover:text-white transition-all text-[10px] font-bold uppercase tracking-widest disabled:opacity-40"
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        ))}
-
-                        {hasMoreScores && (
-                          <button
-                            onClick={fetchMoreGlobalScores}
-                            disabled={isLoadingMoreScores}
-                            className={`w-full mt-1 rounded-xl border border-white/10 px-3 py-2 text-[10px] font-bold uppercase tracking-widest transition-all ${
-                              isLoadingMoreScores
-                                ? 'text-white/30 bg-white/5 cursor-not-allowed'
-                                : 'text-neon-blue bg-neon-blue/10 hover:bg-neon-blue hover:text-black'
-                            }`}
-                          >
-                            {isLoadingMoreScores ? 'Loading...' : 'Load More Scores'}
-                          </button>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar touch-pan-y">
-                    {communitySongs.map((song) => (
-                      <div key={song.id} className="p-4 rounded-2xl bg-white/5 border border-white/5 flex flex-col gap-3">
-                        {editingSong === song.id ? (
-                          <div className="flex flex-col gap-3">
-                            <input 
-                              type="text" 
-                              value={editForm.name} 
-                              onChange={e => setEditForm({...editForm, name: e.target.value})}
-                              className="bg-black/50 border border-white/20 rounded-lg p-2 text-sm text-white"
-                              placeholder="Song Name"
-                            />
-                            <input 
-                              type="text" 
-                              value={editForm.artist} 
-                              onChange={e => setEditForm({...editForm, artist: e.target.value})}
-                              className="bg-black/50 border border-white/20 rounded-lg p-2 text-sm text-white"
-                              placeholder="Artist"
-                            />
-                            <div className="grid grid-cols-2 gap-3">
-                              <div className="flex flex-col gap-1">
-                                <span className="text-[10px] text-white/40 uppercase tracking-widest">Difficulty</span>
-                                <input 
-                                  type="number" 
-                                  step="0.1" 
-                                  min="0" 
-                                  max="1"
-                                  value={editForm.difficulty} 
-                                  onChange={e => setEditForm({...editForm, difficulty: parseFloat(e.target.value)})}
-                                  className="bg-black/50 border border-white/20 rounded-lg p-2 text-sm text-white"
-                                />
-                              </div>
-                              <div className="flex flex-col gap-1">
-                                <span className="text-[10px] text-white/40 uppercase tracking-widest">Density</span>
-                                <input 
-                                  type="number" 
-                                  step="0.1" 
-                                  min="0" 
-                                  max="1"
-                                  value={(editForm as any).density} 
-                                  onChange={e => setEditForm({...editForm, density: parseFloat(e.target.value)} as any)}
-                                  className="bg-black/50 border border-white/20 rounded-lg p-2 text-sm text-white"
-                                />
-                              </div>
-                              <div className="flex flex-col gap-1">
-                                <span className="text-[10px] text-white/40 uppercase tracking-widest">Lane Variety</span>
-                                <input 
-                                  type="number" 
-                                  step="0.1" 
-                                  min="0" 
-                                  max="1"
-                                  value={(editForm as any).laneVariety} 
-                                  onChange={e => setEditForm({...editForm, laneVariety: parseFloat(e.target.value)} as any)}
-                                  className="bg-black/50 border border-white/20 rounded-lg p-2 text-sm text-white"
-                                />
-                              </div>
-                              <div className="flex flex-col gap-1">
-                                <span className="text-[10px] text-white/40 uppercase tracking-widest">Sliders</span>
-                                <input 
-                                  type="number" 
-                                  step="0.1" 
-                                  min="0" 
-                                  max="1"
-                                  value={(editForm as any).sliderProbability} 
-                                  onChange={e => setEditForm({...editForm, sliderProbability: parseFloat(e.target.value)} as any)}
-                                  className="bg-black/50 border border-white/20 rounded-lg p-2 text-sm text-white"
-                                />
-                              </div>
-                              <div className="flex flex-col gap-1">
-                                <span className="text-[10px] text-white/40 uppercase tracking-widest">Stamina</span>
-                                <input 
-                                  type="number" 
-                                  step="0.1" 
-                                  min="0" 
-                                  max="1"
-                                  value={(editForm as any).stamina} 
-                                  onChange={e => setEditForm({...editForm, stamina: parseFloat(e.target.value)} as any)}
-                                  className="bg-black/50 border border-white/20 rounded-lg p-2 text-sm text-white"
-                                />
-                              </div>
-                            </div>
-                            <div className="flex gap-2 justify-end mt-2">
-                              <button 
-                                onClick={() => setEditingSong(null)} 
-                                disabled={loadingSongId === song.id}
-                                className="p-2 rounded-lg bg-white/10 text-white hover:bg-white/20 disabled:opacity-50"
-                              >
-                                <X className="w-4 h-4" />
-                              </button>
-                              <button 
-                                onClick={() => handleUpdateSong(song.id)} 
-                                disabled={loadingSongId === song.id}
-                                className={`p-2 rounded-lg transition-all flex items-center gap-2 ${
-                                  loadingSongId === song.id 
-                                    ? 'bg-white/10 text-white/40 cursor-not-allowed' 
-                                    : 'bg-neon-green/20 text-neon-green hover:bg-neon-green/40'
-                                }`}
-                              >
-                                {loadingSongId === song.id ? (
-                                  <Check className="w-4 h-4 animate-spin" />
-                                ) : (
-                                  <Check className="w-4 h-4" />
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="flex items-center justify-between">
-                            <div className="flex-1 min-w-0">
-                              <h4 className="font-display font-bold text-white truncate">{song.name}</h4>
-                              <p className="text-white/40 text-xs truncate">{song.artist}</p>
-                              <p className="text-neon-blue/60 text-[10px] mt-1">Diff: {song.difficulty}</p>
-                            </div>
-                            <div className="flex gap-2">
-                              <button 
-                                onClick={() => startEditingSong(song)} 
-                                disabled={loadingSongId !== null}
-                                className="p-2 rounded-lg bg-white/5 text-white/60 hover:text-white hover:bg-white/10 transition-all disabled:opacity-30"
-                              >
-                                <Edit2 className="w-4 h-4" />
-                              </button>
-                              <button 
-                                onClick={() => handleDeleteSong(song.id)} 
-                                disabled={loadingSongId !== null}
-                                className={`p-2 rounded-lg transition-all flex items-center justify-center ${
-                                  loadingSongId === song.id 
-                                    ? 'bg-neon-pink text-white animate-pulse' 
-                                    : 'bg-neon-pink/10 text-neon-pink hover:bg-neon-pink hover:text-white disabled:opacity-30'
-                                }`}
-                              >
-                                {loadingSongId === song.id ? (
-                                  <Trash2 className="w-4 h-4 animate-spin" />
-                                ) : (
-                                  <Trash2 className="w-4 h-4" />
-                                )}
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )
+              <AdminPanel
+                adminPassword={adminPassword}
+                adminToken={adminToken}
+                chartRebuildStatus={chartRebuildStatus}
+                communitySongs={communitySongs}
+                editForm={editForm}
+                editingSong={editingSong}
+                fetchMoreGlobalScores={fetchMoreGlobalScores}
+                globalScores={globalScores}
+                handleAdminLogin={handleAdminLogin}
+                handleAdminLogout={handleAdminLogout}
+                handleChangeAdminPassword={handleChangeAdminPassword}
+                handleDeleteSong={handleDeleteSong}
+                handleForceStorageUpdate={handleForceStorageUpdate}
+                handleMainTabChange={handleMainTabChange}
+                handleRebuildOutdatedCharts={handleRebuildOutdatedCharts}
+                handleUpdateSong={handleUpdateSong}
+                hasMoreScores={hasMoreScores}
+                integrityResults={integrityResults}
+                isAdminLoading={isAdminLoading}
+                isChangingPassword={isChangingPassword}
+                isCheckingIntegrity={isCheckingIntegrity}
+                isForcingStorageUpdate={isForcingStorageUpdate}
+                isLoadingMoreScores={isLoadingMoreScores}
+                isModeratingLeaderboard={isModeratingLeaderboard}
+                loadingSongId={loadingSongId}
+                newAdminPassword={newAdminPassword}
+                openLeaderboardRemoval={openLeaderboardRemoval}
+                outdatedChartSongs={outdatedChartSongs}
+                runIntegrityCheck={runIntegrityCheck}
+                setAdminPassword={setAdminPassword}
+                setEditForm={setEditForm}
+                setEditingSong={setEditingSong}
+                setIntegrityResults={setIntegrityResults}
+                setIsChangingPassword={setIsChangingPassword}
+                setNewAdminPassword={setNewAdminPassword}
+                startEditingSong={startEditingSong}
+              />
             ) : activeTab === 'SETTINGS' ? (
-              <div className="py-4">
-                <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(280px,0.9fr)]">
-                  <div className="space-y-6">
-                    <div className="rounded-2xl border border-white/5 bg-white/5 p-5 sm:p-6">
-                      <div className="mb-6">
-                        <h4 className="flex items-center gap-2 font-display font-bold text-white">
-                          <Activity className="h-5 w-5 text-neon-blue" />
-                          Chart Difficulty
-                        </h4>
-                        <p className="mt-2 max-w-2xl text-sm text-white/50">
-                          Pick a level and play. BeatPulse still adjusts the chart to each song's BPM and changing pace.
-                        </p>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-                        {DIFFICULTY_PRESETS.map((preset) => {
-                          const isSelected = !advancedChartMode && difficultyPreset.id === preset.id;
-                          return (
-                            <button
-                              key={preset.id}
-                              type="button"
-                              aria-pressed={isSelected}
-                              onClick={() => selectDifficultyPreset(preset.value)}
-                              className={`group rounded-2xl border p-4 text-left transition-all ${
-                                isSelected
-                                  ? 'border-neon-blue/60 bg-neon-blue/10 shadow-[0_0_28px_rgba(0,243,255,0.1)]'
-                                  : 'border-white/10 bg-black/20 hover:border-white/25 hover:bg-white/[0.07]'
-                              }`}
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className={`font-display text-lg font-black ${isSelected ? 'text-neon-blue' : 'text-white'}`}>
-                                  {preset.label}
-                                </span>
-                                <span className={`h-2 w-2 rounded-full ${isSelected ? 'bg-neon-blue shadow-[0_0_10px_#00f3ff]' : 'bg-white/15'}`} />
-                              </div>
-                              <p className="mt-2 min-h-10 text-xs leading-relaxed text-white/45">{preset.description}</p>
-                              <p className={`mt-3 text-[9px] font-black uppercase tracking-[0.18em] ${isSelected ? 'text-neon-blue/80' : 'text-white/25'}`}>
-                                {preset.pace}
-                              </p>
-                            </button>
-                          );
-                        })}
-                      </div>
-
-                      <div className="mt-5 rounded-[24px] border border-white/8 bg-black/20 p-4 sm:p-5">
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <p className="text-sm font-bold text-white">{advancedChartMode ? 'Custom profile' : `${difficultyPreset.label} profile`}</p>
-                              <span className="rounded-full border border-neon-purple/20 bg-neon-purple/10 px-2 py-0.5 text-[9px] font-black uppercase tracking-[0.16em] text-neon-purple">
-                                BPM adaptive
-                              </span>
-                            </div>
-                            <p className="mt-1 text-xs text-white/40">
-                              {advancedChartMode ? 'Manual values are active.' : difficultyPreset.description}
-                            </p>
-                          </div>
-                          <div className="flex gap-2">
-                            <button
-                              type="button"
-                              onClick={toggleAdvancedChartMode}
-                              className={`rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] transition-all ${
-                                advancedChartMode
-                                  ? 'border-neon-pink/35 bg-neon-pink/10 text-neon-pink hover:bg-neon-pink/20'
-                                  : 'border-white/10 bg-white/5 text-white/60 hover:bg-white/10 hover:text-white'
-                              }`}
-                            >
-                              {advancedChartMode ? 'Use preset' : 'Customize'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={resetChartSettings}
-                              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-[10px] font-black uppercase tracking-[0.16em] text-white/45 transition-all hover:bg-white/10 hover:text-white"
-                            >
-                              Reset
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                          {chartProfileRows.map((row) => (
-                            <div key={row.label} className="rounded-xl border border-white/5 bg-white/[0.025] px-3 py-2.5">
-                              <p className="text-[9px] font-bold uppercase tracking-[0.12em] text-white/30">{row.label}</p>
-                              <p className={`mt-1 text-xs font-display font-bold ${row.accentClass}`}>{row.summary}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      {advancedChartMode ? (
-                        <div className="mt-5 rounded-[24px] border border-neon-pink/15 bg-neon-pink/[0.045] p-4 sm:p-5">
-                          <div className="mb-5 flex items-start justify-between gap-4">
-                            <div>
-                              <p className="text-sm font-bold text-white">Customize chart</p>
-                              <p className="mt-1 text-xs text-white/45">Fine tune only what matters to you.</p>
-                            </div>
-                            <span className="rounded-full border border-neon-pink/20 bg-neon-pink/10 px-2.5 py-1 text-[9px] font-black uppercase tracking-[0.18em] text-neon-pink">
-                              Custom
-                            </span>
-                          </div>
-
-                          <div className="mb-4 rounded-2xl border border-white/8 bg-black/20 p-4">
-                            <div className="mb-4 flex items-center justify-between gap-3">
-                              <div>
-                                <p className="text-sm font-bold text-white">Base intensity</p>
-                                <p className="mt-1 text-xs text-white/45">Overall pattern complexity.</p>
-                              </div>
-                              <span className="font-mono text-xs text-neon-purple">{formatPercentLabel(complexity)}</span>
-                            </div>
-                            <input
-                              aria-label="Base chart intensity"
-                              type="range"
-                              min="0"
-                              max="1"
-                              step="0.05"
-                              value={complexity}
-                              onChange={(e) => setComplexity(parseFloat(e.target.value))}
-                              className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-purple"
-                            />
-                            <div className="mt-3 flex items-center justify-between text-[9px] font-bold uppercase tracking-widest text-white/25">
-                              <span>Simple</span><span>Complex</span>
-                            </div>
-                          </div>
-
-                          <div className="grid gap-3 lg:grid-cols-2">
-                            {advancedControls.map((control) => (
-                              <div key={control.id} className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                                <div className="mb-4 flex items-start justify-between gap-3">
-                                  <div>
-                                    <p className="text-sm font-bold text-white">{control.label}</p>
-                                    <p className="mt-1 text-xs text-white/45">{control.hint}</p>
-                                  </div>
-                                  <span className={`font-mono text-xs ${control.valueClass}`}>{formatPercentLabel(control.value)}</span>
-                                </div>
-                                <input
-                                  aria-label={control.label}
-                                  type="range"
-                                  min="0"
-                                  max="1"
-                                  step="0.05"
-                                  value={control.value}
-                                  onChange={(e) => control.onChange(parseFloat(e.target.value))}
-                                  className={`h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 ${control.accentClass}`}
-                                />
-                                <div className="mt-3 flex items-center justify-between text-[9px] font-bold uppercase tracking-widest text-white/25">
-                                  <span>{control.minLabel}</span><span>{control.maxLabel}</span>
-                                </div>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      ) : null}
-                    </div>
-
-                    <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">
-                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-5">
-                        <div>
-                          <h4 className="font-display font-bold text-white">Keybindings</h4>
-                          <p className={`text-xs mt-1 ${activeKeybindIndex !== null ? 'text-neon-pink' : 'text-white/40'}`}>
-                            {keybindingPrompt}
-                          </p>
-                        </div>
-                        <span className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/30">
-                          {activeKeybindIndex !== null ? 'Listening' : '4 Lanes'}
-                        </span>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-                        {localSettings.keybindings.map((key, index) => (
-                          <button
-                            key={index}
-                            onClick={() => setActiveKeybindIndex(index)}
-                            className={`rounded-2xl border p-4 text-left transition-all ${
-                              activeKeybindIndex === index
-                                ? 'border-neon-pink bg-neon-pink/10 text-white shadow-[0_0_24px_rgba(255,0,153,0.15)]'
-                                : 'border-white/10 bg-black/20 text-white hover:bg-white/10'
-                            }`}
-                          >
-                            <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-white/40">Lane {index + 1}</p>
-                            <p className="mt-3 font-display text-3xl font-black">
-                              {activeKeybindIndex === index ? '?' : key.toUpperCase()}
-                            </p>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-6">
-                    <div className="rounded-2xl border border-neon-orange/20 bg-gradient-to-br from-neon-orange/[0.09] to-neon-purple/[0.05] p-6">
-                      <div className="flex items-start justify-between gap-4"><div><p className="text-[10px] font-black uppercase tracking-[0.2em] text-neon-orange">{getSeasonTier(progress)} · {progress.season}</p><h4 className="mt-2 font-display text-3xl font-black text-white">Level {progress.level}</h4><p className="mt-1 text-sm text-white/45">{progress.xp.toLocaleString()} XP · {progress.runs} completed runs</p></div><div className="flex gap-2"><div className="rounded-2xl border border-neon-blue/20 bg-neon-blue/[0.08] px-3 py-3 text-right"><p className="font-display text-xl font-black text-neon-blue">{progress.pulseShards.toLocaleString()}</p><p className="text-[9px] font-black uppercase tracking-wider text-white/35">Shards</p></div><div className="rounded-2xl border border-white/10 bg-black/20 px-3 py-3 text-right"><p className="font-display text-xl font-black text-neon-orange">{progress.fullCombos}</p><p className="text-[9px] font-black uppercase tracking-wider text-white/35">Full combos</p></div></div></div>
-                      <div className="mt-5 h-2 overflow-hidden rounded-full bg-black/25"><div className="h-full rounded-full bg-gradient-to-r from-neon-orange to-neon-purple" style={{ width: `${Math.min(100, ((progress.xp % 900) / 900) * 100)}%` }} /></div>
-                      <div className="mt-4 flex flex-wrap gap-2">{progress.achievements.slice(-4).map((achievement) => <span key={achievement} className="rounded-full border border-white/10 bg-black/20 px-2.5 py-1 text-[9px] font-bold uppercase tracking-wider text-white/50">{achievement.replace(/-/g, ' ')}</span>)}{progress.achievements.length === 0 && <span className="text-xs text-white/35">Finish a run to begin your collection.</span>}</div>
-                    </div>
-                    <div className="rounded-2xl border border-neon-purple/20 bg-neon-purple/[0.05] p-5">
-                      <div className="flex items-start justify-between gap-3"><div><p className="text-[10px] font-black uppercase tracking-[0.2em] text-neon-purple">Profile loadout</p><h4 className="mt-1 font-display text-xl font-black text-white">Show your rewards</h4><p className="mt-1 text-xs text-white/40">Unlock and equip avatars, titles, badges, and frames as you level up.</p></div><div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-white/15 bg-gradient-to-br from-neon-blue/25 to-neon-purple/35 font-display text-xl font-black text-white">{progress.selectedAvatar.charAt(0).toUpperCase()}</div></div>
-                      <div className="mt-5 grid gap-3 sm:grid-cols-2"><label className="text-[10px] font-black uppercase tracking-wider text-white/35">Avatar<select value={progress.selectedAvatar} onChange={(event) => handleProfileLoadout({ selectedAvatar: event.target.value as PlayerProgress['selectedAvatar'] })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm font-bold capitalize text-white outline-none focus:border-neon-purple/50">{progress.unlockedAvatars.map((avatar) => <option key={avatar} value={avatar}>{avatar}</option>)}</select></label><label className="text-[10px] font-black uppercase tracking-wider text-white/35">Profile frame<select value={progress.selectedFrame} onChange={(event) => handleProfileLoadout({ selectedFrame: event.target.value as PlayerProgress['selectedFrame'] })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm font-bold capitalize text-white outline-none focus:border-neon-purple/50">{progress.unlockedFrames.map((frame) => <option key={frame} value={frame}>{frame}</option>)}</select></label><label className="text-[10px] font-black uppercase tracking-wider text-white/35">Title<select value={progress.selectedTitle} onChange={(event) => handleProfileLoadout({ selectedTitle: event.target.value as PlayerProgress['selectedTitle'] })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm font-bold capitalize text-white outline-none focus:border-neon-purple/50">{progress.unlockedTitles.map((title) => <option key={title} value={title}>{title.replace(/-/g, ' ')}</option>)}</select></label><label className="text-[10px] font-black uppercase tracking-wider text-white/35">Badge<select value={progress.selectedBadge || ''} onChange={(event) => handleProfileLoadout({ selectedBadge: event.target.value ? event.target.value as NonNullable<PlayerProgress['selectedBadge']> : undefined })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm font-bold capitalize text-white outline-none focus:border-neon-purple/50"><option value="">No badge</option>{progress.unlockedBadges.map((badge) => <option key={badge} value={badge}>{badge}</option>)}</select></label><label className="text-[10px] font-black uppercase tracking-wider text-white/35">Title color<select value={progress.selectedTitleColor} onChange={(event) => handleProfileLoadout({ selectedTitleColor: event.target.value as PlayerProgress['selectedTitleColor'] })} className="mt-2 w-full rounded-xl border border-white/10 bg-black/25 px-3 py-2.5 text-sm font-bold capitalize text-white outline-none focus:border-neon-purple/50">{progress.unlockedTitleColors.map((color) => <option key={color} value={color}>{color}</option>)}</select></label></div>
-                      <div className="mt-5 border-t border-white/8 pt-4"><div className="flex items-center justify-between"><p className="text-[10px] font-black uppercase tracking-[0.18em] text-white/35">Next rewards</p><span className="text-[10px] font-mono text-neon-blue">Lvl {upcomingLevelRewards[0]?.level || progress.level}</span></div><div className="mt-3 space-y-2">{upcomingLevelRewards.map((reward) => <div key={reward.id} className="flex items-center justify-between gap-3 rounded-xl bg-black/20 px-3 py-2.5"><div className="min-w-0"><p className="truncate text-xs font-bold text-white">{reward.label}</p><p className="mt-0.5 truncate text-[10px] text-white/35">Level {reward.level} · {reward.description}</p></div><span className="rounded-full border border-white/10 px-2 py-1 text-[8px] font-black uppercase tracking-wider text-neon-purple">{reward.kind}</span></div>)}{upcomingLevelRewards.length === 0 && <p className="text-xs text-white/35">You have collected every current level reward.</p>}</div></div>
-                    </div>
-                    <div className="bg-white/5 border border-white/5 p-6 rounded-2xl">
-                      <div className="mb-5">
-                        <h4 className="font-display font-bold text-white flex items-center gap-2">
-                          <SettingsIcon className="w-5 h-5 text-neon-purple" />
-                          Quick Settings
-                        </h4>
-                        <p className="text-white/50 text-sm mt-2">
-                          The everyday controls in one spot.
-                        </p>
-                      </div>
-
-                      <div className="space-y-4">
-                        <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                          <label className="block text-[10px] font-bold uppercase tracking-[0.2em] text-white/40 mb-3">
-                            Username
-                          </label>
-                          <input
-                            type="text"
-                            value={username}
-                            onChange={(e) => setUsername(e.target.value)}
-                            className="w-full bg-black/30 border border-white/10 rounded-xl p-3 text-white focus:border-neon-purple outline-none transition-all"
-                            placeholder="Enter username"
-                          />
-                        </div>
-
-                        <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                          <div className="flex items-center justify-between gap-3 mb-4">
-                            <div>
-                              <h5 className="text-sm font-bold text-white">Master Volume</h5>
-                              <p className="text-xs text-white/40 mt-1">Adjust the overall game volume.</p>
-                            </div>
-                            <span className="text-neon-blue font-mono text-sm">{formatPercentLabel(localSettings.volume)}</span>
-                          </div>
-                          <input
-                            type="range"
-                            min="0"
-                            max="1"
-                            step="0.05"
-                            value={localSettings.volume}
-                            onChange={(e) => {
-                              const newSettings = { ...localSettings, volume: parseFloat(e.target.value) };
-                              setLocalSettings(newSettings);
-                              onSaveSettings(newSettings);
-                            }}
-                            className="w-full accent-neon-blue h-2 bg-white/10 rounded-lg appearance-none cursor-pointer"
-                          />
-                        </div>
-
-                        <div className="rounded-2xl border border-white/8 bg-black/20 p-4 flex items-center justify-between gap-4">
-                          <div>
-                            <h5 className="text-sm font-bold text-white">Visual Effects</h5>
-                            <p className="text-xs text-white/40 mt-1">Hit flashes and particles.</p>
-                          </div>
-                          <div className="flex items-center gap-3">
-                            <span className={`text-[10px] font-bold uppercase tracking-[0.2em] ${localSettings.visualEffects ? 'text-neon-green' : 'text-white/30'}`}>
-                              {localSettings.visualEffects ? 'On' : 'Off'}
-                            </span>
-                            <button
-                              onClick={() => {
-                                const newSettings = { ...localSettings, visualEffects: !localSettings.visualEffects };
-                                setLocalSettings(newSettings);
-                                onSaveSettings(newSettings);
-                              }}
-                              className={`w-14 h-8 rounded-full transition-colors relative ${localSettings.visualEffects ? 'bg-neon-green' : 'bg-white/20'}`}
-                            >
-                              <div className={`absolute top-1 w-6 h-6 rounded-full bg-white transition-all ${localSettings.visualEffects ? 'left-7' : 'left-1'}`} />
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
-                          <div className="mb-4"><h5 className="text-sm font-bold text-white">Accessibility</h5><p className="mt-1 text-xs text-white/40">Tune the playfield for comfort and readability.</p></div>
-                          <label className="text-[10px] font-black uppercase tracking-[0.16em] text-white/40">Lane colors</label>
-                          <select aria-label="Lane color theme" value={localSettings.laneTheme} onChange={(event) => { const nextSettings = { ...localSettings, laneTheme: event.target.value as Settings['laneTheme'] }; setLocalSettings(nextSettings); onSaveSettings(nextSettings); }} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white outline-none focus:border-neon-blue/50">{progress.unlockedLaneThemes.map((theme) => <option key={theme} value={theme}>{theme === 'colorblind' ? 'Colorblind safe' : theme.replace(/-/g, ' ')}</option>)}</select>
-                          <label className="mt-4 block text-[10px] font-black uppercase tracking-[0.16em] text-white/40">Hit sound</label>
-                          <select aria-label="Hit sound" value={localSettings.hitSound} onChange={(event) => { const nextSettings = { ...localSettings, hitSound: event.target.value as Settings['hitSound'] }; setLocalSettings(nextSettings); onSaveSettings(nextSettings); }} className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm capitalize text-white outline-none focus:border-neon-blue/50">{progress.unlockedHitSounds.map((sound) => <option key={sound} value={sound}>{sound}</option>)}</select>
-                          <div className="mt-4 grid grid-cols-3 gap-2">{progress.unlockedThemes.map((theme) => <button key={theme} type="button" aria-pressed={localSettings.visualTheme === theme} onClick={() => { const nextSettings = { ...localSettings, visualTheme: theme }; setLocalSettings(nextSettings); onSaveSettings(nextSettings); }} className={`rounded-xl border px-2 py-2 text-[9px] font-black uppercase tracking-wider ${localSettings.visualTheme === theme ? 'border-neon-purple/45 bg-neon-purple/15 text-white' : 'border-white/10 text-white/45 hover:bg-white/10'}`}>{theme}</button>)}</div>
-                          <div className="mt-4 space-y-2">{([
-                            ['reducedMotion', 'Reduced motion', 'Keeps feedback clear with less movement.'],
-                            ['largeNotes', 'Larger notes', 'Makes notes and receptors easier to read.'],
-                            ['hapticFeedback', 'Haptic feedback', 'Uses a short vibration when your device supports it.'],
-                          ] as Array<[keyof Pick<Settings, 'reducedMotion' | 'largeNotes' | 'hapticFeedback'>, string, string]>).map(([key, label, hint]) => <button key={key} type="button" aria-pressed={localSettings[key]} onClick={() => { const nextSettings = { ...localSettings, [key]: !localSettings[key] }; setLocalSettings(nextSettings); onSaveSettings(nextSettings); }} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left ${localSettings[key] ? 'border-neon-green/25 bg-neon-green/[0.07]' : 'border-white/8 bg-black/10'}`}><span><span className="block text-xs font-bold text-white">{label}</span><span className="mt-0.5 block text-[10px] text-white/35">{hint}</span></span><span className={`h-2.5 w-2.5 rounded-full ${localSettings[key] ? 'bg-neon-green shadow-[0_0_8px_#39ff14]' : 'bg-white/20'}`} /></button>)}</div>
-                        </div>
-                      </div>
-                    </div>
-                    <div className="rounded-2xl border border-neon-blue/20 bg-neon-blue/[0.05] p-6">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div><h4 className="font-display font-bold text-white">Practice & modifiers</h4><p className="mt-1 text-xs text-white/40">Practice tools are local only. Modified runs do not enter leaderboards.</p></div>
-                        <button type="button" onClick={() => updateGameplayOptions({ practiceMode: !gameplayOptions.practiceMode })} className={`rounded-full border px-3 py-1.5 text-[10px] font-black uppercase tracking-wider ${gameplayOptions.practiceMode ? 'border-neon-green/35 bg-neon-green/15 text-neon-green' : 'border-white/10 bg-black/20 text-white/40'}`}>{gameplayOptions.practiceMode ? 'Practice on' : 'Practice off'}</button>
-                      </div>
-
-                      <div className="mt-5 rounded-2xl border border-white/8 bg-black/20 p-4">
-                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Input offset</p><p className="mt-1 text-xs text-white/40">Calibrate how early or late your taps register.</p></div><span className="font-mono text-sm text-neon-blue">{gameplayOptions.inputOffsetMs > 0 ? '+' : ''}{gameplayOptions.inputOffsetMs} ms</span></div>
-                        <input aria-label="Input timing offset" type="range" min="-120" max="120" step="5" value={gameplayOptions.inputOffsetMs} onChange={(event) => updateGameplayOptions({ inputOffsetMs: parseInt(event.target.value, 10) })} className="mt-4 h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue" />
-                      </div>
-
-                      <div className="mt-4">
-                        <TimingCalibration
-                          audioContext={audioContext}
-                          volume={localSettings.volume}
-                          currentOffsetMs={gameplayOptions.inputOffsetMs}
-                          onApply={(inputOffsetMs) => updateGameplayOptions({ inputOffsetMs })}
-                        />
-                      </div>
-
-                      <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
-                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Practice pace</p><p className="mt-1 text-xs text-white/40">Slows audio and chart timing together.</p></div><span className="font-mono text-sm text-neon-green">{gameplayOptions.practiceSpeed.toFixed(2).replace(/0$/, '')}x</span></div>
-                        <div className="mt-3 grid grid-cols-3 gap-2">{[0.5, 0.75, 1].map((speed) => <button key={speed} type="button" disabled={!gameplayOptions.practiceMode} aria-pressed={gameplayOptions.practiceSpeed === speed} onClick={() => updateGameplayOptions({ practiceSpeed: speed })} className={`rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-wider disabled:opacity-30 ${gameplayOptions.practiceSpeed === speed ? 'border-neon-green/35 bg-neon-green/10 text-neon-green' : 'border-white/8 text-white/45 hover:bg-white/10'}`}>{speed.toFixed(2).replace(/0$/, '')}x</button>)}</div>
-                      </div>
-
-                      <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
-                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Scroll speed</p><p className="mt-1 text-xs text-white/40">Changes note spacing without changing the chart.</p></div><span className="font-mono text-sm text-neon-blue">{gameplayOptions.scrollSpeed.toFixed(1)}x</span></div>
-                        <input aria-label="Default note scroll speed" type="range" min="0.6" max="1.6" step="0.1" value={gameplayOptions.scrollSpeed} onChange={(event) => updateGameplayOptions({ scrollSpeed: parseFloat(event.target.value) })} className="mt-4 h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue" />
-                      </div>
-
-                      <div className="mt-4 grid grid-cols-2 gap-2">{([
-                        ['hiddenNotes', 'Hidden', 'Notes fade before the hit line.'],
-                        ['mirrorLanes', 'Mirror', 'Flip the lane layout.'],
-                        ['randomLanes', 'Random', 'Shuffle the lane order.'],
-                        ['noFail', 'No fail', 'Keep playing when health runs out.'],
-                      ] as Array<[keyof Pick<GameplayOptions, 'hiddenNotes' | 'mirrorLanes' | 'randomLanes' | 'noFail'>, string, string]>).map(([key, label, hint]) => <button key={key} type="button" aria-pressed={gameplayOptions[key]} onClick={() => updateGameplayOptions({ [key]: !gameplayOptions[key] })} className={`rounded-2xl border p-3 text-left transition ${gameplayOptions[key] ? 'border-neon-purple/35 bg-neon-purple/10 text-white' : 'border-white/8 bg-black/20 text-white/55 hover:bg-white/5'}`}><p className="text-xs font-black uppercase tracking-wider">{label}</p><p className="mt-1 text-[10px] leading-relaxed text-white/35">{hint}</p></button>)}</div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <SettingsPanel
+                activeKeybindIndex={activeKeybindIndex}
+                advancedChartMode={advancedChartMode}
+                advancedControls={advancedControls}
+                audioContext={audioContext}
+                chartProfileRows={chartProfileRows}
+                complexity={complexity}
+                difficultyPreset={difficultyPreset}
+                gameplayOptions={gameplayOptions}
+                handleProfileLoadout={handleProfileLoadout}
+                keybindingPrompt={keybindingPrompt}
+                localSettings={localSettings}
+                onSaveSettings={onSaveSettings}
+                progress={progress}
+                resetChartSettings={resetChartSettings}
+                selectDifficultyPreset={selectDifficultyPreset}
+                setActiveKeybindIndex={setActiveKeybindIndex}
+                setComplexity={setComplexity}
+                setLocalSettings={setLocalSettings}
+                setUsername={setUsername}
+                toggleAdvancedChartMode={toggleAdvancedChartMode}
+                upcomingLevelRewards={upcomingLevelRewards}
+                updateGameplayOptions={updateGameplayOptions}
+                username={username}
+              />
             ) : (
               <div className="grid gap-3 md:grid-cols-3">
                 <div className="rounded-2xl border border-neon-blue/15 bg-neon-blue/[0.05] p-5">

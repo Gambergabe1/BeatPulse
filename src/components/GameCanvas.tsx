@@ -1,9 +1,28 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_GAMEPLAY_OPTIONS, GameplayOptions, JudgementSummary, Note, GameState, Settings, SongSection } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
-import { FastForward, Home, Pause, Play, RotateCcw } from 'lucide-react';
+import { FastForward, Home, Pause, Play } from 'lucide-react';
 import { MultiplayerRoom } from '../services/pulseApi';
 import { prefersMovingSliders } from '../utils/device';
+import {
+  LANE_COUNT,
+  NOTE_SPEED,
+  HOLD_GRACE_SECONDS,
+  SOLO_LEAD_IN_SECONDS,
+  SKIPPABLE_INTRO_SECONDS,
+  LANE_THEMES,
+  VISUAL_BACKGROUNDS,
+  TIMING_PRESETS,
+  HoldTracker,
+  getSlideProgress,
+  getSlideLanePosition,
+  getRequiredSlideLane,
+  fillTimeline,
+  emptyJudgements,
+  createLaneOrder,
+  estimateVisualBeat,
+} from './game/gameplayRules';
+import { PauseMenu } from './game/PauseMenu';
 
 interface GameCanvasProps {
   notes: Note[];
@@ -26,92 +45,6 @@ interface GameCanvasProps {
   synchronizedStartAt?: string;
   onMultiplayerProgress?: (progress: { score: number; combo: number; accuracy: number; progress: number }) => void;
 }
-
-const LANE_COUNT = 4;
-const NOTE_SPEED = 600; // pixels per second
-const HOLD_GRACE_SECONDS = 0.115;
-const SOLO_LEAD_IN_SECONDS = 3;
-/** Intros longer than this (before the first note) can be skipped. */
-const SKIPPABLE_INTRO_SECONDS = 6;
-const LANE_THEMES = {
-  pulse: ['#00f3ff', '#a855f7', '#ff4fcf', '#65ff8f'],
-  colorblind: ['#56b4e9', '#e69f00', '#009e73', '#cc79a7'],
-  'high-contrast': ['#00e5ff', '#ffea00', '#ff6e40', '#76ff03'],
-  ocean: ['#38bdf8', '#22d3ee', '#2dd4bf', '#60a5fa'],
-  sunset: ['#fb7185', '#fb923c', '#facc15', '#c084fc'],
-} as const;
-const VISUAL_BACKGROUNDS = {
-  pulse: 'radial-gradient(circle at 50% 20%, rgba(99,102,241,0.12), transparent 38%), radial-gradient(circle at 16% 75%, rgba(0,243,255,0.06), transparent 32%), radial-gradient(circle at 84% 72%, rgba(188,19,254,0.07), transparent 32%)',
-  aurora: 'radial-gradient(circle at 50% 12%, rgba(34,197,94,0.14), transparent 38%), radial-gradient(circle at 12% 72%, rgba(56,189,248,0.08), transparent 34%), radial-gradient(circle at 86% 70%, rgba(16,185,129,0.09), transparent 32%)',
-  sunset: 'radial-gradient(circle at 50% 18%, rgba(251,146,60,0.15), transparent 38%), radial-gradient(circle at 16% 76%, rgba(244,63,94,0.08), transparent 32%), radial-gradient(circle at 82% 72%, rgba(168,85,247,0.09), transparent 34%)',
-} as const;
-const TIMING_PRESETS = [
-  { id: 'relaxed', label: 'Relaxed', hitWindow: 0.22, perfectWindow: 0.08, description: 'More room around every note.' },
-  { id: 'standard', label: 'Standard', hitWindow: 0.15, perfectWindow: 0.05, description: 'Balanced timing for normal play.' },
-  { id: 'precise', label: 'Precise', hitWindow: 0.11, perfectWindow: 0.035, description: 'Tighter timing for competitive runs.' },
-] as const;
-
-interface HoldTracker {
-  nextTickTime: number;
-  tickInterval: number;
-  lastValidTime: number;
-  lastRequiredLane: number;
-  headWeight: number;
-}
-
-const getSlideProgress = (note: Note, time: number) =>
-  note.duration ? Math.max(0, Math.min(1, (time - note.time) / note.duration)) : 0;
-
-const getSlideLanePosition = (note: Note, time: number) => {
-  const endLane = note.endLane ?? note.lane;
-  const progress = getSlideProgress(note, time);
-  const easedProgress = progress * progress * (3 - 2 * progress);
-  return note.lane + (endLane - note.lane) * easedProgress;
-};
-
-const getRequiredSlideLane = (note: Note, time: number) =>
-  Math.round(getSlideLanePosition(note, time));
-
-/** Carries the last known score forward over seconds with no sample (pauses, skipped intros). */
-const fillTimeline = (timeline: number[]) => {
-  const filled: number[] = [];
-  let last = 0;
-  for (let second = 0; second < timeline.length; second++) {
-    if (typeof timeline[second] === 'number') last = timeline[second];
-    filled.push(last);
-  }
-  return filled;
-};
-
-const emptyJudgements = (): JudgementSummary => ({ perfect: 0, great: 0, miss: 0, holdBreak: 0, timingOffsets: [] });
-
-const createLaneOrder = (notes: Note[]) => {
-  let seed = notes.reduce((value, note) => {
-    for (const character of note.id) value = ((value << 5) - value + character.charCodeAt(0)) | 0;
-    return value;
-  }, notes.length * 97) >>> 0;
-  const order = [0, 1, 2, 3];
-  for (let index = order.length - 1; index > 0; index--) {
-    seed = (seed * 1664525 + 1013904223) >>> 0;
-    const target = seed % (index + 1);
-    [order[index], order[target]] = [order[target], order[index]];
-  }
-  return order;
-};
-
-const estimateVisualBeat = (notes: Note[]) => {
-  const uniqueTimes = [...new Set(notes.map((note) => Number(note.time.toFixed(3))))].sort((a, b) => a - b);
-  const intervals: number[] = [];
-  for (let i = 1; i < uniqueTimes.length; i++) {
-    const interval = uniqueTimes[i] - uniqueTimes[i - 1];
-    if (interval >= 0.14 && interval <= 1.1) intervals.push(interval);
-  }
-  intervals.sort((a, b) => a - b);
-  let interval = intervals[Math.floor(intervals.length / 2)] ?? 0.5;
-  while (interval < 0.34) interval *= 2;
-  while (interval > 0.78) interval /= 2;
-  return { interval, origin: notes[0]?.time ?? 0 };
-};
 
 export const GameCanvas: React.FC<GameCanvasProps> = ({
   notes,
@@ -1405,145 +1338,34 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
       </button>
 
       {isPaused && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center overflow-y-auto bg-[#02040a]/85 p-4 backdrop-blur-xl">
-          <div className="my-auto w-full max-w-md rounded-[30px] border border-white/10 bg-[#080b15]/95 p-5 shadow-[0_30px_90px_rgba(0,0,0,0.6)] sm:p-7">
-            <div className="mb-6 flex items-center justify-between gap-4">
-              <div>
-                <p className="text-[10px] font-black uppercase tracking-[0.25em] text-neon-blue">Game paused</p>
-                <h2 className="mt-1 font-display text-4xl font-black text-white">Take a breath</h2>
-              </div>
-              <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1 text-[10px] font-bold uppercase tracking-widest text-white/35">
-                {Math.round(Math.max(0, Math.min(1, gameState.currentTime / gameState.duration)) * 100)}%
-              </span>
-            </div>
-
-            <div className="rounded-2xl border border-white/8 bg-black/20 p-4">
-              <div className="mb-4 flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-sm font-bold text-white">Scroll speed</p>
-                  <p className="mt-1 text-xs text-white/40">Changes spacing, not chart difficulty.</p>
-                </div>
-                <span className="font-mono text-sm text-neon-blue">{noteSpeedMultiplier.toFixed(1)}x</span>
-              </div>
-              <input
-                aria-label="Note scroll speed"
-                type="range"
-                min="0.5"
-                max="2"
-                step="0.1"
-                value={noteSpeedMultiplier}
-                onChange={(e) => setNoteSpeedMultiplier(parseFloat(e.target.value))}
-                className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue"
-              />
-            </div>
-
-            {isReplay && <div className="mt-4 rounded-2xl border border-neon-blue/20 bg-neon-blue/[0.05] p-4">
-              <div className="flex items-start justify-between gap-3"><div><p className="text-sm font-bold text-white">Replay controls</p><p className="mt-1 text-xs text-white/40">Study the input stream at your own pace.</p></div><select aria-label="Replay speed" value={replayPlaybackSpeed} onChange={(event) => setReplaySpeed(Number(event.target.value))} className="rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 text-xs font-bold text-neon-blue outline-none"><option value={0.5}>0.5×</option><option value={0.75}>0.75×</option><option value={1}>1×</option><option value={1.25}>1.25×</option><option value={1.5}>1.5×</option></select></div>
-              <label className="mt-4 block text-[10px] font-black uppercase tracking-wider text-white/35">Timeline marker <span className="float-right font-mono text-neon-blue">{replaySeekTime.toFixed(1)}s</span><input aria-label="Replay timeline" type="range" min="0" max={Math.max(0, gameState.duration - 0.05)} step="0.1" value={replaySeekTime} onChange={(event) => setReplaySeekTime(Number(event.target.value))} className="mt-2 h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue" /></label>
-              <button type="button" onClick={() => restartPracticeAt(replaySeekTime)} className="mt-3 w-full rounded-xl border border-neon-blue/30 bg-neon-blue/10 px-3 py-2.5 text-[10px] font-black uppercase tracking-wider text-neon-blue transition hover:bg-neon-blue hover:text-black">Jump to marker</button>
-              <div className="mt-3 flex flex-wrap gap-1.5">{replayEvents.filter((event) => event.time >= replaySeekTime).slice(0, 6).map((event, index) => <span key={`${event.time}-${event.lane}-${index}`} className="rounded-lg border border-white/10 bg-black/25 px-2 py-1 text-[9px] font-bold uppercase tracking-wider text-white/55">{event.time.toFixed(1)}s · Lane {event.lane + 1} · {event.type.replace(/_/g, ' ')}</span>)}</div>
-            </div>}
-
-            {isPracticeMode && <div className="mt-4 rounded-2xl border border-neon-green/20 bg-neon-green/[0.05] p-4">
-              <div className="flex items-start justify-between gap-4"><div><p className="text-sm font-bold text-white">Practice tools</p><p className="mt-1 text-xs text-white/40">Loop a rough spot or let BeatPulse demonstrate it.</p></div><span className="rounded-full border border-neon-green/25 bg-neon-green/10 px-2 py-1 text-[9px] font-black uppercase tracking-wider text-neon-green">Unranked</span></div>
-              <div className="mt-4 grid grid-cols-2 gap-2">
-                <button type="button" onClick={() => { const start = Math.max(0, gameStateRef.current.currentTime); updatePracticeLoop({ start, end: practiceLoopRef.current?.end && practiceLoopRef.current.end > start ? practiceLoopRef.current.end : undefined }); }} className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[10px] font-black uppercase tracking-wider text-white/65 hover:bg-white/10">Set A</button>
-                <button type="button" onClick={() => { const end = Math.min(audioBuffer.duration, gameStateRef.current.currentTime); const start = practiceLoopRef.current?.start ?? Math.max(0, end - 4); updatePracticeLoop({ start: Math.min(start, Math.max(0, end - 0.5)), end: Math.max(end, start + 0.5) }); }} className="rounded-xl border border-white/10 bg-black/20 px-3 py-3 text-[10px] font-black uppercase tracking-wider text-white/65 hover:bg-white/10">Set B</button>
-                <button type="button" disabled={!practiceLoop} onClick={() => restartPracticeAt(practiceLoop.start)} className="rounded-xl border border-neon-blue/25 bg-neon-blue/10 px-3 py-3 text-[10px] font-black uppercase tracking-wider text-neon-blue disabled:opacity-30">Restart loop</button>
-                <button type="button" onClick={previewPracticeSection} className="rounded-xl border border-neon-purple/25 bg-neon-purple/10 px-3 py-3 text-[10px] font-black uppercase tracking-wider text-neon-purple">Autoplay preview</button>
-              </div>
-              <p className="mt-3 text-[10px] text-white/35">{practiceLoop?.end ? `Looping ${practiceLoop.start.toFixed(1)}s–${practiceLoop.end.toFixed(1)}s.` : practiceLoop ? `Loop starts at ${practiceLoop.start.toFixed(1)}s. Set B to finish it.` : 'Set A and B to repeat a section.'}</p>
-            </div>}
-
-            <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
-              <div className="mb-4">
-                <p className="text-sm font-bold text-white">Timing assist</p>
-                <p className="mt-1 text-xs text-white/40">
-                  {activeTimingPreset?.description ?? 'Custom timing windows are active.'}
-                </p>
-              </div>
-              <div className="grid grid-cols-3 gap-2">
-                {TIMING_PRESETS.map((preset) => {
-                  const isSelected = activeTimingPreset?.id === preset.id;
-                  return (
-                    <button
-                      key={preset.id}
-                      type="button"
-                      aria-pressed={isSelected}
-                      onClick={() => applyTimingPreset(preset)}
-                      className={`rounded-xl border px-2 py-3 text-[10px] font-black uppercase tracking-[0.12em] transition-all ${
-                        isSelected
-                          ? 'border-neon-purple/50 bg-neon-purple/15 text-white'
-                          : 'border-white/8 bg-white/[0.035] text-white/40 hover:bg-white/10 hover:text-white'
-                      }`}
-                    >
-                      {preset.label}
-                    </button>
-                  );
-                })}
-              </div>
-
-              <details className="mt-4 border-t border-white/8 pt-4">
-                <summary className="cursor-pointer text-[10px] font-black uppercase tracking-[0.16em] text-white/40 transition-colors hover:text-white">
-                  Fine tune timing
-                </summary>
-                <div className="mt-4 space-y-4">
-                  <div>
-                    <label className="mb-2 flex items-center justify-between text-xs text-white/55">
-                      Hit window <span className="font-mono text-white/35">{Math.round(hitWindow * 1000)} ms</span>
-                    </label>
-                    <input
-                      aria-label="Hit timing window"
-                      type="range"
-                      min="0.05"
-                      max="0.3"
-                      step="0.005"
-                      value={hitWindow}
-                      onChange={(e) => setHitWindow(Math.max(perfectWindow, parseFloat(e.target.value)))}
-                      className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-purple"
-                    />
-                  </div>
-                  <div>
-                    <label className="mb-2 flex items-center justify-between text-xs text-white/55">
-                      Perfect window <span className="font-mono text-white/35">{Math.round(perfectWindow * 1000)} ms</span>
-                    </label>
-                    <input
-                      aria-label="Perfect timing window"
-                      type="range"
-                      min="0.01"
-                      max="0.1"
-                      step="0.005"
-                      value={perfectWindow}
-                      onChange={(e) => setPerfectWindow(Math.min(hitWindow, parseFloat(e.target.value)))}
-                      className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-purple"
-                    />
-                  </div>
-                </div>
-              </details>
-            </div>
-
-            <button
-              onClick={resumeGame}
-              className="mt-5 flex w-full items-center justify-center gap-2 rounded-2xl bg-neon-blue px-8 py-4 font-display font-black uppercase tracking-widest text-black transition-all hover:bg-white"
-            >
-              <Play className="h-5 w-5 fill-current" /> Resume
-            </button>
-            {onRestart && (
-              <button
-                onClick={() => {
-                  stopGame();
-                  onRestart();
-                }}
-                className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl border border-white/15 bg-white/5 px-8 py-3.5 font-display font-black uppercase tracking-widest text-white transition-all hover:bg-white/10"
-              >
-                <RotateCcw className="h-5 w-5" /> Restart
-              </button>
-            )}
-            <p className="mt-4 text-center text-[10px] font-bold uppercase tracking-[0.18em] text-white/30">
-              Esc resume{onRestart ? ' · ` restart' : ''}
-            </p>
-          </div>
-        </div>
+        <PauseMenu
+          activeTimingPreset={activeTimingPreset}
+          applyTimingPreset={applyTimingPreset}
+          audioBuffer={audioBuffer}
+          gameState={gameState}
+          gameStateRef={gameStateRef}
+          hitWindow={hitWindow}
+          isPracticeMode={isPracticeMode}
+          isReplay={isReplay}
+          noteSpeedMultiplier={noteSpeedMultiplier}
+          onRestart={onRestart}
+          perfectWindow={perfectWindow}
+          practiceLoop={practiceLoop}
+          practiceLoopRef={practiceLoopRef}
+          previewPracticeSection={previewPracticeSection}
+          replayEvents={replayEvents}
+          replayPlaybackSpeed={replayPlaybackSpeed}
+          replaySeekTime={replaySeekTime}
+          restartPracticeAt={restartPracticeAt}
+          resumeGame={resumeGame}
+          setHitWindow={setHitWindow}
+          setNoteSpeedMultiplier={setNoteSpeedMultiplier}
+          setPerfectWindow={setPerfectWindow}
+          setReplaySeekTime={setReplaySeekTime}
+          setReplaySpeed={setReplaySpeed}
+          stopGame={stopGame}
+          updatePracticeLoop={updatePracticeLoop}
+        />
       )}
     </div>
   );

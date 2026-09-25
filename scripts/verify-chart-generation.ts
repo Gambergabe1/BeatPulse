@@ -192,5 +192,78 @@ for (const [startBpm, endBpm] of [[127.3, 127.3], [143.7, 143.7], [118, 121.5]])
   assert(breakdownNotes.length <= 16 && breakdownNotes.every((note) => note.duration), 'breakdowns must not be filled with ghost taps');
 }
 
+// Musical placement: bass hits lean to the left lanes, bright hits to the right, and a
+// repeated chorus reuses the lanes it was charted with the first time.
+{
+  let noiseSeed = 7;
+  const noise = () => ((noiseSeed = (noiseSeed * 1664525 + 1013904223) >>> 0) / 4294967296) * 2 - 1;
+  const addKick = (data: Float32Array, time: number, gain = 1) => {
+    for (let offset = 0; offset < sampleRate * 0.12; offset++) {
+      const index = Math.floor(time * sampleRate) + offset;
+      if (index >= data.length) break;
+      const age = offset / sampleRate;
+      data[index] += Math.sin(2 * Math.PI * (55 + 60 * Math.exp(-age * 30)) * age) * Math.exp(-age * 22) * 0.8 * gain;
+    }
+  };
+  let previousNoise = 0;
+  const addHat = (data: Float32Array, time: number, gain = 1) => {
+    for (let offset = 0; offset < sampleRate * 0.05; offset++) {
+      const index = Math.floor(time * sampleRate) + offset;
+      if (index >= data.length) break;
+      const value = noise();
+      data[index] += (value - previousNoise) * Math.exp(-(offset / sampleRate) * 70) * 0.35 * gain;
+      previousNoise = value;
+    }
+  };
+  const asBuffer = (data: Float32Array) => ({ length: data.length, duration: data.length / sampleRate, sampleRate, numberOfChannels: 1, getChannelData: () => data }) as unknown as AudioBuffer;
+  const hardChart = { ...getChartSettingsForDifficulty(DIFFICULTY_PRESETS[2].value), allowMovingSliders: false };
+
+  const pitchTrack = new Float32Array(sampleRate * 40);
+  const kicks: number[] = [];
+  const hats: number[] = [];
+  for (let time = 0.4; time < 39; time += 0.5) {
+    addKick(pitchTrack, time);
+    addHat(pitchTrack, time + 0.25);
+    kicks.push(time);
+    hats.push(time + 0.25);
+  }
+  const pitchNotes = await generateNotesFromAudio(asBuffer(pitchTrack), hardChart);
+  const near = (times: number[], time: number) => times.some((entry) => Math.abs(entry - time) < 0.03);
+  const kickNotes = pitchNotes.filter((note) => near(kicks, note.time));
+  const hatNotes = pitchNotes.filter((note) => near(hats, note.time));
+  const kickLeft = kickNotes.filter((note) => note.lane <= 1).length / kickNotes.length;
+  const hatRight = hatNotes.filter((note) => note.lane >= 2).length / hatNotes.length;
+  assert(kickLeft >= 0.58 && hatRight >= 0.55, `bass should lean left and bright hits right (left ${kickLeft.toFixed(2)}, right ${hatRight.toFixed(2)})`);
+
+  let motifSeed = 99;
+  const motif = Array.from({ length: 128 }, (_, index) => index % 4 === 0 ? 1 : ((motifSeed = (motifSeed * 1103515245 + 12345) >>> 0) % 3));
+  const songTrack = new Float32Array(sampleRate * 128);
+  for (let time = 0.4, step = 0; time < 127; time += 0.25, step++) {
+    const chorus = (time >= 32 && time < 64) || (time >= 96 && time < 128);
+    if (chorus) {
+      if (motif[step % 128] === 1) addKick(songTrack, time, 1.2);
+      if (motif[step % 128] === 2) addHat(songTrack, time, 1.3);
+    } else if (step % 2 === 0) {
+      addKick(songTrack, time, 0.45);
+    }
+  }
+  for (let index = 0; index < songTrack.length; index++) {
+    const time = index / sampleRate;
+    songTrack[index] += Math.sin(2 * Math.PI * 220 * time) * ((time >= 32 && time < 64) || time >= 96 ? 0.08 : 0.02);
+  }
+  const songNotes = await generateNotesFromAudio(asBuffer(songTrack), hardChart);
+  const firstChorus = songNotes.filter((note) => note.time >= 38 && note.time < 58);
+  const secondChorus = songNotes.filter((note) => note.time >= 102 && note.time < 118);
+  let matched = 0;
+  let sameLane = 0;
+  for (const note of secondChorus) {
+    const original = firstChorus.find((entry) => Math.abs(entry.time + 64 - note.time) < 0.03);
+    if (!original) continue;
+    matched += 1;
+    if (original.lane === note.lane) sameLane += 1;
+  }
+  assert(matched >= 5 && sameLane / matched >= 0.6, `a repeated chorus should reuse its lanes (${sameLane}/${matched})`);
+}
+
 console.table(results.map(({ chart: _chart, ...summary }) => summary));
 console.log('Chart generation checks passed.');

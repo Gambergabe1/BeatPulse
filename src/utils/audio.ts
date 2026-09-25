@@ -34,6 +34,8 @@ interface OnsetCandidate {
   sectionEnergy?: number;
   sustain?: number;
   beatPosition?: number;
+  /** 0 (bass-heavy) to 1 (bright), ranked against the rest of the song. */
+  brightness?: number;
 }
 
 interface TempoEstimate {
@@ -97,12 +99,13 @@ const mixToMono = mixAudioBufferToMono;
  * long windows: section labels should be stable and useful for a playfield
  * timeline, not flicker with every drum hit.
  */
-export const analyzeSongSections = (audioBuffer: AudioBuffer): SongSection[] => {
-  const duration = audioBuffer.duration;
+export const analyzeSongSections = (audioBuffer: AudioBuffer): SongSection[] =>
+  analyzeSectionsFromMono(mixToMono(audioBuffer), audioBuffer.sampleRate, audioBuffer.duration);
+
+const analyzeSectionsFromMono = (mono: Float32Array, sampleRate: number, duration: number): SongSection[] => {
   if (!Number.isFinite(duration) || duration <= 0) return [];
-  const mono = mixToMono(audioBuffer);
   const windowSeconds = clamp(duration / 9, 5.5, 12);
-  const windowSize = Math.max(1, Math.floor(audioBuffer.sampleRate * windowSeconds));
+  const windowSize = Math.max(1, Math.floor(sampleRate * windowSeconds));
   const windows: Array<{ start: number; end: number; energy: number }> = [];
 
   for (let start = 0; start < mono.length; start += windowSize) {
@@ -110,8 +113,8 @@ export const analyzeSongSections = (audioBuffer: AudioBuffer): SongSection[] => 
     let sum = 0;
     for (let index = start; index < end; index += 4) sum += mono[index] * mono[index];
     windows.push({
-      start: start / audioBuffer.sampleRate,
-      end: end / audioBuffer.sampleRate,
+      start: start / sampleRate,
+      end: end / sampleRate,
       energy: Math.sqrt(sum / Math.max(1, Math.ceil((end - start) / 4))),
     });
   }
@@ -469,10 +472,13 @@ const chooseSingleLane = (
   laneVariety: number,
   tempoFactor: number,
   laneHistory: number[],
-  random: () => number
+  random: () => number,
+  /** Lane the sound "belongs" in (low pitch left, high pitch right). */
+  pitchLane?: number,
+  pitchWeight = 0
 ) => {
   if (availableLanes.length <= 1) return availableLanes[0] ?? 0;
-  if (lastLane < 0) return availableLanes[Math.floor(random() * availableLanes.length)];
+  if (lastLane < 0 && pitchLane === undefined) return availableLanes[Math.floor(random() * availableLanes.length)];
 
   const recentWindow = laneHistory.slice(-4);
   const previousLane = laneHistory[laneHistory.length - 2] ?? -1;
@@ -488,8 +494,8 @@ const chooseSingleLane = (
 
   return [...availableLanes].sort((a, b) => {
     const score = (lane: number) => {
-      const distance = Math.abs(lane - lastLane);
-      const direction = Math.sign(lane - lastLane);
+      const distance = lastLane < 0 ? 0 : Math.abs(lane - lastLane);
+      const direction = lastLane < 0 ? 0 : Math.sign(lane - lastLane);
       return Math.min(distance, 2) * (0.5 + laneVariety * 0.5 + tempoFactor * 0.15)
         - (lane === lastLane ? 1.2 + tempoFactor * 0.45 : 0)
         - recentWindow.filter((value) => value === lane).length * 0.2
@@ -497,6 +503,7 @@ const chooseSingleLane = (
         + (directionRun >= 2 && direction === -recentDirection ? 0.42 : 0)
         + (lane === previousLane ? 0.2 : 0)
         + (!recentWindow.includes(lane) ? laneVariety * 0.15 : 0)
+        - (pitchLane !== undefined ? Math.abs(lane - pitchLane) * pitchWeight : 0)
         + random() * 0.18;
     };
     return score(b) - score(a);
@@ -519,6 +526,102 @@ const chooseChordLanes = (availableLanes: number[], random: () => number) => {
     }
   }
   return bestPair;
+};
+
+interface RepeatedSections {
+  /** Where a candidate sits within a repeated section, keyed to the first occurrence. */
+  locate: (candidate: OnsetCandidate) => { key: string; isRepeat: boolean } | null;
+  /** Whether the first occurrence had an onset at this position. */
+  referenceHas: (key: string) => boolean;
+}
+
+/**
+ * Finds sections that repeat (a second chorus, a returning verse) and lines each
+ * repeat up with its first occurrence by the bar offset where their onset patterns
+ * match best. Sections are only treated as repeats when the rhythm really matches.
+ */
+const findRepeatedSections = (
+  sections: SongSection[],
+  candidates: OnsetCandidate[],
+  beatAt: (time: number) => number,
+  downbeatPhase: number,
+  beatInterval: number,
+  envelopeAt: (time: number) => number
+): RepeatedSections => {
+  const barStart = (time: number) => {
+    const beat = beatAt(time);
+    const startBeat = downbeatPhase + Math.round((beat - downbeatPhase) / 4) * 4;
+    return { startBeat, startTime: time + (startBeat - beat) * beatInterval };
+  };
+  // Onset strength sampled on the half-beat grid: a rhythm fingerprint that does not
+  // depend on which onsets happened to become note candidates.
+  const fingerprint = (section: SongSection, startTime: number) => {
+    const values: number[] = [];
+    for (let time = startTime; time < section.end; time += beatInterval / 2) values.push(Math.log1p(envelopeAt(time)));
+    return values;
+  };
+  const similarity = (a: number[], b: number[], shift: number) => {
+    let dot = 0;
+    let normA = 0;
+    let normB = 0;
+    for (let i = 0; i < b.length; i++) {
+      const j = i + shift;
+      if (j < 0 || j >= a.length) continue;
+      const x = a[j] - 0.2;
+      const y = b[i] - 0.2;
+      dot += x * y;
+      normA += x * x;
+      normB += y * y;
+    }
+    return dot / Math.max(0.000001, Math.sqrt(normA * normB));
+  };
+
+  type Placement = { section: SongSection; startBeat: number; referenceId: string; shift: number; isRepeat: boolean };
+  const placements: Placement[] = [];
+  const referenceOffsets = new Map<string, Set<number>>();
+  const firstByKind = new Map<string, { section: SongSection; fingerprint: number[] }>();
+
+  for (const section of sections) {
+    if (section.kind !== 'chorus' && section.kind !== 'verse') continue;
+    const { startBeat, startTime } = barStart(section.start);
+    const print = fingerprint(section, startTime);
+    const reference = firstByKind.get(section.kind);
+    if (!reference) {
+      firstByKind.set(section.kind, { section, fingerprint: print });
+      referenceOffsets.set(section.id, new Set(candidates
+        .filter((candidate) => candidate.time >= section.start && candidate.time < section.end)
+        .map((candidate) => Math.round(((candidate.beatPosition ?? 0) - startBeat) * 2))));
+      placements.push({ section, startBeat, referenceId: section.id, shift: 0, isRepeat: false });
+      continue;
+    }
+    let bestShift = 0;
+    let bestScore = -1;
+    // Nearest shifts first; a farther shift must be clearly better, since periodic
+    // rhythms match equally well at many offsets.
+    for (const bars of [0, -1, 1, -2, 2, -3, 3, -4, 4]) {
+      const score = similarity(reference.fingerprint, print, bars * 8);
+      if (score > bestScore + 0.03) {
+        bestScore = score;
+        bestShift = bars * 8;
+      }
+    }
+    if (print.length >= 16 && bestScore >= 0.55) {
+      placements.push({ section, startBeat, referenceId: reference.section.id, shift: bestShift, isRepeat: true });
+    }
+  }
+
+  return {
+    locate: (candidate) => {
+      const placement = placements.find((entry) => candidate.time >= entry.section.start && candidate.time < entry.section.end);
+      if (!placement) return null;
+      const offset = Math.round(((candidate.beatPosition ?? 0) - placement.startBeat) * 2) + placement.shift;
+      return { key: `${placement.referenceId}:${offset}`, isRepeat: placement.isRepeat };
+    },
+    referenceHas: (key) => {
+      const [referenceId, offset] = key.split(':');
+      return referenceOffsets.get(referenceId)?.has(Number(offset)) ?? false;
+    },
+  };
 };
 
 /**
@@ -666,6 +769,8 @@ export async function generateNotesFromAudio(
       sectionEnergy,
       sustain: (futureEnergy / Math.max(0.00001, globalRms)) * 0.55 + (futureLow / Math.max(0.00001, localLow)) * 0.45,
       beatPosition: point.beat,
+      brightness: averageFromPrefix(highPrefix, candidate.sourceIndex, candidate.sourceIndex + 4)
+        / Math.max(0.000001, averageFromPrefix(highPrefix, candidate.sourceIndex, candidate.sourceIndex + 4) + averageFromPrefix(lowPrefix, candidate.sourceIndex, candidate.sourceIndex + 4)),
     };
     const existing = quantizedByCell.get(cell);
     const phraseAccent = isDownbeat(enriched.beatPosition!) ? 0.14 : 0;
@@ -675,6 +780,35 @@ export async function generateNotesFromAudio(
   });
 
   const candidates = [...quantizedByCell.values()].sort((a, b) => a.time - b.time);
+  // Rank brightness across the song so lane placement follows relative pitch, not the mix.
+  const brightnessOrder = candidates.map((candidate) => candidate.brightness ?? 0.5).sort((a, b) => a - b);
+  candidates.forEach((candidate) => {
+    const value = candidate.brightness ?? 0.5;
+    let low = 0;
+    let high = brightnessOrder.length - 1;
+    while (low < high) {
+      const middle = (low + high) >> 1;
+      if (brightnessOrder[middle] < value) low = middle + 1;
+      else high = middle;
+    }
+    candidate.brightness = brightnessOrder.length > 1 ? low / (brightnessOrder.length - 1) : 0.5;
+  });
+  const pitchWeight = 0.6 + (1 - laneVariety) * 0.4;
+  const repeats = findRepeatedSections(
+    analyzeSectionsFromMono(monoData, sampleRate, audioBuffer.duration),
+    candidates,
+    (time) => grid.snap(time, 1).beat,
+    grid.downbeatPhase,
+    beatInterval,
+    (time) => {
+      const center = Math.round(time / windowDuration);
+      let peak = 0;
+      for (let i = Math.max(0, center - 4); i <= Math.min(onsetScores.length - 1, center + 4); i++) peak = Math.max(peak, onsetScores[i]);
+      return peak / Math.max(0.001, onsetThreshold);
+    }
+  );
+  // Lanes chosen in the first occurrence of a section, replayed when the section repeats.
+  const phraseMemory = new Map<string, number[]>();
   const notes: Note[] = [];
   const laneOccupancy = [0, 0, 0, 0];
   const laneLastTime = [-Infinity, -Infinity, -Infinity, -Infinity];
@@ -687,6 +821,8 @@ export async function generateNotesFromAudio(
   let lastLane = -1;
   let streamDirection = random() > 0.5 ? 1 : -1;
   let patternRemaining = 0;
+  let patternKind: 'stream' | 'trill' = 'stream';
+  let trillLanes: [number, number] = [1, 2];
   let longNoteEnd = -Infinity;
   const burstCapacity = 1.6 + stamina * 1.6;
   let noteBudget = 1;
@@ -711,7 +847,11 @@ export async function generateNotesFromAudio(
     budgetClock = candidate.time;
     const onBeat = Number.isInteger(candidate.beatPosition ?? 0.5);
     // Pronounced accents are cheaper so genuinely busy passages read busier than calm ones.
-    const noteCost = candidate.strength >= 1.6 ? 0.6 : downbeat || candidate.strength >= 1.32 ? 1 : onBeat ? 1.12 : 1.3;
+    let noteCost = candidate.strength >= 1.6 ? 0.6 : downbeat || candidate.strength >= 1.32 ? 1 : onBeat ? 1.12 : 1.3;
+    // Repeated sections favour the same rhythm the first occurrence was charted with.
+    const phrase = repeats.locate(candidate);
+    const rememberedLanes = phrase?.isRepeat ? phraseMemory.get(phrase.key) : undefined;
+    if (phrase?.isRepeat) noteCost *= rememberedLanes ? 0.7 : repeats.referenceHas(phrase.key) ? 3 : 1.3;
     const gapSinceLast = candidate.time - lastNoteTime;
     if (noteBudget < noteCost || gapSinceLast < dynamicGap * (0.55 - complexity * 0.25)) continue;
     if (recentNoteTimes.length > staminaLimit
@@ -737,22 +877,39 @@ export async function generateNotesFromAudio(
     if (availableLanes.length === 0) continue;
 
     let lanes: number[];
-    const chordChance = clamp((0.025 + complexity * 0.12 + phraseEnergy * 0.04) * (1 - tempoFactor * 0.56), 0.01, 0.17);
-    if (strongPeak && downbeat && availableLanes.length >= 2 && random() < chordChance && candidate.time - lastNoteTime > beatInterval * 0.62) {
+    const pitchLane = (candidate.brightness ?? 0.5) * 3;
+    const pickLane = () => chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor, laneHistory, random, pitchLane, pitchWeight);
+    // Jumps (two-lane chords) land on strong downbeats, more often in loud choruses on harder charts.
+    const chordChance = clamp((0.025 + complexity * 0.12 + phraseEnergy * 0.04) * (1 - tempoFactor * 0.56) * (1 + chorusLift * complexity), 0.01, 0.22);
+    if (rememberedLanes && rememberedLanes.every((lane) => availableLanes.includes(lane)) && random() < 0.9) {
+      lanes = [...rememberedLanes];
+      patternRemaining = 0;
+    } else if (strongPeak && downbeat && availableLanes.length >= 2 && random() < chordChance && candidate.time - lastNoteTime > beatInterval * 0.62) {
       lanes = chooseChordLanes(availableLanes, random);
       patternRemaining = 0;
     } else if (patternRemaining > 0 && lastLane >= 0) {
-      if (lastLane <= 0) streamDirection = 1;
-      if (lastLane >= 3) streamDirection = -1;
-      const desired = clamp(lastLane + streamDirection, 0, 3);
-      lanes = [availableLanes.includes(desired)
-        ? desired
-        : chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor, laneHistory, random)];
+      let desired: number;
+      if (patternKind === 'trill') {
+        desired = trillLanes[0] === lastLane ? trillLanes[1] : trillLanes[0];
+      } else {
+        if (lastLane <= 0) streamDirection = 1;
+        if (lastLane >= 3) streamDirection = -1;
+        desired = clamp(lastLane + streamDirection, 0, 3);
+      }
+      lanes = [availableLanes.includes(desired) ? desired : pickLane()];
       patternRemaining -= 1;
     } else {
-      lanes = [chooseSingleLane(availableLanes, lastLane, laneVariety, tempoFactor, laneHistory, random)];
+      lanes = [pickLane()];
       const streamChance = clamp(0.1 + density * 0.24 + complexity * 0.16 + fastSection * 0.22, 0.08, 0.65);
       patternRemaining = random() < streamChance ? Math.min(maxConsecutive, 1 + Math.floor(density * 2 + fastSection * 2)) : 0;
+      // Trills (alternating two lanes) suit fast, intense passages on harder charts.
+      const trillChance = clamp((complexity - 0.5) * 1.2 * (0.4 + fastSection * 0.6) * (0.5 + chorusLift * 0.5), 0, 0.45);
+      patternKind = patternRemaining > 0 && random() < trillChance ? 'trill' : 'stream';
+      if (patternKind === 'trill') {
+        const partner = lanes[0] <= 1 ? lanes[0] + 1 + (random() < 0.5 ? 1 : 0) : lanes[0] - 1 - (random() < 0.5 ? 1 : 0);
+        trillLanes = [lanes[0], clamp(partner, 0, 3)];
+        patternRemaining = Math.min(maxConsecutive + 2, patternRemaining + 2);
+      }
       if (random() < 0.2 + laneVariety * 0.18) streamDirection *= -1;
     }
 
@@ -818,6 +975,9 @@ export async function generateNotesFromAudio(
     if (created) {
       lastNoteTime = candidate.time;
       noteBudget -= 1;
+      if (phrase && !phrase.isRepeat) {
+        phraseMemory.set(phrase.key, notes.filter((note) => note.time === candidate.time).map((note) => note.lane));
+      }
     }
   }
 

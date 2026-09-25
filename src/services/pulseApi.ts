@@ -630,7 +630,7 @@ export const deleteCommunitySong = async (id: string, token: string | null): Pro
   await parseApiResponse<Record<string, string>>(res);
 };
 
-export const getGlobalScores = async (options?: { limit?: number; offset?: number; difficulty?: DifficultyId }): Promise<{
+export const getGlobalScores = async (options?: { limit?: number; offset?: number; difficulty?: DifficultyId; songId?: string; since?: string }): Promise<{
   scores: GlobalScoreRecord[];
   nextOffset: number | null;
 }> => {
@@ -638,6 +638,8 @@ export const getGlobalScores = async (options?: { limit?: number; offset?: numbe
   if (options?.limit) search.set('limit', String(options.limit));
   if (options?.offset !== undefined) search.set('offset', String(options.offset));
   if (options?.difficulty) search.set('difficulty', options.difficulty);
+  if (options?.songId) search.set('songId', options.songId);
+  if (options?.since) search.set('since', options.since);
 
   const res = await fetch(`/api/global-scores${search.toString() ? `?${search}` : ''}`);
   return parseApiResponse<{ scores: GlobalScoreRecord[]; nextOffset: number | null }>(res);

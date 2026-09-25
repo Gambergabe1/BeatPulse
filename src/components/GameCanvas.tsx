@@ -11,8 +11,10 @@ interface GameCanvasProps {
   audioContext: AudioContext;
   audioBuffer: AudioBuffer;
   difficulty: number;
-  onGameEnd: (score: number, accuracy: number, maxCombo: number, replayEvents: { time: number; lane: number; type: string }[], fullCombo: boolean, judgements: JudgementSummary) => void;
+  onGameEnd: (score: number, accuracy: number, maxCombo: number, replayEvents: { time: number; lane: number; type: string }[], fullCombo: boolean, judgements: JudgementSummary, scoreTimeline: number[]) => void;
   onExit: () => void;
+  /** Personal-best score at each second of the song, shown live as "vs PB". */
+  ghostTimeline?: number[];
   /** Instant restart of a solo run; omitted in multiplayer. */
   onRestart?: () => void;
   isReplay?: boolean;
@@ -70,6 +72,17 @@ const getSlideLanePosition = (note: Note, time: number) => {
 const getRequiredSlideLane = (note: Note, time: number) =>
   Math.round(getSlideLanePosition(note, time));
 
+/** Carries the last known score forward over seconds with no sample (pauses, skipped intros). */
+const fillTimeline = (timeline: number[]) => {
+  const filled: number[] = [];
+  let last = 0;
+  for (let second = 0; second < timeline.length; second++) {
+    if (typeof timeline[second] === 'number') last = timeline[second];
+    filled.push(last);
+  }
+  return filled;
+};
+
 const emptyJudgements = (): JudgementSummary => ({ perfect: 0, great: 0, miss: 0, holdBreak: 0, timingOffsets: [] });
 
 const createLaneOrder = (notes: Note[]) => {
@@ -109,6 +122,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   onGameEnd,
   onExit,
   onRestart,
+  ghostTimeline,
   isReplay = false,
   replayEvents = [],
   settings,
@@ -146,6 +160,9 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
 
   const gameStateRef = useRef(gameState);
   gameStateRef.current = gameState;
+  const ghostDelta = ghostTimeline?.length && !isReplay && !isPracticeMode && gameState.currentTime >= 1
+    ? gameState.score - ghostTimeline[Math.min(ghostTimeline.length - 1, Math.floor(gameState.currentTime))]
+    : null;
 
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
   const playbackAnchorRef = useRef({ contextTime: 0, songTime: 0 });
@@ -179,6 +196,8 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
   const judgementSummaryRef = useRef<JudgementSummary>(emptyJudgements());
   const autoPreviewUntilRef = useRef<number | null>(null);
 
+  // Score at each whole second of song time, for the next attempt's ghost.
+  const scoreTimelineRef = useRef<number[]>([]);
   const onRestartRef = useRef(onRestart);
   onRestartRef.current = onRestart;
   const firstNoteTime = useMemo(() => notes.reduce((first, note) => Math.min(first, note.time), Infinity), [notes]);
@@ -232,10 +251,12 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     const finalStats = gameStateRef.current;
     const eventsToPass = isReplay ? replayEvents : replayEventsRef.current;
     const fullCombo = finalStats.totalNotes > 0 && !eventsToPass.some((event) => event.type === 'MISS' || event.type === 'HOLD_BREAK');
+    const timeline = scoreTimelineRef.current;
+    timeline[Math.max(0, Math.ceil(finalStats.duration))] = finalStats.score;
     onGameEnd(finalStats.score, finalStats.accuracy, finalStats.maxCombo, eventsToPass, fullCombo, {
       ...judgementSummaryRef.current,
       timingOffsets: [...judgementSummaryRef.current.timingOffsets],
-    });
+    }, fillTimeline(timeline));
     setGameState(prev => ({ ...prev, isPlaying: false }));
     stopGame();
   };
@@ -686,6 +707,7 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
     if (isPausedRef.current) return;
     const currentTime = getCurrentSongTime();
     setGameState(prev => ({ ...prev, currentTime }));
+    if (currentTime >= 0) scoreTimelineRef.current[Math.floor(currentTime)] = gameStateRef.current.score;
 
     const activeLoop = practiceLoopRef.current;
     if (isPracticeMode && activeLoop?.end && currentTime >= activeLoop.end) {
@@ -1130,6 +1152,11 @@ export const GameCanvas: React.FC<GameCanvasProps> = ({
         <div className="text-[10px] font-bold uppercase tracking-[0.16em] text-white/45 md:text-xs">
           Accuracy <span className="text-white/75">{gameState.accuracy.toFixed(1)}%</span>
         </div>
+        {ghostDelta !== null && (
+          <div className={`text-[10px] font-black uppercase tracking-[0.14em] md:text-xs ${ghostDelta >= 0 ? 'text-neon-green' : 'text-neon-pink'}`} aria-label="Score compared with your personal best at this point">
+            vs PB {ghostDelta >= 0 ? '+' : '−'}{Math.abs(ghostDelta).toLocaleString()}
+          </div>
+        )}
         <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full rounded-full bg-gradient-to-r from-neon-pink via-neon-purple to-neon-blue transition-[width] duration-200" style={{ width: `${gameState.health}%` }} /></div>
       </div>
 

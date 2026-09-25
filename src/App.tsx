@@ -9,12 +9,13 @@ import { Menu } from './components/Menu';
 import { GameCanvas } from './components/GameCanvas';
 import { GameOverScreen } from './components/GameOverScreen';
 import { Tutorial } from './components/Tutorial';
+import { readStoredDailyChallenge } from './components/DailyChallengeCard';
 import { DEFAULT_GAMEPLAY_OPTIONS, GameplayOptions, JudgementSummary, SongData, Settings } from './types';
 import { getSocialSnapshot, leaveMultiplayerRoom, saveGlobalScore, ScoreRecord, MultiplayerRoom, updateMultiplayerProgress } from './services/pulseApi';
 import { DEFAULT_DIFFICULTY, getChartSettingsForDifficulty, getDifficultyPreset } from './utils/chartSettings';
 import { pickOfficialChart } from './utils/storedCharts';
 import type { DifficultyId } from '../shared/chartFormat';
-import { getNextDifficulty, recordRun, RecordUpdate } from './utils/chartRecords';
+import { getGhostTimeline, getNextDifficulty, recordRun, RecordUpdate, saveGhostTimeline } from './utils/chartRecords';
 import { generateChart } from './utils/chartGenerator';
 import { prefersMovingSliders } from './utils/device';
 import { getPlayerId, getPlayerToken } from './utils/playerIdentity';
@@ -145,18 +146,22 @@ export default function App() {
     setView('GAME');
   }, [audioContext, settings.gameplay]);
 
-  const handleGameEnd = useCallback(async (score: number, accuracy: number, maxCombo: number, replayEvents: { time: number; lane: number; type: string }[], fullCombo: boolean, judgements: JudgementSummary) => {
+  const handleGameEnd = useCallback(async (score: number, accuracy: number, maxCombo: number, replayEvents: { time: number; lane: number; type: string }[], fullCombo: boolean, judgements: JudgementSummary, scoreTimeline: number[] = []) => {
     const isModifiedRun = gameplayOptions.practiceMode || gameplayOptions.hiddenNotes || gameplayOptions.mirrorLanes || gameplayOptions.randomLanes || gameplayOptions.practiceSpeed !== 1;
     // Community song leaderboards only accept runs on the song's official stored charts.
     const isCustomChart = Boolean(songData?.id && !songData.officialChart);
     const isRankedRun = !isModifiedRun && !isCustomChart;
     const chartDifficulty = songData ? songData.officialChart ?? getDifficultyPreset(songData.difficulty).id : undefined;
+    const dailyChallenge = readStoredDailyChallenge();
+    const isDailyChallengeRun = Boolean(isRankedRun && !isReplay && dailyChallenge
+      && songData?.id === dailyChallenge.songId && songData.officialChart === dailyChallenge.difficulty);
     const recordUpdate = songData && !isReplay && !isModifiedRun
       ? recordRun(
         { songId: songData.id, name: songData.name, artist: songData.artist, duration: songData.audioBuffer.duration, difficulty: songData.difficulty },
         { score, accuracy, maxCombo, fullCombo }
       )
       : undefined;
+    if (recordUpdate?.isNewBest) saveGhostTimeline(recordUpdate.chartKey, scoreTimeline);
     const progressionUpdate = !isReplay && !gameplayOptions.practiceMode
       ? awardRunProgress({
         score,
@@ -167,6 +172,7 @@ export default function App() {
         song: songData ? { id: songData.id, name: songData.name, artist: songData.artist } : undefined,
         multiplayer: Boolean(multiplayerRoom),
         ranked: isRankedRun && !multiplayerRoom,
+        dailyChallenge: isDailyChallengeRun,
         milestones: recordUpdate ? {
           newBest: recordUpdate.isNewBest && recordUpdate.previous !== null,
           firstClear: recordUpdate.firstClear,
@@ -355,6 +361,11 @@ export default function App() {
   }, []);
 
   const nextDifficulty = songData ? getNextDifficulty(songData.difficulty) : undefined;
+  // Re-read on every run so a new personal best becomes the ghost for the retry.
+  const ghostTimeline = useMemo(() => songData && !isReplay && !multiplayerRoom
+    ? getGhostTimeline({ songId: songData.id, name: songData.name, artist: songData.artist, duration: songData.audioBuffer.duration, difficulty: songData.difficulty })
+    : undefined,
+  [songData, isReplay, multiplayerRoom, runNonce, view]);
   const canStepUp = Boolean(songData && nextDifficulty && !isReplay && !lastResult?.multiplayerRoom
     && (!songData.id || pickOfficialChart(songData.charts, nextDifficulty.value, false)));
 
@@ -394,6 +405,7 @@ export default function App() {
           onGameEnd={handleGameEnd}
           onExit={handleExitGame}
           onRestart={multiplayerRoom ? undefined : handleRestart}
+          ghostTimeline={ghostTimeline}
           isReplay={isReplay}
           replayEvents={lastResult?.replayEvents || []}
           settings={settings}

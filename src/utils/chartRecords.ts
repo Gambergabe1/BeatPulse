@@ -148,6 +148,38 @@ export const recordRun = (chart: ChartIdentity, run: RunResult): RecordUpdate =>
   };
 };
 
+const GHOST_STORAGE_KEY = 'beatpulse_ghosts_v1';
+const MAX_GHOSTS = 60;
+
+type GhostStore = Record<string, { timeline: number[]; savedAt: string }>;
+
+const readGhosts = (): GhostStore => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(GHOST_STORAGE_KEY) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+/** Per-second score of the personal-best run, used to show "vs PB" during play. */
+export const getGhostTimeline = (chart: ChartIdentity) => {
+  const timeline = readGhosts()[getChartKey(chart)]?.timeline;
+  return Array.isArray(timeline) && timeline.every((value) => typeof value === 'number') ? timeline : undefined;
+};
+
+export const saveGhostTimeline = (chartKey: string, timeline: number[]) => {
+  if (timeline.length === 0) return;
+  const ghosts = readGhosts();
+  ghosts[chartKey] = { timeline: timeline.map((value) => Math.round(value)), savedAt: new Date().toISOString() };
+  const kept = Object.entries(ghosts).sort(([, a], [, b]) => b.savedAt.localeCompare(a.savedAt)).slice(0, MAX_GHOSTS);
+  try {
+    localStorage.setItem(GHOST_STORAGE_KEY, JSON.stringify(Object.fromEntries(kept)));
+  } catch {
+    // Ghosts are optional; ignore full or blocked storage.
+  }
+};
+
 export const getNextDifficulty = (difficulty: number) => {
   const index = DIFFICULTY_PRESETS.findIndex((preset) => preset.id === getDifficultyPreset(difficulty).id);
   return DIFFICULTY_PRESETS[index + 1];

@@ -279,22 +279,21 @@ async function handleGet(req: any, res: any) {
   const limit = getBoundedQueryNumber(getQueryValue(req, "limit"), 100, 1, 500);
   const offset = getBoundedQueryNumber(getQueryValue(req, "offset"), 0, 0, Number.MAX_SAFE_INTEGER);
   const difficultyFilter = getQueryValue(req, "difficulty");
-  const difficulty = isDifficultyId(difficultyFilter) ? difficultyFilter : null;
+  const songFilter = (getQueryValue(req, "songId") || "").trim();
+  const sinceFilter = getQueryValue(req, "since");
+  const since = sinceFilter && !Number.isNaN(new Date(sinceFilter).getTime()) ? new Date(sinceFilter).toISOString() : null;
 
-  const { rows } = difficulty
-    ? await sql`
-      SELECT * FROM global_scores
-      WHERE difficulty = ${difficulty}
-      ORDER BY score DESC, created_at DESC
-      LIMIT ${limit + 1}
-      OFFSET ${offset}
-    `
-    : await sql`
-      SELECT * FROM global_scores
-      ORDER BY score DESC, created_at DESC
-      LIMIT ${limit + 1}
-      OFFSET ${offset}
-    `;
+  // Optional filters (daily challenge boards use all three); values are always bound parameters.
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+  if (isDifficultyId(difficultyFilter)) conditions.push(`difficulty = $${params.push(difficultyFilter)}`);
+  if (songFilter) conditions.push(`song_id = $${params.push(songFilter)}`);
+  if (since) conditions.push(`created_at >= $${params.push(since)}`);
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const { rows } = await sql.query(
+    `SELECT * FROM global_scores ${where} ORDER BY score DESC, created_at DESC LIMIT $${params.push(limit + 1)} OFFSET $${params.push(offset)}`,
+    params
+  );
 
   const scores = rows.map(normalizeGlobalScoreRow);
   const chunk = scores.slice(0, limit);

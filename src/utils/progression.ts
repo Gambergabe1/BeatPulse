@@ -8,7 +8,7 @@ export type ProfileFrame = 'standard' | 'ripple' | 'crown' | 'prism' | 'orbit';
 export type TitleColor = 'violet' | 'cyan' | 'gold';
 
 export type MissionCadence = 'daily' | 'weekly';
-export type MissionType = 'accuracy' | 'combo' | 'full-combo' | 'multiplayer' | 'spotlight';
+export type MissionType = 'accuracy' | 'combo' | 'full-combo' | 'multiplayer' | 'spotlight' | 'daily-challenge';
 
 export interface MissionProgress {
   id: string;
@@ -202,6 +202,7 @@ const createDailyMissions = (key: string): MissionProgress[] => [
   { id: `daily-accuracy-${key}`, cadence: 'daily', type: 'accuracy', label: 'Precision Pulse', target: 1, progress: 0, rewardXp: 70, rewardShards: 70, completed: false, claimed: false },
   { id: `daily-combo-${key}`, cadence: 'daily', type: 'combo', label: 'Keep the Flow', target: 1, progress: 0, rewardXp: 75, rewardShards: 75, completed: false, claimed: false },
   { id: `daily-full-combo-${key}`, cadence: 'daily', type: 'full-combo', label: 'Clean Sweep', target: 1, progress: 0, rewardXp: 110, rewardShards: 120, completed: false, claimed: false },
+  { id: `daily-challenge-${key}`, cadence: 'daily', type: 'daily-challenge', label: 'Daily Challenge', target: 1, progress: 0, rewardXp: 120, rewardShards: 100, completed: false, claimed: false },
 ];
 
 const createWeeklyMissions = (key: string): MissionProgress[] => [
@@ -213,8 +214,10 @@ const ensureMissions = (missions: MissionBoard | undefined, song?: { id?: string
   const currentDay = dayKey();
   const currentWeek = weekKey();
   const existing = Array.isArray(missions?.missions) ? missions!.missions : [];
+  const todaysDaily = existing.filter((mission) => mission.cadence === 'daily');
   const daily = missions?.dailyKey === currentDay
-    ? existing.filter((mission) => mission.cadence === 'daily')
+    // Boards saved before a mission type existed get it added for the rest of the day.
+    ? [...todaysDaily, ...createDailyMissions(currentDay).filter((mission) => !todaysDaily.some((entry) => entry.type === mission.type))]
     : createDailyMissions(currentDay);
   const weekly = missions?.weeklyKey === currentWeek
     ? existing.filter((mission) => mission.cadence === 'weekly')
@@ -250,7 +253,7 @@ const seasonRewardForRank: Partial<Record<SeasonRank, { xp: number; shards: numb
   'Pulse Master': { xp: 800, shards: 1100 },
 };
 
-const advanceMissionBoard = (board: MissionBoard, input: { accuracy: number; maxCombo: number; fullCombo: boolean; multiplayer: boolean; song?: { id?: string; name: string } }) => {
+const advanceMissionBoard = (board: MissionBoard, input: { accuracy: number; maxCombo: number; fullCombo: boolean; multiplayer: boolean; dailyChallenge: boolean; song?: { id?: string; name: string } }) => {
   const prepared = ensureMissions(board, input.song);
   const completed: MissionProgress[] = [];
   const missions = prepared.missions.map((mission) => {
@@ -263,7 +266,9 @@ const advanceMissionBoard = (board: MissionBoard, input: { accuracy: number; max
           ? input.fullCombo
           : mission.type === 'multiplayer'
             ? input.multiplayer
-            : Boolean(mission.songId && input.song?.id === mission.songId);
+            : mission.type === 'daily-challenge'
+              ? input.dailyChallenge
+              : Boolean(mission.songId && input.song?.id === mission.songId);
     if (!qualifies) return mission;
     const progress = Math.min(mission.target, mission.progress + 1);
     const next = { ...mission, progress, completed: progress >= mission.target };
@@ -393,6 +398,8 @@ export const awardRunProgress = (input: {
   song?: { id?: string; name: string; artist: string };
   multiplayer?: boolean;
   ranked?: boolean;
+  /** A ranked run on today's daily challenge song and difficulty. */
+  dailyChallenge?: boolean;
   /** Milestones on this specific chart; rewarding them makes replaying a song worthwhile. */
   milestones?: { newBest?: boolean; firstClear?: boolean; firstFullCombo?: boolean };
 }) => {
@@ -437,6 +444,7 @@ export const awardRunProgress = (input: {
     maxCombo: input.maxCombo,
     fullCombo: input.fullCombo,
     multiplayer: input.multiplayer === true,
+    dailyChallenge: input.dailyChallenge === true,
     song: input.song,
   });
   next.missions = missionUpdate.board;

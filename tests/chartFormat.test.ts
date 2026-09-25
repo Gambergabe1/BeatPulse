@@ -45,3 +45,19 @@ test('slider values map to the nearest difficulty preset', () => {
   assert.equal(difficultyIdForValue(1), 'expert');
   assert.equal(difficultyIdForValue(Number.NaN), 'normal');
 });
+
+import { pickDailyChallenge } from '../shared/dailyChallenge.ts';
+
+test('the daily challenge is the same for everyone on a day and changes between days', () => {
+  const songs = Array.from({ length: 12 }, (_, index) => ({ id: `song-${index}`, difficulty: 0.4, chartVersion: 2 }));
+  const today = pickDailyChallenge(songs, '2026-09-25');
+  assert.deepEqual(pickDailyChallenge([...songs].reverse(), '2026-09-25'), today);
+  const week = new Set(['2026-09-25', '2026-09-26', '2026-09-27', '2026-09-28', '2026-09-29'].map((day) => pickDailyChallenge(songs, day)?.songId));
+  assert(week.size >= 3, 'challenges should vary across days');
+  assert.equal(pickDailyChallenge([], '2026-09-25'), null);
+});
+
+test('legacy single-chart songs are challenged at their upload difficulty', () => {
+  const challenge = pickDailyChallenge([{ id: 'old', difficulty: 0.12 }], '2026-09-25');
+  assert.equal(challenge?.difficulty, 'easy');
+});

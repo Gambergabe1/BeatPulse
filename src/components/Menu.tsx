@@ -32,6 +32,7 @@ import {
   replaceSongCharts
 } from '../services/pulseApi';
 import { SocialHub } from './SocialHub';
+import { DailyChallengeCard } from './DailyChallengeCard';
 import { SongLibrary } from './SongLibrary';
 import { BeatmapEditor } from './BeatmapEditor';
 import { TimingCalibration } from './TimingCalibration';
@@ -646,9 +647,13 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     }
   };
 
-  const handleLoadCommunitySong = useCallback(async (song: any) => {
+  const handleLoadCommunitySong = useCallback(async (song: any, difficulty?: number) => {
     try {
-      const songData = await loadStoredSongData(song);
+      if (difficulty !== undefined) {
+        setComplexity(difficulty);
+        setAdvancedChartMode(false);
+      }
+      const songData = await loadStoredSongData(song, difficulty !== undefined ? { difficulty } : undefined);
       setMetadata({ name: song.name, artist: song.artist });
       setMapTags(Array.isArray(song.tags) ? song.tags.join(', ') : '');
       setReadySong(songData);
@@ -1393,6 +1398,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
           {/* Info Card */}
           <div className="rounded-3xl bg-white/5 border border-white/10 p-8 flex flex-col justify-between">
             <div>
+              <DailyChallengeCard songs={communitySongs} onPlay={handleLoadCommunitySong} />
               <h3 className="text-xl font-display font-bold mb-4 flex items-center gap-2">
                 <Trophy className="w-5 h-5 text-neon-pink" />
                 How to Play

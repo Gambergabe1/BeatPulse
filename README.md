@@ -52,4 +52,4 @@ The Vercel Hobby plan allows at most 12 Serverless Functions per deployment, and
 
 ## Admin
 
-The first local start creates `.admin-state.json`. Admin access uses `ADMIN_PASSWORD` from `.env.local` or `.env`; the fallback is `admin1234`, which should only be used for the first local login and changed immediately from the admin panel.
+Admin access uses `ADMIN_PASSWORD` from `.env.local`/`.env` or the Vercel environment. Deployed builds have no default password: admin stays locked until `ADMIN_PASSWORD` is set. Only `npm run dev` falls back to `admin1234`. See `ADMIN_SETUP.md`.

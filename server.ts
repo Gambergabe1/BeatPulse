@@ -12,15 +12,20 @@ const __dirname = path.dirname(__filename);
 loadEnv({ path: path.join(__dirname, ".env.local") });
 loadEnv();
 const APP_ROOT = __dirname;
-const ADMIN_STATE_FILE = path.join(APP_ROOT, ".admin-state.json");
 const DATA_DIR = path.resolve(process.env.BEATPULSE_DATA_DIR || path.join(APP_ROOT, ".server-data"));
+// Lives with the other ignored runtime data. The old root-level .admin-state.json was
+// committed to Git, so it is never read: its signing secret is public.
+const ADMIN_STATE_FILE = path.join(DATA_DIR, "admin-state.json");
 const UPLOAD_DIR = path.resolve(process.env.BEATPULSE_UPLOAD_DIR || path.join(APP_ROOT, "uploads"));
 const SONGS_FILE = path.join(DATA_DIR, "songs.json");
 const GLOBAL_SCORES_FILE = path.join(DATA_DIR, "global-scores.json");
 const REPLAYS_FILE = path.join(DATA_DIR, "replays.json");
 const SOCIAL_FILE = path.join(DATA_DIR, "social.json");
 const STORAGE_META_FILE = path.join(DATA_DIR, "storage-meta.json");
-const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD || "admin1234";
+// The "admin1234" convenience password only exists for local development. A production
+// start without ADMIN_PASSWORD gets a random password nobody knows, so admin stays locked.
+const ADMIN_DEFAULT_PASSWORD = process.env.ADMIN_PASSWORD
+  || (process.env.NODE_ENV === "production" ? crypto.randomBytes(32).toString("hex") : "admin1234");
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 7; // 7 days
 const STORAGE_SCHEMA_VERSION = 3;
 
@@ -1021,6 +1026,7 @@ function verifyAdminToken(token: string, secret: string): boolean {
 }
 
 function loadAdminState(): AdminState {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
   if (!fs.existsSync(ADMIN_STATE_FILE)) {
     const initialState: AdminState = {
       passwordHash: createPasswordHash(ADMIN_DEFAULT_PASSWORD),
@@ -1441,8 +1447,8 @@ async function startServer() {
 
   app.post("/api/admin/password", requireAdmin, (req, res) => {
     const newPassword = typeof req.body?.newPassword === "string" ? req.body.newPassword.trim() : "";
-    if (newPassword.length < 4) {
-      return fail(res, 400, "Password must be at least 4 characters.");
+    if (newPassword.length < 8) {
+      return fail(res, 400, "Password must be at least 8 characters.");
     }
     adminState = {
       ...adminState,

@@ -11,3 +11,4 @@ uploads/
 
 .vercel
 .env*
+.admin-state.json

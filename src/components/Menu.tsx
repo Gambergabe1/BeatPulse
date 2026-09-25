@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { lazy, Suspense, useState, useCallback, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useMemo } from 'react';
 import {
@@ -47,17 +47,27 @@ import {
   fetchSongAsset,
   replaceSongCharts
 } from '../services/pulseApi';
-import { SocialHub } from './SocialHub';
-import { AdminPanel } from './AdminPanel';
-import { SettingsPanel } from './SettingsPanel';
 import { IntegrityResultRow, MainTab } from './menuShared';
 import { DailyChallengeCard } from './DailyChallengeCard';
 import { SongLibrary } from './SongLibrary';
-import { BeatmapEditor } from './BeatmapEditor';
-import { ProgressionHub } from './ProgressionHub';
 import { getPlayerId, getPlayerToken } from '../utils/playerIdentity';
 import { prefersMovingSliders } from '../utils/device';
 import { getSeasonTier, getUpcomingLevelRewards, PlayerProgress, toggleFavoriteSong, updateProfileLoadout } from '../utils/progression';
+
+
+// Tabs and tools most players never open load on demand, keeping the first load small.
+const SocialHub = lazy(() => import('./SocialHub').then((module) => ({ default: module.SocialHub })));
+const AdminPanel = lazy(() => import('./AdminPanel').then((module) => ({ default: module.AdminPanel })));
+const SettingsPanel = lazy(() => import('./SettingsPanel').then((module) => ({ default: module.SettingsPanel })));
+const BeatmapEditor = lazy(() => import('./BeatmapEditor').then((module) => ({ default: module.BeatmapEditor })));
+const ProgressionHub = lazy(() => import('./ProgressionHub').then((module) => ({ default: module.ProgressionHub })));
+
+const PanelFallback = () => (
+  <div className="flex items-center justify-center py-16" role="status">
+    <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/15 border-t-neon-blue" />
+    <span className="sr-only">Loading…</span>
+  </div>
+);
 
 interface MenuProps {
   onStartGame: (songData: SongData, isReplay?: boolean, replayEvents?: any[], multiplayer?: MultiplayerRoom) => void;
@@ -1508,6 +1518,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
               )}
             </div>
             
+            <Suspense fallback={<PanelFallback />}>
             {activeTab === 'SOCIAL' ? (
               <SocialHub
                 identity={playerIdentity}
@@ -1695,6 +1706,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 </button>
               </div>
             )}
+            </Suspense>
           </div>
         </div>
 
@@ -1722,6 +1734,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       </motion.div>
 
       {isEditingChart && readySong && (
+        <Suspense fallback={null}>
         <BeatmapEditor
           song={readySong}
           audioContext={audioContext}
@@ -1734,6 +1747,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
           }}
           onClose={() => setIsEditingChart(false)}
         />
+        </Suspense>
       )}
 
       {/* Delete Confirmation Modal */}

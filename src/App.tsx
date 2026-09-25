@@ -3,12 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import React, { lazy, Suspense, useState, useCallback, useEffect, useMemo } from 'react';
 import { Intro } from './components/Intro';
 import { Menu } from './components/Menu';
-import { GameCanvas } from './components/GameCanvas';
-import { GameOverScreen } from './components/GameOverScreen';
-import { Tutorial } from './components/Tutorial';
 import { readStoredDailyChallenge } from './components/DailyChallengeCard';
 import { DEFAULT_GAMEPLAY_OPTIONS, GameplayOptions, JudgementSummary, SongData, Settings } from './types';
 import { getSocialSnapshot, leaveMultiplayerRoom, saveGlobalScore, ScoreRecord, MultiplayerRoom, updateMultiplayerProgress } from './services/pulseApi';
@@ -20,6 +17,11 @@ import { generateChart } from './utils/chartGenerator';
 import { prefersMovingSliders } from './utils/device';
 import { getPlayerId, getPlayerToken } from './utils/playerIdentity';
 import { awardRunProgress, LevelReward, loadPlayerProgress, MissionProgress, rateMap, PlayerProgress } from './utils/progression';
+
+// The game, results and tutorial load in parallel with the menu instead of blocking first paint.
+const GameCanvas = lazy(() => import('./components/GameCanvas').then((module) => ({ default: module.GameCanvas })));
+const GameOverScreen = lazy(() => import('./components/GameOverScreen').then((module) => ({ default: module.GameOverScreen })));
+const Tutorial = lazy(() => import('./components/Tutorial').then((module) => ({ default: module.Tutorial })));
 
 const defaultChartSettings = getChartSettingsForDifficulty(DEFAULT_DIFFICULTY);
 
@@ -102,6 +104,17 @@ export default function App() {
   const playerToken = useMemo(() => getPlayerToken(), []);
 
   const [audioContext] = useState(() => new (window.AudioContext || (window as any).webkitAudioContext)());
+
+  // Fetch the game and results screens in the background once the page is idle.
+  useEffect(() => {
+    const preload = () => {
+      void import('./components/GameCanvas');
+      void import('./components/GameOverScreen');
+    };
+    const idle = (window as Window & { requestIdleCallback?: (callback: () => void) => number }).requestIdleCallback;
+    if (idle) idle(preload);
+    else window.setTimeout(preload, 1500);
+  }, []);
 
   const handleIntroComplete = useCallback(() => {
     const hasSeenTutorial = localStorage.getItem('hasSeenTutorial');
@@ -371,6 +384,7 @@ export default function App() {
 
   return (
     <div className="w-full min-h-screen bg-black text-white font-sans">
+      <Suspense fallback={<div className="min-h-screen bg-black" />}>
       {view === 'INTRO' && (
         <Intro onComplete={handleIntroComplete} />
       )}
@@ -455,6 +469,7 @@ export default function App() {
           playerToken={playerToken}
         />
       )}
+      </Suspense>
     </div>
   );
 }

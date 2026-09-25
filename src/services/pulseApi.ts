@@ -1,4 +1,5 @@
 import { put } from '@vercel/blob/client';
+import { CURRENT_CHART_VERSION, type ChartBundle, type DifficultyId } from '../../shared/chartFormat';
 import type { JudgementSummary } from '../types';
 
 export interface ScoreRecord {
@@ -7,6 +8,8 @@ export interface ScoreRecord {
   date: string;
   username: string;
   fullCombo: boolean;
+  /** Absent on scores set before per-difficulty charts existed. */
+  difficulty?: DifficultyId;
 }
 
 export interface ScoreSubmissionResult {
@@ -81,6 +84,7 @@ export interface GlobalScoreRecord {
   songName: string;
   artist: string;
   fullCombo: boolean;
+  difficulty?: DifficultyId;
 }
 
 export interface LeaderboardModerationResult {
@@ -343,7 +347,7 @@ function getAudioExtension(file: File) {
 async function uploadSongAssetsDirectly(payload: {
   id: string;
   audioFile: File;
-  notes: unknown[];
+  notes: unknown;
   coverFile?: File;
 }) {
   const audioExtension = getAudioExtension(payload.audioFile);
@@ -445,7 +449,7 @@ function createSongUploadFormData(payload: {
   sliderProbability: number;
   stamina: number;
   authorName: string;
-  notes: unknown[];
+  notes: unknown;
   tags?: string[];
 }) {
   const formData = new FormData();
@@ -460,6 +464,7 @@ function createSongUploadFormData(payload: {
   formData.append('authorName', payload.authorName);
   formData.append('notes', JSON.stringify(payload.notes));
   formData.append('tags', JSON.stringify(payload.tags || []));
+  formData.append('chartVersion', String(CURRENT_CHART_VERSION));
   return formData;
 }
 
@@ -473,7 +478,7 @@ async function saveCommunitySongMultipart(payload: {
   sliderProbability: number;
   stamina: number;
   authorName: string;
-  notes: unknown[];
+  notes: unknown;
   tags?: string[];
 }) {
   const res = await fetch('/api/songs', {
@@ -482,6 +487,24 @@ async function saveCommunitySongMultipart(payload: {
   });
 
   return parseApiResponse<CommunitySongRecord>(res);
+}
+
+/**
+ * Loads a stored song asset straight from Blob storage. The proxy is only a
+ * fallback: Vercel caps function responses at 4.5 MB, so large songs must not
+ * depend on it, and direct loads spare the function budget.
+ */
+export async function fetchSongAsset(url: string): Promise<Response> {
+  try {
+    const direct = await fetch(url);
+    if (direct.ok) return direct;
+  } catch {
+    // Network or CORS failure: try the proxy below.
+  }
+  if (!/^https?:\/\//i.test(url)) throw new Error('Failed to load song asset.');
+  const proxied = await fetch(`/api/audio-proxy?url=${encodeURIComponent(url)}`);
+  if (!proxied.ok) throw new Error(`Failed to load song asset (${proxied.status}).`);
+  return proxied;
 }
 
 export const getCommunitySongs = async (): Promise<CommunitySongRecord[]> => {
@@ -521,7 +544,7 @@ export const saveCommunitySong = async (payload: {
   sliderProbability: number;
   stamina: number;
   authorName: string;
-  notes: unknown[];
+  notes: unknown;
   coverFile?: File;
   tags?: string[];
 }): Promise<CommunitySongRecord> => {
@@ -549,7 +572,7 @@ export const saveCommunitySong = async (payload: {
           stamina: payload.stamina,
           authorName: payload.authorName,
           tags: payload.tags || [],
-          chartVersion: 1,
+          chartVersion: CURRENT_CHART_VERSION,
           ...uploadedAssets,
         }),
       });
@@ -593,6 +616,10 @@ export const updateCommunitySong = async (
   return parseApiResponse<CommunitySongRecord>(res);
 };
 
+/** Admin only: replace a song's stored charts (e.g. rebuilt with a newer generator). */
+export const replaceSongCharts = async (id: string, charts: ChartBundle, token: string | null): Promise<CommunitySongRecord> =>
+  updateCommunitySong(id, { charts, chartVersion: charts.version }, token);
+
 export const deleteCommunitySong = async (id: string, token: string | null): Promise<void> => {
   const res = await fetch(`/api/songs?id=${encodeURIComponent(id)}`, {
     method: 'DELETE',
@@ -603,27 +630,14 @@ export const deleteCommunitySong = async (id: string, token: string | null): Pro
   await parseApiResponse<Record<string, string>>(res);
 };
 
-export const postSongScore = async (
-  id: string,
-  score: number,
-  accuracy: number,
-  username: string
-): Promise<CommunitySongRecord> => {
-  const res = await fetch(`/api/songs/${encodeURIComponent(id)}/scores`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ score, accuracy, username }),
-  });
-  return parseApiResponse<CommunitySongRecord>(res);
-};
-
-export const getGlobalScores = async (options?: { limit?: number; offset?: number }): Promise<{
+export const getGlobalScores = async (options?: { limit?: number; offset?: number; difficulty?: DifficultyId }): Promise<{
   scores: GlobalScoreRecord[];
   nextOffset: number | null;
 }> => {
   const search = new URLSearchParams();
   if (options?.limit) search.set('limit', String(options.limit));
   if (options?.offset !== undefined) search.set('offset', String(options.offset));
+  if (options?.difficulty) search.set('difficulty', options.difficulty);
 
   const res = await fetch(`/api/global-scores${search.toString() ? `?${search}` : ''}`);
   return parseApiResponse<{ scores: GlobalScoreRecord[]; nextOffset: number | null }>(res);
@@ -631,6 +645,8 @@ export const getGlobalScores = async (options?: { limit?: number; offset?: numbe
 
 export const saveGlobalScore = async (payload: {
   songId?: string;
+  /** Required for community songs: which stored chart the run was played on. */
+  difficulty?: DifficultyId;
   score: number;
   accuracy: number;
   date: string;

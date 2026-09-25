@@ -9,6 +9,7 @@ interface ScoreRecord {
   date: string;
   username: string;
   fullCombo: boolean;
+  difficulty?: string;
 }
 
 interface CommunitySongRecord {
@@ -89,6 +90,7 @@ function parseScoreArray(raw: Json, createdAt = new Date().toISOString()): Score
       date: toDisplayDate(row.date, createdAt),
       username: toText(row.username, "Anonymous"),
       fullCombo: row.fullCombo === true,
+      ...(typeof row.difficulty === "string" && ["easy", "normal", "hard", "expert"].includes(row.difficulty) ? { difficulty: row.difficulty } : {}),
     };
   });
 }

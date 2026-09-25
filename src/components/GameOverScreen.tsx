@@ -6,6 +6,7 @@ import { getGlobalScores, getSocialSnapshot, getSongById, requestMultiplayerRema
 import { getChartSettingsForDifficulty } from '../utils/chartSettings';
 import { LevelReward, MissionProgress } from '../utils/progression';
 import { getNextDifficulty, getNextGoal, getRank, RecordUpdate } from '../utils/chartRecords';
+import type { DifficultyId } from '../../shared/chartFormat';
 
 type HighScore = ScoreRecord;
 
@@ -72,6 +73,9 @@ interface GameOverScreenProps {
   initialHighScores?: HighScore[];
   leaderboardStatus?: 'idle' | 'saving' | 'saved' | 'failed' | 'unranked';
   leaderboardError?: string;
+  /** Song leaderboards are per difficulty; only this difficulty's scores are shown. */
+  leaderboardDifficulty?: DifficultyId;
+  unrankedReason?: string;
   multiplayerRoom?: MultiplayerRoom;
   playerId?: string;
   playerToken?: string;
@@ -111,6 +115,8 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   initialHighScores = [],
   leaderboardStatus = 'idle',
   leaderboardError,
+  leaderboardDifficulty,
+  unrankedReason,
   multiplayerRoom,
   playerId,
   playerToken,
@@ -125,6 +131,9 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
   const [isSaved, setIsSaved] = useState(false);
   const [savedReplayId, setSavedReplayId] = useState<string | null>(null);
   const [highScores, setHighScores] = useState<HighScore[]>(initialHighScores);
+  const displayedScores = highScores
+    .filter((entry) => !leaderboardDifficulty || entry.difficulty === leaderboardDifficulty)
+    .slice(0, 5);
   const [matchRoom, setMatchRoom] = useState(multiplayerRoom);
   const totalJudgements = judgements.perfect + judgements.great + judgements.miss;
   const timingBuckets = useMemo(() => {
@@ -244,6 +253,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
       try {
         const { scores } = await getGlobalScores({ limit: 500, offset: 0 });
         const matchingScores = scores
+          .filter(entry => !leaderboardDifficulty || entry.difficulty === leaderboardDifficulty)
           .filter(entry =>
             songId
               ? entry.songId === songId
@@ -256,6 +266,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
             date: entry.date,
             username: entry.username,
             fullCombo: entry.fullCombo,
+            difficulty: entry.difficulty,
           }));
 
         if (!isCancelled) setHighScores(matchingScores);
@@ -266,7 +277,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
 
     refreshLeaderboard();
     return () => { isCancelled = true; };
-  }, [artist, leaderboardStatus, songId, songName]);
+  }, [artist, leaderboardDifficulty, leaderboardStatus, songId, songName]);
 
   useEffect(() => {
     setMatchRoom(multiplayerRoom);
@@ -675,21 +686,21 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
             <List className="w-5 h-5 text-neon-purple" />
             <div>
               <h3 className="font-display font-bold text-white uppercase tracking-widest text-sm">
-                {songId ? 'Song Top Scores' : 'Local Song Scores'}
+                {songId ? 'Song Top Scores' : 'Local Song Scores'}{leaderboardDifficulty ? ` · ${leaderboardDifficulty}` : ''}
               </h3>
               {leaderboardStatus === 'saving' && <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neon-blue">Updating leaderboard…</p>}
               {leaderboardStatus === 'saved' && <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neon-green">Song + global leaderboards updated</p>}
-              {leaderboardStatus === 'unranked' && <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neon-orange">Practice and modifier runs stay off leaderboards</p>}
+              {leaderboardStatus === 'unranked' && <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neon-orange">{unrankedReason || 'Practice and modifier runs stay off leaderboards'}</p>}
               {leaderboardStatus === 'failed' && <p className="mt-1 text-[10px] font-bold uppercase tracking-widest text-neon-pink">{leaderboardError || 'Leaderboard update failed'}</p>}
             </div>
           </div>
           
           <div className="space-y-3">
-            {highScores.length === 0 ? (
+            {displayedScores.length === 0 ? (
               <p className="rounded-2xl border border-dashed border-white/10 px-4 py-5 text-center text-xs font-bold uppercase tracking-widest text-white/35">
                 {leaderboardStatus === 'saving' ? 'Saving your score…' : leaderboardStatus === 'unranked' ? 'Practice run — not submitted.' : leaderboardStatus === 'failed' ? 'Your score was not saved.' : 'No scores yet'}
               </p>
-            ) : highScores.map((hs, idx) => (
+            ) : displayedScores.map((hs, idx) => (
               <div 
                 key={idx} 
                 className={`flex items-center justify-between p-4 rounded-2xl border ${

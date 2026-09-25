@@ -1,3 +1,5 @@
+import type { DifficultyId } from '../shared/chartFormat';
+
 export interface Note {
   id: string;
   time: number; // Time in seconds when the note should be hit
@@ -112,6 +114,10 @@ export interface SongData {
   sliderProbability?: number;
   stamina?: number;
   sections?: SongSection[];
+  /** Official stored charts of a community song, keyed by difficulty. */
+  charts?: Partial<Record<DifficultyId, Note[]>>;
+  /** Set when `notes` is the official stored chart for this difficulty (a ranked run). */
+  officialChart?: DifficultyId;
 }
 
 export interface ReplayEvent {

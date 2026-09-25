@@ -1,6 +1,8 @@
+import { DIFFICULTY_VALUES, type DifficultyId } from '../../shared/chartFormat';
+
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
-export const DEFAULT_DIFFICULTY = 0.4;
+export const DEFAULT_DIFFICULTY = DIFFICULTY_VALUES.normal;
 
 export interface DifficultyProfile {
   complexity: number;
@@ -11,7 +13,7 @@ export interface DifficultyProfile {
 }
 
 export interface DifficultyPreset {
-  id: 'easy' | 'normal' | 'hard' | 'expert';
+  id: DifficultyId;
   label: string;
   value: number;
   description: string;
@@ -22,7 +24,7 @@ export const DIFFICULTY_PRESETS: DifficultyPreset[] = [
   {
     id: 'easy',
     label: 'Easy',
-    value: 0.12,
+    value: DIFFICULTY_VALUES.easy,
     description: 'Roomy patterns and forgiving bursts.',
     pace: 'Learn the rhythm',
   },
@@ -36,14 +38,14 @@ export const DIFFICULTY_PRESETS: DifficultyPreset[] = [
   {
     id: 'hard',
     label: 'Hard',
-    value: 0.68,
+    value: DIFFICULTY_VALUES.hard,
     description: 'Faster streams and active lane movement.',
     pace: 'Push your timing',
   },
   {
     id: 'expert',
     label: 'Expert',
-    value: 0.92,
+    value: DIFFICULTY_VALUES.expert,
     description: 'Dense phrases built for endurance.',
     pace: 'Maximum challenge',
   },

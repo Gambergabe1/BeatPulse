@@ -1,6 +1,8 @@
 import * as crypto from "node:crypto";
 import { sql } from "@vercel/postgres";
 import { isAuthorizedAdmin } from "../lib/admin.js";
+import { forgetSongChartBundle } from "../lib/charts.js";
+import { createChartBundle, parseChartBundle, DIFFICULTY_IDS } from "../../shared/chartFormat.js";
 import multer from "multer";
 import { del, put } from "@vercel/blob";
 
@@ -12,6 +14,7 @@ interface ScoreRecord {
   date: string;
   username: string;
   fullCombo: boolean;
+  difficulty?: string;
 }
 
 interface CommunitySongRecord {
@@ -161,6 +164,7 @@ function parseScoreArray(raw: Json, createdAt = new Date().toISOString()): Score
       date: toDisplayDate(row.date, createdAt),
       username: toText(row.username, "Anonymous"),
       fullCombo: row.fullCombo === true,
+      ...(typeof row.difficulty === "string" && ["easy", "normal", "hard", "expert"].includes(row.difficulty) ? { difficulty: row.difficulty } : {}),
     };
   }).sort((a, b) => b.score - a.score);
 }
@@ -276,7 +280,9 @@ function parseNotesPayload(value: unknown) {
 
   try {
     const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed) ? parsed : [];
+    if (Array.isArray(parsed)) return parsed;
+    // Multi-difficulty bundles are stored as-is; anything else becomes an empty chart.
+    return parsed && typeof parsed === "object" && (parsed as { format?: unknown }).format === "beatpulse-charts" ? parsed : [];
   } catch {
     return [];
   }
@@ -587,13 +593,31 @@ async function handlePatch(req: any, res: any) {
     tags: updates.tags === undefined ? song.tags : sanitizeTags(updates.tags),
     chartVersion: updates.chartVersion === undefined ? song.chartVersion : Math.max(1, Math.round(clampNumber(updates.chartVersion, song.chartVersion))),
   };
+  // Replacing charts writes a new notes file (uploads never overwrite) and points the song at it.
+  let previousNotesPath: string | null = null;
+  if (updates.charts !== undefined) {
+    ensureBlobConfig();
+    const parsed = parseChartBundle(updates.charts, "normal");
+    if (!DIFFICULTY_IDS.some((id) => (parsed.charts[id]?.length ?? 0) > 0)) return fail(res, 400, "Charts are empty or invalid.");
+    const bundle = createChartBundle(parsed.charts, next.chartVersion);
+    const notesPath = `songs/${song.id}/charts-v${bundle.version}-${Date.now()}.json`;
+    const upload = await put(notesPath, JSON.stringify(bundle), { access: "public", token: BLOB_WRITE_TOKEN, contentType: "application/json" });
+    previousNotesPath = song.notesPath;
+    next.notesUrl = upload.url;
+    next.notesPath = upload.pathname;
+    forgetSongChartBundle(song.notesUrl);
+  }
   await sql`
     UPDATE songs SET name = ${next.name}, artist = ${next.artist}, difficulty = ${next.difficulty}, density = ${next.density},
       lane_variety = ${next.laneVariety}, slider_probability = ${next.sliderProbability}, stamina = ${next.stamina},
       top_score = ${next.topScore}, scores = ${JSON.stringify(next.scores)}::jsonb, author_name = ${next.authorName}, status = ${next.status},
-      tags = ${JSON.stringify(next.tags)}::jsonb, chart_version = ${next.chartVersion}
+      tags = ${JSON.stringify(next.tags)}::jsonb, chart_version = ${next.chartVersion},
+      notes_url = ${next.notesUrl}, notes_path = ${next.notesPath}
     WHERE id = ${id}
   `;
+  if (previousNotesPath && previousNotesPath !== next.notesPath) {
+    await del([previousNotesPath], { token: BLOB_WRITE_TOKEN }).catch(() => undefined);
+  }
   if (await tableExists("global_scores")) {
     await sql`UPDATE global_scores SET song_id = ${song.id}, song_name = ${next.name}, artist = ${next.artist} WHERE song_id = ${song.id} OR ((song_id IS NULL OR song_id = '') AND song_name = ${song.name} AND artist = ${song.artist})`;
   }

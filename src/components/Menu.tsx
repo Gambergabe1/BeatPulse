@@ -4,6 +4,9 @@ import { useMemo } from 'react';
 import { Music, Upload, Play, Trophy, Disc, Cloud, Save, User, Users, Lock, Trash2, Edit2, Check, X, Activity, Settings as SettingsIcon, ArrowLeft, RefreshCw } from 'lucide-react';
 import { loadAudioFile } from '../utils/audio';
 import { generateChart } from '../utils/chartGenerator';
+import { generateChartBundle, pickOfficialChart, toPlayableCharts } from '../utils/storedCharts';
+import { getSongRecords } from '../utils/chartRecords';
+import { CURRENT_CHART_VERSION, difficultyIdForValue, parseChartBundle } from '../../shared/chartFormat';
 import { DEFAULT_DIFFICULTY, DIFFICULTY_PRESETS, getChartSettingsForDifficulty, getDifficultyPreset } from '../utils/chartSettings';
 import { DEFAULT_GAMEPLAY_OPTIONS, GameplayOptions, SongData, Settings } from '../types';
 import {
@@ -24,7 +27,9 @@ import {
   updateCommunitySong,
   updateSocialProfile,
   MultiplayerRoom,
-  PlayerIdentity
+  PlayerIdentity,
+  fetchSongAsset,
+  replaceSongCharts
 } from '../services/pulseApi';
 import { SocialHub } from './SocialHub';
 import { SongLibrary } from './SongLibrary';
@@ -161,6 +166,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const [isForcingStorageUpdate, setIsForcingStorageUpdate] = useState(false);
   const [isModeratingLeaderboard, setIsModeratingLeaderboard] = useState(false);
   const [loadingSongId, setLoadingSongId] = useState<string | null>(null);
+  const [chartRebuildStatus, setChartRebuildStatus] = useState<string | null>(null);
   const [leaderboardRemovalTarget, setLeaderboardRemovalTarget] = useState<GlobalScoreRecord | null>(null);
   const [leaderboardRemovalReason, setLeaderboardRemovalReason] = useState(LEADERBOARD_REMOVAL_REASONS[0]);
   
@@ -196,6 +202,11 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
   const SectionIcon = sectionMeta.icon;
   const chartSettings = getChartSettingsForDifficulty(complexity);
   const difficultyPreset = getDifficultyPreset(complexity);
+  const songRecords = useMemo(() => readySong
+    ? getSongRecords({ songId: readySong.id, name: readySong.name, artist: readySong.artist, duration: readySong.audioBuffer.duration })
+    : [],
+  // Records change after each run; the menu remounts after a run so this stays fresh.
+  [readySong?.id, readySong?.name, readySong?.artist, readySong?.audioBuffer]);
   const effectiveDensity = advancedChartMode ? density : chartSettings.density;
   const effectiveLaneVariety = advancedChartMode ? laneVariety : chartSettings.laneVariety;
   const effectiveSliderProbability = advancedChartMode ? sliderProbability : chartSettings.sliderProbability;
@@ -420,6 +431,20 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     if (!readySong) return;
 
     let cancelled = false;
+    // Community songs play their official stored chart for the chosen difficulty.
+    const official = pickOfficialChart(readySong.charts, complexity, advancedChartMode);
+    if (official) {
+      if (readySong.officialChart !== official.id || readySong.difficulty !== complexity) {
+        setReadySong(prev => prev ? {
+          ...prev,
+          notes: official.notes,
+          officialChart: official.id,
+          difficulty: complexity,
+          ...getChartSettingsForDifficulty(complexity),
+        } : null);
+      }
+      return;
+    }
     const timer = setTimeout(async () => {
       setIsRegenerating(true);
       try {
@@ -435,6 +460,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         setReadySong(prev => prev ? {
           ...prev,
           notes: newNotes,
+          officialChart: undefined,
           difficulty: complexity,
           density: effectiveDensity,
           laneVariety: effectiveLaneVariety,
@@ -452,7 +478,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [complexity, effectiveDensity, effectiveLaneVariety, effectiveSliderProbability, effectiveStamina, movingSlidersEnabled, readySong?.audioBuffer]);
+  }, [advancedChartMode, complexity, effectiveDensity, effectiveLaneVariety, effectiveSliderProbability, effectiveStamina, movingSlidersEnabled, readySong?.audioBuffer, readySong?.charts]);
 
   const loadStoredSongData = useCallback(async (
     song: any,
@@ -462,74 +488,54 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       throw new Error('Audio URL is missing');
     }
 
-    const proxyAssetUrl = (assetUrl: string) => `/api/audio-proxy?url=${encodeURIComponent(assetUrl)}`;
-    const response = await fetch(proxyAssetUrl(song.audioUrl));
-    if (!response.ok) {
-      throw new Error(`Failed to load audio: ${response.statusText}`);
-    }
-
-    const arrayBuffer = await response.arrayBuffer();
+    const [arrayBuffer, storedNotes] = await Promise.all([
+      fetchSongAsset(song.audioUrl).then((response) => response.arrayBuffer()),
+      song.notesUrl
+        ? fetchSongAsset(song.notesUrl).then((response) => response.json()).catch((error) => {
+          console.warn('Failed to fetch stored charts, generating locally.', error);
+          return null;
+        })
+        : Promise.resolve(null),
+    ]);
     const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
 
-    const difficulty = chartOverrides?.difficulty ?? song.difficulty;
+    // Replays and multiplayer pass the difficulty they were played at; otherwise the menu's choice is used.
+    const difficulty = chartOverrides?.difficulty ?? complexity;
     const fallbackProfile = getChartSettingsForDifficulty(difficulty);
-    const densityValue = chartOverrides?.density ?? song.density ?? fallbackProfile.density;
-    const laneVarietyValue = chartOverrides?.laneVariety ?? song.laneVariety ?? fallbackProfile.laneVariety;
-    const sliderProbabilityValue = chartOverrides?.sliderProbability ?? song.sliderProbability ?? fallbackProfile.sliderProbability;
-    const staminaValue = chartOverrides?.stamina ?? song.stamina ?? fallbackProfile.stamina;
+    const densityValue = chartOverrides?.density ?? fallbackProfile.density;
+    const laneVarietyValue = chartOverrides?.laneVariety ?? fallbackProfile.laneVariety;
+    const sliderProbabilityValue = chartOverrides?.sliderProbability ?? fallbackProfile.sliderProbability;
+    const staminaValue = chartOverrides?.stamina ?? fallbackProfile.stamina;
 
-    let notes = [];
-    if (Array.isArray(song.notes)) {
-      notes = song.notes;
-    } else if (typeof song.notes === 'string') {
-      try {
-        const parsedNotes = JSON.parse(song.notes);
-        notes = Array.isArray(parsedNotes) ? parsedNotes : [];
-      } catch (error) {
-        console.warn('Failed to parse embedded notes, retrying with stored chart.', error);
-      }
-    }
+    const bundle = parseChartBundle(storedNotes, difficultyIdForValue(Number(song.difficulty)));
+    const charts = toPlayableCharts(bundle);
+    const official = pickOfficialChart(charts, difficulty, advancedChartMode && !chartOverrides);
 
-    if (notes.length === 0 && song.notesUrl) {
-      try {
-        const notesResponse = await fetch(proxyAssetUrl(song.notesUrl));
-        if (!notesResponse.ok) {
-          throw new Error('Failed to fetch notes');
-        }
-        const parsedNotes = await notesResponse.json();
-        notes = Array.isArray(parsedNotes) ? parsedNotes : [];
-      } catch (error) {
-        console.warn('Failed to fetch stored notes, regenerating chart.', error);
-      }
-    }
-
-    const chartConfig = {
+    const generated = await generateChart(audioBuffer, {
       complexity: difficulty,
       density: densityValue,
       laneVariety: laneVarietyValue,
       sliderProbability: sliderProbabilityValue,
       stamina: staminaValue,
       allowMovingSliders: movingSlidersEnabled
-    };
-    // Sections are always derived locally; the chart is only regenerated when none was stored.
-    const generated = await generateChart(audioBuffer, chartConfig, { includeNotes: notes.length === 0, includeSections: true });
-    const sections = generated.sections;
-    if (notes.length === 0) notes = generated.notes;
+    }, { includeNotes: !official, includeSections: true });
 
     return {
       id: song.id,
       name: song.name,
       artist: song.artist,
       audioBuffer,
-      notes,
+      notes: official?.notes ?? generated.notes,
+      officialChart: official?.id,
+      charts,
       difficulty,
       density: densityValue,
       laneVariety: laneVarietyValue,
       sliderProbability: sliderProbabilityValue,
       stamina: staminaValue,
-      sections,
+      sections: generated.sections,
     };
-  }, [audioContext, movingSlidersEnabled]);
+  }, [advancedChartMode, audioContext, complexity, movingSlidersEnabled]);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -610,17 +616,21 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     setError(null);
 
     try {
+      // Every community song ships official Easy-Expert charts so each difficulty has a fair leaderboard.
+      const { bundle } = await generateChartBundle(readySong.audioBuffer);
+      const defaultPreset = getDifficultyPreset(readySong.difficulty);
+      const defaultProfile = getChartSettingsForDifficulty(defaultPreset.value);
       const newSong = await saveCommunitySong({
         audioFile: lastUploadedFile,
         name: metadata.name,
         artist: metadata.artist,
-        difficulty: readySong.difficulty,
-        density: readySong.density ?? 0.5,
-        laneVariety: readySong.laneVariety ?? 0.5,
-        sliderProbability: readySong.sliderProbability ?? 0.3,
-        stamina: readySong.stamina ?? 0.5,
+        difficulty: defaultPreset.value,
+        density: defaultProfile.density,
+        laneVariety: defaultProfile.laneVariety,
+        sliderProbability: defaultProfile.sliderProbability,
+        stamina: defaultProfile.stamina,
         authorName: username || 'Anonymous',
-        notes: readySong.notes,
+        notes: bundle,
         coverFile: lastUploadedCover || undefined,
         tags: mapTags.split(',').map((tag) => tag.trim()).filter(Boolean)
       });
@@ -656,7 +666,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
       throw new Error('The match song is no longer available.');
     }
     setError(null);
-    const songData = await loadStoredSongData(song);
+    // Everyone in a room plays the same official chart: the one the song was uploaded at.
+    const songData = await loadStoredSongData(song, { difficulty: Number(song.difficulty) });
     onStartGame(songData, false, undefined, room);
   }, [communitySongs, loadStoredSongData, onStartGame]);
 
@@ -995,6 +1006,36 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     }
   };
 
+  const outdatedChartSongs = communitySongs.filter((song) => (Number(song.chartVersion) || 1) < CURRENT_CHART_VERSION);
+
+  // Rebuilds official charts for songs made with an older generator. Runs in the admin's
+  // browser (charting needs the decoded audio) and uploads each finished bundle.
+  const handleRebuildOutdatedCharts = async () => {
+    if (!adminToken) {
+      setError('Admin login required.');
+      return;
+    }
+    if (outdatedChartSongs.length === 0) return;
+    if (!confirm(`Rebuild charts for ${outdatedChartSongs.length} song(s)? Scores set on the old charts stay visible as legacy entries, and replays of the old charts may no longer line up.`)) return;
+    setError(null);
+    const failures: string[] = [];
+    for (const [index, song] of outdatedChartSongs.entries()) {
+      setChartRebuildStatus(`Rebuilding ${index + 1}/${outdatedChartSongs.length}: ${song.name}`);
+      try {
+        const audio = await fetchSongAsset(song.audioUrl).then((response) => response.arrayBuffer());
+        const audioBuffer = await audioContext.decodeAudioData(audio);
+        const { bundle } = await generateChartBundle(audioBuffer);
+        const updated = await replaceSongCharts(song.id, bundle, adminToken);
+        setCommunitySongs((previous) => previous.map((entry) => entry.id === song.id ? { ...entry, ...updated } : entry));
+      } catch (err) {
+        console.error(`Failed to rebuild charts for ${song.name}:`, err);
+        failures.push(song.name);
+      }
+    }
+    setChartRebuildStatus(null);
+    alert(failures.length ? `Rebuilt charts, but these failed: ${failures.join(', ')}` : 'All outdated charts were rebuilt.');
+  };
+
   const handleForceStorageUpdate = async () => {
     if (!adminToken) {
       setError('Admin login required.');
@@ -1061,8 +1102,8 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         previewAudioRef.current.src = "";
       }
       
-      const proxyUrl = `/api/audio-proxy?url=${encodeURIComponent(audioUrl)}`;
-      const audio = new Audio(proxyUrl);
+      // <audio> needs no CORS, so previews stream straight from storage instead of through the API.
+      const audio = new Audio(audioUrl);
       audio.volume = settings.volume * 0.5;
       
       const playPromise = audio.play();
@@ -1268,8 +1309,35 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   />
                 </div>
                 
+                <div className="mb-4 grid grid-cols-4 gap-1.5" role="radiogroup" aria-label="Difficulty">
+                  {DIFFICULTY_PRESETS.map((preset) => {
+                    const selected = !advancedChartMode && difficultyPreset.id === preset.id;
+                    const record = songRecords.find((entry) => entry.preset.id === preset.id)?.record;
+                    const hasOfficial = !readySong.id || Boolean(readySong.charts?.[preset.id]?.length);
+                    return (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => selectDifficultyPreset(preset.value)}
+                        title={readySong.id && !hasOfficial ? 'No official chart yet: this difficulty is generated locally and unranked' : preset.description}
+                        className={`rounded-xl border px-2 py-2 text-center transition ${selected ? 'border-neon-blue bg-neon-blue/15 text-white' : 'border-white/10 bg-white/[0.03] text-white/55 hover:border-white/25 hover:text-white'}`}
+                      >
+                        <span className="block text-[10px] font-black uppercase tracking-wider">{preset.label}</span>
+                        <span className="mt-0.5 block text-[9px] font-bold text-white/40">{record ? `${record.bestRank}${record.fullCombo ? ' · FC' : ''}` : hasOfficial ? '—' : 'local'}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
                 <p className="text-neon-blue/60 text-[10px] font-bold uppercase tracking-widest mb-6">
                   {isRegenerating ? '---' : `${readySong.notes.length} Notes Detected`}
+                  {readySong.id && !isRegenerating && (
+                    <span className={readySong.officialChart ? 'text-neon-green/70' : 'text-neon-orange/80'}>
+                      {readySong.officialChart ? ' · Ranked chart' : ' · Unranked custom chart'}
+                    </span>
+                  )}
                 </p>
                 
                 <button 
@@ -1597,6 +1665,17 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                       >
                         <RefreshCw className={`w-3 h-3 ${isForcingStorageUpdate ? 'animate-spin' : ''}`} />
                         Force Update
+                      </button>
+                      <button
+                        onClick={handleRebuildOutdatedCharts}
+                        disabled={Boolean(chartRebuildStatus) || outdatedChartSongs.length === 0}
+                        title={chartRebuildStatus || 'Regenerate official charts made with an older chart generator'}
+                        className={`text-xs uppercase tracking-widest flex items-center gap-1 ${
+                          chartRebuildStatus || outdatedChartSongs.length === 0 ? 'text-white/20' : 'text-neon-blue hover:text-white'
+                        }`}
+                      >
+                        <RefreshCw className={`w-3 h-3 ${chartRebuildStatus ? 'animate-spin' : ''}`} />
+                        {chartRebuildStatus ?? `Rebuild Charts (${outdatedChartSongs.length})`}
                       </button>
                       <button 
                         onClick={handleAdminLogout}

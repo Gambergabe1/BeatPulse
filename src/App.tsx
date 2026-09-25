@@ -11,7 +11,9 @@ import { GameOverScreen } from './components/GameOverScreen';
 import { Tutorial } from './components/Tutorial';
 import { DEFAULT_GAMEPLAY_OPTIONS, GameplayOptions, JudgementSummary, SongData, Settings } from './types';
 import { getSocialSnapshot, leaveMultiplayerRoom, saveGlobalScore, ScoreRecord, MultiplayerRoom, updateMultiplayerProgress } from './services/pulseApi';
-import { DEFAULT_DIFFICULTY, getChartSettingsForDifficulty } from './utils/chartSettings';
+import { DEFAULT_DIFFICULTY, getChartSettingsForDifficulty, getDifficultyPreset } from './utils/chartSettings';
+import { pickOfficialChart } from './utils/storedCharts';
+import type { DifficultyId } from '../shared/chartFormat';
 import { getNextDifficulty, recordRun, RecordUpdate } from './utils/chartRecords';
 import { generateChart } from './utils/chartGenerator';
 import { prefersMovingSliders } from './utils/device';
@@ -85,6 +87,8 @@ export default function App() {
     completedMissions?: MissionProgress[];
     milestoneBonuses?: { label: string; xp: number; shards: number }[];
     recordUpdate?: RecordUpdate;
+    unrankedReason?: string;
+    leaderboardDifficulty?: DifficultyId;
   } | null>(null);
   // Bumped to remount the game for an instant restart.
   const [runNonce, setRunNonce] = useState(0);
@@ -143,6 +147,10 @@ export default function App() {
 
   const handleGameEnd = useCallback(async (score: number, accuracy: number, maxCombo: number, replayEvents: { time: number; lane: number; type: string }[], fullCombo: boolean, judgements: JudgementSummary) => {
     const isModifiedRun = gameplayOptions.practiceMode || gameplayOptions.hiddenNotes || gameplayOptions.mirrorLanes || gameplayOptions.randomLanes || gameplayOptions.practiceSpeed !== 1;
+    // Community song leaderboards only accept runs on the song's official stored charts.
+    const isCustomChart = Boolean(songData?.id && !songData.officialChart);
+    const isRankedRun = !isModifiedRun && !isCustomChart;
+    const chartDifficulty = songData ? songData.officialChart ?? getDifficultyPreset(songData.difficulty).id : undefined;
     const recordUpdate = songData && !isReplay && !isModifiedRun
       ? recordRun(
         { songId: songData.id, name: songData.name, artist: songData.artist, duration: songData.audioBuffer.duration, difficulty: songData.difficulty },
@@ -158,7 +166,7 @@ export default function App() {
         judgements,
         song: songData ? { id: songData.id, name: songData.name, artist: songData.artist } : undefined,
         multiplayer: Boolean(multiplayerRoom),
-        ranked: !isModifiedRun && !multiplayerRoom,
+        ranked: isRankedRun && !multiplayerRoom,
         milestones: recordUpdate ? {
           newBest: recordUpdate.isNewBest && recordUpdate.previous !== null,
           firstClear: recordUpdate.firstClear,
@@ -181,7 +189,9 @@ export default function App() {
       milestoneBonuses: progressionUpdate?.milestoneBonuses,
       recordUpdate,
       replayEvents,
-      leaderboardStatus: songData && !isReplay ? (isModifiedRun ? 'unranked' : 'saving') : 'idle',
+      leaderboardStatus: songData && !isReplay ? (isRankedRun ? 'saving' : 'unranked') : 'idle',
+      unrankedReason: isCustomChart && !isModifiedRun ? 'Custom chart settings stay off song leaderboards' : undefined,
+      leaderboardDifficulty: chartDifficulty,
       multiplayerRoom: multiplayerRoom || undefined,
     });
     setView('RESULTS');
@@ -201,11 +211,12 @@ export default function App() {
       }
     }
 
-    if (songData && !isReplay && !isModifiedRun) {
+    if (songData && !isReplay && isRankedRun) {
       try {
         const username = localStorage.getItem('username') || 'Anonymous';
         const result = await saveGlobalScore({
           songId: songData.id,
+          difficulty: chartDifficulty,
           score,
           accuracy,
           date: new Date().toLocaleDateString(),
@@ -255,21 +266,25 @@ export default function App() {
     setRunNonce(nonce => nonce + 1);
   }, [multiplayerRoom]);
 
-  // Local uploads can be re-charted on the next difficulty straight from the results screen.
+  // Step up to the next difficulty straight from the results screen: community songs use
+  // their official chart for it, local uploads are re-charted.
   const handleStepUp = useCallback(async () => {
-    if (!songData || songData.id) return;
+    if (!songData) return;
     const next = getNextDifficulty(songData.difficulty);
     if (!next) return;
+    const official = pickOfficialChart(songData.charts, next.value, false);
+    if (songData.id && !official) return;
     setIsPreparingStepUp(true);
     try {
       const profile = getChartSettingsForDifficulty(next.value);
-      const { notes } = await generateChart(songData.audioBuffer, {
+      const notes = official?.notes ?? (await generateChart(songData.audioBuffer, {
         ...profile,
         allowMovingSliders: prefersMovingSliders(),
-      });
+      })).notes;
       setSongData({
         ...songData,
         notes,
+        officialChart: official?.id,
         difficulty: next.value,
         density: profile.density,
         laneVariety: profile.laneVariety,
@@ -337,6 +352,10 @@ export default function App() {
     setSettings(newSettings);
     localStorage.setItem('beatpulse_settings', JSON.stringify(newSettings));
   }, []);
+
+  const nextDifficulty = songData ? getNextDifficulty(songData.difficulty) : undefined;
+  const canStepUp = Boolean(songData && nextDifficulty && !isReplay && !lastResult?.multiplayerRoom
+    && (!songData.id || pickOfficialChart(songData.charts, nextDifficulty.value, false)));
 
   return (
     <div className="w-full min-h-screen bg-black text-white font-sans">
@@ -412,7 +431,7 @@ export default function App() {
           completedMissions={lastResult.completedMissions}
           milestoneBonuses={lastResult.milestoneBonuses}
           recordUpdate={lastResult.recordUpdate}
-          onStepUp={!songData.id && !isReplay && !lastResult.multiplayerRoom && getNextDifficulty(songData.difficulty) ? handleStepUp : undefined}
+          onStepUp={canStepUp ? handleStepUp : undefined}
           isPreparingStepUp={isPreparingStepUp}
           mapRating={songData.id ? progress.mapRatings[songData.id] : undefined}
           onRateMap={handleRateMap}
@@ -420,6 +439,8 @@ export default function App() {
           fullCombo={lastResult.fullCombo}
           leaderboardStatus={lastResult.leaderboardStatus}
           leaderboardError={lastResult.leaderboardError}
+          leaderboardDifficulty={lastResult.leaderboardDifficulty}
+          unrankedReason={lastResult.unrankedReason}
           multiplayerRoom={lastResult.multiplayerRoom}
           playerId={playerId}
           playerToken={playerToken}

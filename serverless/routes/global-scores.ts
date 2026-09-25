@@ -1,5 +1,7 @@
 import * as crypto from "node:crypto";
 import { db, sql, type VercelPoolClient } from "@vercel/postgres";
+import { difficultyIdForValue, findImplausibleScore, isDifficultyId, type DifficultyId } from "../../shared/chartFormat.js";
+import { loadSongChartBundle } from "../lib/charts.js";
 
 interface GlobalScoreRecord {
   id: string;
@@ -12,6 +14,7 @@ interface GlobalScoreRecord {
   songName: string;
   artist: string;
   fullCombo: boolean;
+  difficulty?: DifficultyId;
 }
 
 interface ScoreRecord {
@@ -20,7 +23,14 @@ interface ScoreRecord {
   date: string;
   username: string;
   fullCombo: boolean;
+  /** Absent on scores set before per-difficulty charts existed. */
+  difficulty?: DifficultyId;
 }
+
+/** Song leaderboards keep this many entries per difficulty. */
+const SONG_SCORES_PER_DIFFICULTY = 5;
+/** Local uploads have no stored chart to check against; this bounds obviously fake scores. */
+const MAX_UNVERIFIED_SCORE = 2_000_000;
 
 interface SongScoreState {
   id: string;
@@ -29,6 +39,8 @@ interface SongScoreState {
   topScore: number;
   scores: ScoreRecord[];
   createdAt: string;
+  notesUrl: string;
+  difficulty: number;
 }
 
 function ok(res: any, data: unknown) {
@@ -122,6 +134,7 @@ function normalizeGlobalScoreRow(row: any): GlobalScoreRecord {
     songName: toText(row.song_name ?? row.songName, "Unknown Song"),
     artist: toText(row.artist, "Unknown Artist"),
     fullCombo: row.full_combo === true || row.fullCombo === true,
+    difficulty: isDifficultyId(row.difficulty) ? row.difficulty : undefined,
   };
 }
 
@@ -136,6 +149,7 @@ function parseScoreArray(raw: unknown, createdAt: string) {
       date: toDisplayDate(row.date, createdAt),
       username: toText(row.username, "Anonymous"),
       fullCombo: row.fullCombo === true,
+      difficulty: isDifficultyId(row.difficulty) ? row.difficulty : undefined,
     };
   }).sort((a, b) => b.score - a.score);
 }
@@ -154,6 +168,8 @@ function normalizeSongScoreRow(row: any): SongScoreState {
     topScore: Math.max(clampNumber(row.top_score ?? row.topScore, 0), toTopScoreFromScores(scores)),
     scores,
     createdAt,
+    notesUrl: toText(row.notes_url ?? row.notesUrl, ""),
+    difficulty: clampNumber(row.difficulty, 0.4),
   };
 }
 
@@ -224,6 +240,7 @@ async function prepareGlobalScoresSchema() {
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS artist TEXT`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS full_combo BOOLEAN NOT NULL DEFAULT FALSE`;
   await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE global_scores ADD COLUMN IF NOT EXISTS difficulty TEXT`;
   await migrateLegacyIdentifierTypes();
 }
 
@@ -239,12 +256,14 @@ async function prepareSongsLookupSchema() {
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS top_score REAL`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS scores JSONB`;
   await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS notes_url TEXT`;
+  await sql`ALTER TABLE songs ADD COLUMN IF NOT EXISTS difficulty REAL`;
   return true;
 }
 
 async function readSongWithClient(client: VercelPoolClient, id: string): Promise<SongScoreState | null> {
   const { rows } = await client.sql`
-    SELECT id, name, artist, top_score, scores, created_at
+    SELECT id, name, artist, top_score, scores, created_at, notes_url, difficulty
     FROM songs
     WHERE id = ${id}
     LIMIT 1
@@ -259,13 +278,23 @@ async function handleGet(req: any, res: any) {
 
   const limit = getBoundedQueryNumber(getQueryValue(req, "limit"), 100, 1, 500);
   const offset = getBoundedQueryNumber(getQueryValue(req, "offset"), 0, 0, Number.MAX_SAFE_INTEGER);
+  const difficultyFilter = getQueryValue(req, "difficulty");
+  const difficulty = isDifficultyId(difficultyFilter) ? difficultyFilter : null;
 
-  const { rows } = await sql`
-    SELECT * FROM global_scores
-    ORDER BY score DESC, created_at DESC
-    LIMIT ${limit + 1}
-    OFFSET ${offset}
-  `;
+  const { rows } = difficulty
+    ? await sql`
+      SELECT * FROM global_scores
+      WHERE difficulty = ${difficulty}
+      ORDER BY score DESC, created_at DESC
+      LIMIT ${limit + 1}
+      OFFSET ${offset}
+    `
+    : await sql`
+      SELECT * FROM global_scores
+      ORDER BY score DESC, created_at DESC
+      LIMIT ${limit + 1}
+      OFFSET ${offset}
+    `;
 
   const scores = rows.map(normalizeGlobalScoreRow);
   const chunk = scores.slice(0, limit);
@@ -288,14 +317,33 @@ async function handlePost(req: any, res: any) {
   const date = typeof body.date === "string" && body.date.trim() ? body.date.trim() : new Date().toLocaleDateString();
   const fullCombo = body.fullCombo === true;
   const submissionId = getSubmissionId(body.submissionId);
+  const difficulty = isDifficultyId(body.difficulty) ? body.difficulty : undefined;
 
   if (!Number.isFinite(score) || !Number.isFinite(accuracy)) {
     return fail(res, 400, "Score and accuracy must be numbers.");
+  }
+  if (score < 0 || accuracy < 0 || accuracy > 100) {
+    return fail(res, 422, "Score or accuracy is out of range.");
   }
 
   const songsAvailable = requestedSongId ? await prepareSongsLookupSchema() : false;
   if (requestedSongId && !songsAvailable) {
     return fail(res, 404, "Song not found.");
+  }
+
+  if (requestedSongId) {
+    // Community song scores must match an official stored chart and be achievable on it.
+    if (!difficulty) return fail(res, 400, "A difficulty is required for song leaderboards.");
+    const { rows: songRows } = await sql`SELECT id, notes_url, difficulty FROM songs WHERE id = ${requestedSongId} LIMIT 1`;
+    if (songRows.length === 0) return fail(res, 404, "Song not found.");
+    const notesUrl = toText(songRows[0].notes_url, "");
+    const bundle = notesUrl ? await loadSongChartBundle(notesUrl, difficultyIdForValue(clampNumber(songRows[0].difficulty, 0.4))) : null;
+    const chart = bundle?.charts[difficulty];
+    if (!chart) return fail(res, 409, "This song has no official chart for that difficulty, so the run is unranked.");
+    const problem = findImplausibleScore({ score, accuracy, fullCombo }, chart);
+    if (problem) return fail(res, 422, problem);
+  } else if (score > MAX_UNVERIFIED_SCORE) {
+    return fail(res, 422, "Score is higher than any chart allows.");
   }
 
   let client: VercelPoolClient | undefined;
@@ -339,10 +387,11 @@ async function handlePost(req: any, res: any) {
         linkedSong?.artist ||
         (typeof body.artist === "string" && body.artist.trim() ? body.artist.trim() : "Unknown Artist"),
       fullCombo,
+      difficulty,
     };
 
     await client.sql`
-      INSERT INTO global_scores (id, song_id, score, accuracy, date, username, song_name, artist, full_combo, created_at)
+      INSERT INTO global_scores (id, song_id, score, accuracy, date, username, song_name, artist, full_combo, created_at, difficulty)
       VALUES (
         ${newScore.id},
         ${newScore.songId || null},
@@ -353,19 +402,27 @@ async function handlePost(req: any, res: any) {
         ${newScore.songName},
         ${newScore.artist},
         ${newScore.fullCombo},
-        ${newScore.createdAt}
+        ${newScore.createdAt},
+        ${newScore.difficulty ?? null}
       )
     `;
 
     let updatedSong: SongScoreState | null = null;
     if (linkedSong) {
+      const perDifficulty = new Map<string, number>();
       const nextSongScores = [...linkedSong.scores, {
         score: newScore.score,
         accuracy: newScore.accuracy,
         date: newScore.date,
         username: newScore.username,
         fullCombo: newScore.fullCombo,
-      }].sort((a, b) => b.score - a.score).slice(0, 5);
+        difficulty: newScore.difficulty,
+      }].sort((a, b) => b.score - a.score).filter((entry) => {
+        const key = entry.difficulty ?? "legacy";
+        const count = perDifficulty.get(key) ?? 0;
+        perDifficulty.set(key, count + 1);
+        return count < SONG_SCORES_PER_DIFFICULTY;
+      });
       const nextTopScore = toTopScoreFromScores(nextSongScores);
 
       await client.sql`

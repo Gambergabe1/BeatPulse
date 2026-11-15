@@ -75,7 +75,7 @@ const playUntilResults = async () => {
   const keys = ['d', 'f', 'j', 'k'];
   const deadline = Date.now() + 45_000;
   for (let i = 0; Date.now() < deadline; i++) {
-    if (await page.locator('text=Session Complete').count()) return;
+    if (await page.locator('text=Run complete').count()) return;
     await page.keyboard.press(keys[i % 4]);
     await page.waitForTimeout(80);
   }
@@ -94,7 +94,7 @@ try {
 
   step('upload and auto-chart a song');
   await page.locator('input[type=file][accept*="audio"]').first().setInputFiles(writeTestTrack());
-  await page.waitForFunction(() => /Notes Detected/i.test(document.body.innerText), null, { timeout: 30_000 });
+  await page.waitForFunction(() => /\b\d+ notes\b/i.test(document.body.innerText), null, { timeout: 30_000 });
   const workerLoaded = await page.evaluate(() => performance.getEntriesByType('resource').some((entry) => /chartWorker/.test(entry.name)));
   assert(workerLoaded, 'charting should run in the Web Worker');
 
@@ -120,17 +120,17 @@ try {
   await page.waitForFunction(() => /Daily challenge/i.test(document.body.innerText), null, { timeout: 15_000 });
 
   step('load the community song on Hard and confirm the run is ranked');
-  await page.locator('button:has-text("Community")').first().click();
+  await page.locator('nav button:has-text("Library")').first().click();
   await page.locator('button[aria-label="Play Smoke Test"]').first().click();
-  await page.waitForFunction(() => /Notes Detected/i.test(document.body.innerText), null, { timeout: 30_000 });
+  await page.waitForFunction(() => /\b\d+ notes\b/i.test(document.body.innerText), null, { timeout: 30_000 });
   await page.locator('[role=radio]:has-text("Hard")').click();
   await page.waitForFunction(() => /Ranked chart/i.test(document.body.innerText), null, { timeout: 10_000 });
-  const hardNotes = Number((await bodyText()).match(/(\d+) Notes Detected/i)?.[1]);
+  const hardNotes = Number((await bodyText()).match(/(\d+) notes\b/i)?.[1]);
   assert.equal(hardNotes, bundle.charts.hard.length, 'the stored Hard chart should be played, not a regenerated one');
   await shot('ready-hard');
 
   step('play to the results screen and submit a verified score');
-  await page.locator('button:has-text("Start Game")').click();
+  await page.getByRole('button', { name: 'Start', exact: true }).click();
   await playUntilResults();
   await page.waitForFunction(() => /leaderboards updated|leaderboard update failed/i.test(document.body.innerText), null, { timeout: 15_000 });
   let text = await bodyText();
@@ -149,11 +149,11 @@ try {
 
   step('social hub loads without API errors');
   await page.waitForTimeout(1500);
-  await page.locator('button:has-text("Social")').first().click();
+  await page.locator('nav button:has-text("Social")').first().click();
   await page.waitForFunction(() => /public player profile/i.test(document.body.innerText), null, { timeout: 15_000 });
 
   step('admin login and chart tools');
-  await page.locator('button:has-text("Admin")').first().click();
+  await page.locator('aside button:has-text("Admin")').first().click();
   await page.locator('input[type=password]').first().fill(ADMIN_PASSWORD);
   await page.keyboard.press('Enter');
   await page.waitForFunction(() => /Rebuild Charts \(\d+\)/i.test(document.body.innerText), null, { timeout: 15_000 });

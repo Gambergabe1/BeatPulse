@@ -490,56 +490,28 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
         <div className="absolute inset-0 bg-neon-blue/5 mix-blend-overlay" />
       </div>
 
-      {/* Waveform Visualizer Background */}
-      <div className="absolute inset-0 z-0 flex items-center justify-center opacity-30 pointer-events-none">
-        <div className="w-full h-64 relative">
-          <canvas 
-            ref={canvasRef} 
-            className="w-full h-full"
-          />
-          <motion.div 
-            animate={{ 
-              x: ['-100%', '100%'],
-            }}
-            transition={{ 
-              duration: 3, 
-              repeat: Infinity, 
-              ease: "linear" 
-            }}
-            className="absolute inset-0 bg-gradient-to-r from-transparent via-white/20 to-transparent w-1/2"
-          />
-        </div>
-      </div>
-
       <motion.div 
         initial={{ y: 20, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
-        className="max-w-2xl w-full z-10"
+        className="max-w-6xl w-full z-10"
       >
-        <div className="text-center mb-12">
-          <motion.h2 
-            initial={{ letterSpacing: "0.2em" }}
-            animate={{ letterSpacing: "0.8em" }}
-            className="text-xs font-black text-neon-blue uppercase mb-4 opacity-80"
-          >
-            {multiplayerRoom ? 'Multiplayer Complete' : 'Session Complete'}
-          </motion.h2>
-          <h1 className="text-5xl md:text-7xl font-display font-black text-white tracking-tighter italic uppercase">
-            Game Over
-          </h1>
-          <div className="mt-4 flex flex-col items-center gap-1">
-            <p className="text-white font-display font-bold text-xl uppercase tracking-widest">
-              {songName}
-            </p>
-            {artist && artist !== "Unknown Artist" && (
-              <p className="text-neon-blue font-mono text-sm uppercase tracking-[0.3em] opacity-60">
-                {artist}
-              </p>
-            )}
+        <header className="relative mb-6 overflow-hidden rounded-3xl border border-white/10 bg-white/[0.03] px-6 py-5">
+          <canvas ref={canvasRef} className="pointer-events-none absolute inset-x-0 bottom-0 h-20 w-full opacity-25" aria-hidden />
+          <div className="relative flex flex-wrap items-end justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-semibold uppercase tracking-[0.2em] text-neon-blue">{multiplayerRoom ? 'Match complete' : isReplay ? 'Replay finished' : 'Run complete'}</p>
+              <h1 className="mt-1 truncate font-display text-3xl font-extrabold text-white sm:text-4xl">{songName}</h1>
+              {artist && artist !== "Unknown Artist" && <p className="truncate text-sm text-white/50">{artist}</p>}
+            </div>
+            <div className="flex flex-wrap gap-1.5 text-xs font-semibold">
+              {leaderboardDifficulty && <span className="rounded-full bg-white/10 px-2.5 py-1 capitalize text-white/70">{leaderboardDifficulty}</span>}
+              {fullCombo && <span className="rounded-full bg-neon-orange/15 px-2.5 py-1 text-neon-orange">Full combo</span>}
+              {recordUpdate?.isNewBest && recordUpdate.previous && <span className="rounded-full bg-neon-green/15 px-2.5 py-1 text-neon-green">New best</span>}
+            </div>
           </div>
-        </div>
+        </header>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
           {/* Grade Section */}
           <motion.div 
             initial={{ scale: 0.8, opacity: 0 }}
@@ -597,6 +569,8 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
           </div>
         </div>
 
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_380px]">
+          <div className="min-w-0">
         {recordUpdate && <motion.section initial={recordUpdate.isNewBest ? { scale: 0.96, opacity: 0 } : { y: 14, opacity: 0 }} animate={{ scale: 1, y: 0, opacity: 1 }} transition={{ delay: 0.45 }} className={`mb-6 rounded-3xl border p-5 ${recordUpdate.isNewBest ? 'border-neon-green/35 bg-neon-green/[0.08] shadow-[0_0_32px_rgba(57,255,20,0.12)]' : 'border-white/10 bg-white/[0.035]'}`}>
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
@@ -648,8 +622,6 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
         </div>
 
 
-        {(earnedXp || (songId && onRateMap)) && <div className="mb-6 grid gap-4 md:grid-cols-2"><div className="rounded-2xl border border-neon-purple/25 bg-neon-purple/[0.07] px-5 py-4"><p className="text-[10px] font-black uppercase tracking-[0.2em] text-neon-purple">Pulse progress</p><p className="mt-1 font-display text-2xl font-black text-white">{earnedXp ? `+${earnedXp} XP` : 'Replay analysis'}</p>{milestoneBonuses.length > 0 ? <div className="mt-2 flex flex-wrap gap-1.5">{milestoneBonuses.map((bonus) => <span key={bonus.label} className="rounded-full border border-neon-purple/30 bg-black/20 px-2.5 py-1 text-[10px] font-bold text-white/70">{bonus.label} · +{bonus.xp} XP · +{bonus.shards} Shards</span>)}</div> : <p className="mt-1 text-xs text-white/40">Beat your best, clear new charts and full combo them for bonus XP.</p>}</div>{songId && onRateMap && <div className="rounded-2xl border border-white/10 bg-white/[0.035] px-5 py-4"><p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/40">Rate this map</p><div className="mt-2 flex items-center gap-1">{[1, 2, 3, 4, 5].map((rating) => <button key={rating} type="button" aria-label={`Rate ${rating} out of 5`} aria-pressed={mapRating === rating} onClick={() => onRateMap(rating)} className={`rounded-lg p-1 transition ${rating <= (mapRating || 0) ? 'text-neon-orange' : 'text-white/20 hover:text-white/60'}`}><Star className={`h-5 w-5 ${rating <= (mapRating || 0) ? 'fill-current' : ''}`} /></button>)}</div><p className="mt-1 text-xs text-white/40">{mapRating ? `Your rating: ${mapRating}/5` : 'Your private map rating.'}</p></div>}</div>}
-
         {matchRoom && (
           <motion.div
             initial={{ y: 20, opacity: 0 }}
@@ -673,12 +645,16 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
           </motion.div>
         )}
 
+          </div>
+          <div className="min-w-0">
+        {(earnedXp || (songId && onRateMap)) && <div className="mb-6 grid gap-4"><div className="rounded-2xl border border-neon-purple/25 bg-neon-purple/[0.07] px-5 py-4"><p className="text-[10px] font-black uppercase tracking-[0.2em] text-neon-purple">Pulse progress</p><p className="mt-1 font-display text-2xl font-black text-white">{earnedXp ? `+${earnedXp} XP` : 'Replay analysis'}</p>{milestoneBonuses.length > 0 ? <div className="mt-2 flex flex-wrap gap-1.5">{milestoneBonuses.map((bonus) => <span key={bonus.label} className="rounded-full border border-neon-purple/30 bg-black/20 px-2.5 py-1 text-[10px] font-bold text-white/70">{bonus.label} · +{bonus.xp} XP · +{bonus.shards} Shards</span>)}</div> : <p className="mt-1 text-xs text-white/40">Beat your best, clear new charts and full combo them for bonus XP.</p>}</div>{songId && onRateMap && <div className="rounded-2xl border border-white/10 bg-white/[0.035] px-5 py-4"><p className="text-[10px] font-black uppercase tracking-[0.2em] text-white/40">Rate this map</p><div className="mt-2 flex items-center gap-1">{[1, 2, 3, 4, 5].map((rating) => <button key={rating} type="button" aria-label={`Rate ${rating} out of 5`} aria-pressed={mapRating === rating} onClick={() => onRateMap(rating)} className={`rounded-lg p-1 transition ${rating <= (mapRating || 0) ? 'text-neon-orange' : 'text-white/20 hover:text-white/60'}`}><Star className={`h-5 w-5 ${rating <= (mapRating || 0) ? 'fill-current' : ''}`} /></button>)}</div><p className="mt-1 text-xs text-white/40">{mapRating ? `Your rating: ${mapRating}/5` : 'Your private map rating.'}</p></div>}</div>}
+
         {/* Leaderboard Section */}
         <motion.div 
           initial={{ y: 20, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
           transition={{ delay: 0.6 }}
-          className="bg-white/5 border border-white/10 rounded-3xl p-6 mb-12"
+          className="bg-white/5 border border-white/10 rounded-3xl p-6 mb-6"
         >
           <div className="flex items-center gap-3 mb-6">
             <List className="w-5 h-5 text-neon-purple" />
@@ -721,10 +697,14 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
           </div>
         </motion.div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-4 xl:grid-cols-5 gap-4 w-full">
+          </div>
+        </div>
+
+        <div className="sticky bottom-0 z-20 -mx-6 mt-2 border-t border-white/10 bg-[#050505]/90 px-6 py-4 backdrop-blur-xl md:-mx-12 md:px-12">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-2">
           {!multiplayerRoom && <button 
             onClick={onRetry}
-            className="w-full px-6 py-5 rounded-full bg-white text-black font-display font-black uppercase tracking-widest hover:bg-neon-blue hover:text-white transition-all flex items-center justify-center gap-3 group text-sm"
+            className="px-5 py-3 rounded-xl bg-white text-black font-display font-bold uppercase tracking-wider hover:bg-neon-blue hover:text-white transition-all flex items-center justify-center gap-3 group text-sm"
           >
             <RotateCcw className="w-5 h-5 group-hover:rotate-[-180deg] transition-transform duration-500" />
             Retry
@@ -735,20 +715,20 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
             onClick={onStepUp}
             disabled={isPreparingStepUp}
             title={`Re-chart this song on ${stepUpPreset.label} and play it`}
-            className="w-full px-6 py-5 rounded-full border border-neon-blue/40 bg-neon-blue/10 text-neon-blue font-display font-black uppercase tracking-widest hover:bg-neon-blue hover:text-black transition-all flex items-center justify-center gap-3 text-sm disabled:opacity-50"
+            className="px-5 py-3 rounded-xl border border-neon-blue/40 bg-neon-blue/10 text-neon-blue font-display font-bold uppercase tracking-wider hover:bg-neon-blue hover:text-black transition-all flex items-center justify-center gap-3 text-sm disabled:opacity-50"
           >
             <ChevronsUp className="w-5 h-5" />
             {isPreparingStepUp ? 'Charting…' : stepUpPreset.label}
           </button>}
 
-          {matchRoom && matchRoom.participants.some((player) => player.playerId === playerId) && <button onClick={handleRematchVote} className={`w-full px-6 py-5 rounded-full font-display font-black uppercase tracking-widest transition-all flex items-center justify-center gap-3 text-sm ${hasRematchVoted ? 'border border-neon-green/35 bg-neon-green/10 text-neon-green' : 'bg-neon-blue text-black hover:bg-white'}`}><RotateCcw className="w-5 h-5" />{hasRematchVoted ? `Voted ${matchRoom.rematchVotes?.length || 0}/${matchRoom.participants.length}` : `Vote rematch ${matchRoom.rematchVotes?.length || 0}/${matchRoom.participants.length}`}</button>}
+          {matchRoom && matchRoom.participants.some((player) => player.playerId === playerId) && <button onClick={handleRematchVote} className={`px-5 py-3 rounded-xl font-display font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-3 text-sm ${hasRematchVoted ? 'border border-neon-green/35 bg-neon-green/10 text-neon-green' : 'bg-neon-blue text-black hover:bg-white'}`}><RotateCcw className="w-5 h-5" />{hasRematchVoted ? `Voted ${matchRoom.rematchVotes?.length || 0}/${matchRoom.participants.length}` : `Vote rematch ${matchRoom.rematchVotes?.length || 0}/${matchRoom.participants.length}`}</button>}
           
           {!isReplay ? (
             <button 
               onClick={handleSaveReplay}
               disabled={isSaved || !songId}
               title={!songId ? "Cannot save replays for local files" : ""}
-              className={`w-full px-6 py-5 rounded-full font-display font-black uppercase tracking-widest transition-all flex items-center justify-center gap-3 group text-sm ${
+              className={`px-5 py-3 rounded-xl font-display font-bold uppercase tracking-wider transition-all flex items-center justify-center gap-3 group text-sm ${
                 isSaved 
                   ? 'bg-neon-green/20 text-neon-green border border-neon-green/50 cursor-default'
                   : !songId
@@ -764,7 +744,7 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
           {replayEvents.length > 0 ? (
             <button 
               onClick={onReplay}
-              className="w-full px-6 py-5 rounded-full bg-neon-blue text-white font-display font-black uppercase tracking-widest hover:bg-white hover:text-black transition-all flex items-center justify-center gap-3 group text-sm"
+              className="px-5 py-3 rounded-xl bg-neon-blue text-white font-display font-bold uppercase tracking-wider hover:bg-white hover:text-black transition-all flex items-center justify-center gap-3 group text-sm"
             >
               <Music className="w-5 h-5" />
               {isReplay ? 'Watch Again' : 'Watch Replay'}
@@ -773,22 +753,23 @@ export const GameOverScreen: React.FC<GameOverScreenProps> = ({
 
           <button 
             onClick={handleShare}
-            className="w-full px-6 py-5 rounded-full bg-neon-purple text-white font-display font-black uppercase tracking-widest hover:bg-white hover:text-black transition-all flex items-center justify-center gap-3 group text-sm"
+            className="px-5 py-3 rounded-xl bg-neon-purple text-white font-display font-bold uppercase tracking-wider hover:bg-white hover:text-black transition-all flex items-center justify-center gap-3 group text-sm"
           >
             <Share2 className={`w-5 h-5 ${isCopied ? 'scale-0' : 'scale-100'} transition-transform`} />
             {isCopied ? 'Copied!' : 'Share'}
           </button>
           <button 
             onClick={onHome}
-            className="w-full px-6 py-5 rounded-full bg-white/5 border border-white/10 text-white font-display font-bold uppercase tracking-widest hover:bg-white/10 transition-all flex items-center justify-center gap-3 text-sm"
+            className="px-5 py-3 rounded-xl bg-white/5 border border-white/10 text-white font-display font-bold uppercase tracking-wider hover:bg-white/10 transition-all flex items-center sm:ml-auto justify-center gap-3 text-sm"
           >
             <Home className="w-5 h-5" />
             Menu
           </button>
         </div>
-        <p className="mt-4 text-center text-[10px] font-bold uppercase tracking-[0.2em] text-white/25">
-          {multiplayerRoom ? 'Esc menu' : 'R retry · Esc menu · ` restarts mid-run'}
+        <p className="mx-auto mt-2 hidden max-w-6xl text-[11px] font-medium text-white/30 md:block">
+          {multiplayerRoom ? 'Esc returns to the menu' : 'R retries · Esc returns to the menu · ` restarts during a run'}
         </p>
+        </div>
       </motion.div>
     </div>
   );

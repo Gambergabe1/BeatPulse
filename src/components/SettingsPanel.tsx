@@ -246,6 +246,43 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                         ))}
                       </div>
                     </div>
+                    <div className="rounded-2xl border border-neon-blue/20 bg-neon-blue/[0.05] p-6">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div><h4 className="font-display font-bold text-white">Practice & modifiers</h4><p className="mt-1 text-xs text-white/40">Practice tools are local only. Modified runs do not enter leaderboards.</p></div>
+                        <button type="button" onClick={() => updateGameplayOptions({ practiceMode: !gameplayOptions.practiceMode })} className={`rounded-full border px-3 py-1.5 text-[10px] font-black uppercase tracking-wider ${gameplayOptions.practiceMode ? 'border-neon-green/35 bg-neon-green/15 text-neon-green' : 'border-white/10 bg-black/20 text-white/40'}`}>{gameplayOptions.practiceMode ? 'Practice on' : 'Practice off'}</button>
+                      </div>
+
+                      <div className="mt-5 rounded-2xl border border-white/8 bg-black/20 p-4">
+                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Input offset</p><p className="mt-1 text-xs text-white/40">Calibrate how early or late your taps register.</p></div><span className="font-mono text-sm text-neon-blue">{gameplayOptions.inputOffsetMs > 0 ? '+' : ''}{gameplayOptions.inputOffsetMs} ms</span></div>
+                        <input aria-label="Input timing offset" type="range" min="-120" max="120" step="5" value={gameplayOptions.inputOffsetMs} onChange={(event) => updateGameplayOptions({ inputOffsetMs: parseInt(event.target.value, 10) })} className="mt-4 h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue" />
+                      </div>
+
+                      <div className="mt-4">
+                        <TimingCalibration
+                          audioContext={audioContext}
+                          volume={localSettings.volume}
+                          currentOffsetMs={gameplayOptions.inputOffsetMs}
+                          onApply={(inputOffsetMs) => updateGameplayOptions({ inputOffsetMs })}
+                        />
+                      </div>
+
+                      <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
+                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Practice pace</p><p className="mt-1 text-xs text-white/40">Slows audio and chart timing together.</p></div><span className="font-mono text-sm text-neon-green">{gameplayOptions.practiceSpeed.toFixed(2).replace(/0$/, '')}x</span></div>
+                        <div className="mt-3 grid grid-cols-3 gap-2">{[0.5, 0.75, 1].map((speed) => <button key={speed} type="button" disabled={!gameplayOptions.practiceMode} aria-pressed={gameplayOptions.practiceSpeed === speed} onClick={() => updateGameplayOptions({ practiceSpeed: speed })} className={`rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-wider disabled:opacity-30 ${gameplayOptions.practiceSpeed === speed ? 'border-neon-green/35 bg-neon-green/10 text-neon-green' : 'border-white/8 text-white/45 hover:bg-white/10'}`}>{speed.toFixed(2).replace(/0$/, '')}x</button>)}</div>
+                      </div>
+
+                      <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
+                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Scroll speed</p><p className="mt-1 text-xs text-white/40">Changes note spacing without changing the chart.</p></div><span className="font-mono text-sm text-neon-blue">{gameplayOptions.scrollSpeed.toFixed(1)}x</span></div>
+                        <input aria-label="Default note scroll speed" type="range" min="0.6" max="1.6" step="0.1" value={gameplayOptions.scrollSpeed} onChange={(event) => updateGameplayOptions({ scrollSpeed: parseFloat(event.target.value) })} className="mt-4 h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue" />
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-2 gap-2">{([
+                        ['hiddenNotes', 'Hidden', 'Notes fade before the hit line.'],
+                        ['mirrorLanes', 'Mirror', 'Flip the lane layout.'],
+                        ['randomLanes', 'Random', 'Shuffle the lane order.'],
+                        ['noFail', 'No fail', 'Keep playing when health runs out.'],
+                      ] as Array<[keyof Pick<GameplayOptions, 'hiddenNotes' | 'mirrorLanes' | 'randomLanes' | 'noFail'>, string, string]>).map(([key, label, hint]) => <button key={key} type="button" aria-pressed={gameplayOptions[key]} onClick={() => updateGameplayOptions({ [key]: !gameplayOptions[key] })} className={`rounded-2xl border p-3 text-left transition ${gameplayOptions[key] ? 'border-neon-purple/35 bg-neon-purple/10 text-white' : 'border-white/8 bg-black/20 text-white/55 hover:bg-white/5'}`}><p className="text-xs font-black uppercase tracking-wider">{label}</p><p className="mt-1 text-[10px] leading-relaxed text-white/35">{hint}</p></button>)}</div>
+                    </div>
                   </div>
 
                   <div className="space-y-6">
@@ -343,43 +380,6 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
                           ] as Array<[keyof Pick<Settings, 'reducedMotion' | 'largeNotes' | 'hapticFeedback'>, string, string]>).map(([key, label, hint]) => <button key={key} type="button" aria-pressed={localSettings[key]} onClick={() => { const nextSettings = { ...localSettings, [key]: !localSettings[key] }; setLocalSettings(nextSettings); onSaveSettings(nextSettings); }} className={`flex w-full items-center justify-between gap-3 rounded-xl border px-3 py-2.5 text-left ${localSettings[key] ? 'border-neon-green/25 bg-neon-green/[0.07]' : 'border-white/8 bg-black/10'}`}><span><span className="block text-xs font-bold text-white">{label}</span><span className="mt-0.5 block text-[10px] text-white/35">{hint}</span></span><span className={`h-2.5 w-2.5 rounded-full ${localSettings[key] ? 'bg-neon-green shadow-[0_0_8px_#39ff14]' : 'bg-white/20'}`} /></button>)}</div>
                         </div>
                       </div>
-                    </div>
-                    <div className="rounded-2xl border border-neon-blue/20 bg-neon-blue/[0.05] p-6">
-                      <div className="flex flex-wrap items-start justify-between gap-3">
-                        <div><h4 className="font-display font-bold text-white">Practice & modifiers</h4><p className="mt-1 text-xs text-white/40">Practice tools are local only. Modified runs do not enter leaderboards.</p></div>
-                        <button type="button" onClick={() => updateGameplayOptions({ practiceMode: !gameplayOptions.practiceMode })} className={`rounded-full border px-3 py-1.5 text-[10px] font-black uppercase tracking-wider ${gameplayOptions.practiceMode ? 'border-neon-green/35 bg-neon-green/15 text-neon-green' : 'border-white/10 bg-black/20 text-white/40'}`}>{gameplayOptions.practiceMode ? 'Practice on' : 'Practice off'}</button>
-                      </div>
-
-                      <div className="mt-5 rounded-2xl border border-white/8 bg-black/20 p-4">
-                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Input offset</p><p className="mt-1 text-xs text-white/40">Calibrate how early or late your taps register.</p></div><span className="font-mono text-sm text-neon-blue">{gameplayOptions.inputOffsetMs > 0 ? '+' : ''}{gameplayOptions.inputOffsetMs} ms</span></div>
-                        <input aria-label="Input timing offset" type="range" min="-120" max="120" step="5" value={gameplayOptions.inputOffsetMs} onChange={(event) => updateGameplayOptions({ inputOffsetMs: parseInt(event.target.value, 10) })} className="mt-4 h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue" />
-                      </div>
-
-                      <div className="mt-4">
-                        <TimingCalibration
-                          audioContext={audioContext}
-                          volume={localSettings.volume}
-                          currentOffsetMs={gameplayOptions.inputOffsetMs}
-                          onApply={(inputOffsetMs) => updateGameplayOptions({ inputOffsetMs })}
-                        />
-                      </div>
-
-                      <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
-                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Practice pace</p><p className="mt-1 text-xs text-white/40">Slows audio and chart timing together.</p></div><span className="font-mono text-sm text-neon-green">{gameplayOptions.practiceSpeed.toFixed(2).replace(/0$/, '')}x</span></div>
-                        <div className="mt-3 grid grid-cols-3 gap-2">{[0.5, 0.75, 1].map((speed) => <button key={speed} type="button" disabled={!gameplayOptions.practiceMode} aria-pressed={gameplayOptions.practiceSpeed === speed} onClick={() => updateGameplayOptions({ practiceSpeed: speed })} className={`rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-wider disabled:opacity-30 ${gameplayOptions.practiceSpeed === speed ? 'border-neon-green/35 bg-neon-green/10 text-neon-green' : 'border-white/8 text-white/45 hover:bg-white/10'}`}>{speed.toFixed(2).replace(/0$/, '')}x</button>)}</div>
-                      </div>
-
-                      <div className="mt-4 rounded-2xl border border-white/8 bg-black/20 p-4">
-                        <div className="flex items-center justify-between gap-3"><div><p className="text-sm font-bold text-white">Scroll speed</p><p className="mt-1 text-xs text-white/40">Changes note spacing without changing the chart.</p></div><span className="font-mono text-sm text-neon-blue">{gameplayOptions.scrollSpeed.toFixed(1)}x</span></div>
-                        <input aria-label="Default note scroll speed" type="range" min="0.6" max="1.6" step="0.1" value={gameplayOptions.scrollSpeed} onChange={(event) => updateGameplayOptions({ scrollSpeed: parseFloat(event.target.value) })} className="mt-4 h-2 w-full cursor-pointer appearance-none rounded-lg bg-white/10 accent-neon-blue" />
-                      </div>
-
-                      <div className="mt-4 grid grid-cols-2 gap-2">{([
-                        ['hiddenNotes', 'Hidden', 'Notes fade before the hit line.'],
-                        ['mirrorLanes', 'Mirror', 'Flip the lane layout.'],
-                        ['randomLanes', 'Random', 'Shuffle the lane order.'],
-                        ['noFail', 'No fail', 'Keep playing when health runs out.'],
-                      ] as Array<[keyof Pick<GameplayOptions, 'hiddenNotes' | 'mirrorLanes' | 'randomLanes' | 'noFail'>, string, string]>).map(([key, label, hint]) => <button key={key} type="button" aria-pressed={gameplayOptions[key]} onClick={() => updateGameplayOptions({ [key]: !gameplayOptions[key] })} className={`rounded-2xl border p-3 text-left transition ${gameplayOptions[key] ? 'border-neon-purple/35 bg-neon-purple/10 text-white' : 'border-white/8 bg-black/20 text-white/55 hover:bg-white/5'}`}><p className="text-xs font-black uppercase tracking-wider">{label}</p><p className="mt-1 text-[10px] leading-relaxed text-white/35">{hint}</p></button>)}</div>
                     </div>
                   </div>
                 </div>

@@ -3,20 +3,12 @@ import { motion, AnimatePresence } from 'motion/react';
 import { useMemo } from 'react';
 import {
   Music,
-  Upload,
   Play,
   Trophy,
-  Disc,
-  Cloud,
   Save,
-  User,
-  Users,
-  Lock,
   Edit2,
   Check,
-  Activity,
-  Settings as SettingsIcon,
-  ArrowLeft
+  X
 } from 'lucide-react';
 import { loadAudioFile } from '../utils/audio';
 import { generateChart } from '../utils/chartGenerator';
@@ -49,6 +41,8 @@ import {
 } from '../services/pulseApi';
 import { IntegrityResultRow, MainTab } from './menuShared';
 import { DailyChallengeCard } from './DailyChallengeCard';
+import { AppShell, PageHeader, type ShellTab } from './shell/AppShell';
+import { Card, ControlsCard, DifficultyPicker, RecentRunsCard, SongDropZone } from './play/PlayCards';
 import { SongLibrary } from './SongLibrary';
 import { getPlayerId, getPlayerToken } from '../utils/playerIdentity';
 import { prefersMovingSliders } from '../utils/device';
@@ -211,17 +205,6 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     setLocalSettings(nextSettings);
     onSaveSettings(nextSettings);
   };
-  const isAdminPage = activeTab === 'ADMIN';
-  const sectionMeta = ({
-    LOCAL: { lead: 'Play', accent: 'Studio', subtitle: 'Load a track and shape your chart', icon: Activity, color: 'text-neon-blue' },
-    COMMUNITY: { lead: 'Community', accent: 'Library', subtitle: 'Discover player-made rhythm charts', icon: Cloud, color: 'text-neon-blue' },
-    SOCIAL: { lead: 'Pulse', accent: 'Network', subtitle: 'Friends · Messages · Live Matches', icon: Users, color: 'text-neon-purple' },
-    PROGRESS: { lead: 'Player', accent: 'Progress', subtitle: 'Missions · Shop · Ranked · Achievements', icon: Trophy, color: 'text-neon-orange' },
-    GLOBAL: { lead: 'Global', accent: 'Rankings', subtitle: 'The best runs across every chart', icon: Trophy, color: 'text-neon-green' },
-    REPLAYS: { lead: 'Replay', accent: 'Vault', subtitle: 'Rewatch and study your saved performances', icon: Play, color: 'text-neon-blue' },
-    SETTINGS: { lead: 'Player', accent: 'Setup', subtitle: 'Tune controls, charts, visuals, and sound', icon: SettingsIcon, color: 'text-neon-purple' },
-  } satisfies Record<MainTab, { lead: string; accent: string; subtitle: string; icon: React.ElementType; color: string }>)[activeTab === 'ADMIN' ? 'LOCAL' : activeTab];
-  const SectionIcon = sectionMeta.icon;
   const chartSettings = getChartSettingsForDifficulty(complexity);
   const difficultyPreset = getDifficultyPreset(complexity);
   const songRecords = useMemo(() => readySong
@@ -559,11 +542,9 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     };
   }, [advancedChartMode, audioContext, complexity, movingSlidersEnabled]);
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    if (!file.type.includes('audio')) {
+  const handleAudioFile = async (file: File) => {
+    // Dropped files sometimes arrive without a MIME type, so the extension counts too.
+    if (!file.type.includes('audio') && !/\.(mp3|wav|ogg|oga|m4a|aac|flac|webm|opus)$/i.test(file.name)) {
       setError('Please upload an audio file (MP3, WAV, etc.)');
       return;
     }
@@ -773,10 +754,6 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     }
     setActiveTab('ADMIN');
   }, [activeTab]);
-
-  const handleBackToMainPage = useCallback(() => {
-    setActiveTab(lastMainTab);
-  }, [lastMainTab]);
 
   const handleChangeAdminPassword = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1162,363 +1139,158 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
     return () => handlePreviewStop();
   }, []);
 
-  return (
-    <div className={`min-h-screen w-full flex flex-col items-center justify-start md:justify-center p-6 md:p-12 relative overflow-x-hidden ${localSettings.menuTheme === 'aurora' ? 'bg-[#080512]' : 'bg-black'}`}>
-      {/* Background Elements */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-neon-blue/10 blur-[120px] rounded-full" />
-        <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-neon-purple/10 blur-[120px] rounded-full" />
-      </div>
+  const pageCopy: Record<ShellTab, { title: string; subtitle: string }> = {
+    LOCAL: readySong
+      ? { title: 'Ready to play', subtitle: 'Pick a difficulty and start, or fine-tune the chart first.' }
+      : { title: 'Play', subtitle: 'Drop in any song and BeatPulse builds a chart for it in seconds.' },
+    COMMUNITY: { title: 'Library', subtitle: 'Songs shared by players, each with Easy to Expert charts.' },
+    SOCIAL: { title: 'Social', subtitle: 'Friends, messages and live matches.' },
+    PROGRESS: { title: 'Progress', subtitle: 'Missions, rewards, the shop and your season rank.' },
+    GLOBAL: { title: 'Leaderboards', subtitle: 'The best runs across every chart.' },
+    REPLAYS: { title: 'Replays', subtitle: 'Rewatch and study saved runs.' },
+    SETTINGS: { title: 'Settings', subtitle: 'Controls, chart generation, visuals and sound.' },
+    ADMIN: { title: 'Admin', subtitle: 'Manage songs, scores and storage.' },
+  };
+  const handleShellNavigate = (tab: ShellTab) => (tab === 'ADMIN' ? handleOpenAdminPage() : handleMainTabChange(tab));
+  const isPublishableUpload = Boolean(readySong && !readySong.id && lastUploadedFile);
+  const officialChartIds = readySong?.id
+    ? new Set(DIFFICULTY_PRESETS.filter((preset) => readySong.charts?.[preset.id]?.length).map((preset) => preset.id))
+    : undefined;
 
-      <motion.div 
-        initial={{ opacity: 0, y: 20 }}
-        animate={{ opacity: 1, y: 0 }}
-        className="z-10 flex flex-col items-center max-w-6xl w-full"
-      >
-        <div className="mb-12 text-center">
-          <motion.div
-            animate={{ rotate: 360 }}
-            transition={{ duration: 10, repeat: Infinity, ease: "linear" }}
-            className="inline-block mb-4"
-          >
-            <Disc className="w-16 h-16 text-neon-blue" />
-          </motion.div>
-          <h1 className="mb-2 font-display text-5xl font-black uppercase italic tracking-tighter sm:text-7xl md:text-8xl">
-            Beat<span className="text-neon-pink">Pulse</span>
-          </h1>
-          <p className="text-white/40 font-display font-bold tracking-[0.3em] uppercase text-sm">
-            Rhythm Evolution
-          </p>
-          <div className="mt-5 flex flex-wrap items-center justify-center gap-2 text-[9px] font-black uppercase tracking-[0.18em] text-white/35">
-            <span className="rounded-full border border-neon-green/20 bg-neon-green/[0.07] px-3 py-1.5"><span className="mr-2 inline-block h-1.5 w-1.5 rounded-full bg-neon-green shadow-[0_0_8px_#39ff14]" />Live multiplayer</span>
-            <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">Auto charts</span>
-            <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1.5">Up to 8 players</span>
-          </div>
-        </div>
-
-        {/* Top Utility Buttons */}
-        <div className="mb-6 flex w-full items-center justify-between gap-2">
-          <div className="flex min-w-0 flex-1 items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 sm:gap-3 sm:px-4">
-            <div className="w-5 h-5 rounded-full bg-neon-purple/20 flex items-center justify-center">
-              <User className="w-3 h-3 text-neon-purple" />
+  const playPage = (
+    <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_340px]">
+      <div className="min-w-0 space-y-6">
+        {!readySong ? (
+          <>
+            <SongDropZone isUploading={isUploading} onFile={(file) => void handleAudioFile(file)} onBrowseLibrary={() => handleMainTabChange('COMMUNITY')} />
+            <div className="hidden gap-3 sm:grid sm:grid-cols-3">
+              {[
+                { step: '1', title: 'Add a song', body: 'Drop any track. The chart is generated on your device.' },
+                { step: '2', title: 'Pick a difficulty', body: 'Easy to Expert, each with its own personal best.' },
+                { step: '3', title: 'Share it', body: 'Publish to the library so friends can race your chart.' },
+              ].map((entry) => (
+                <div key={entry.step} className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4">
+                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/10 font-mono text-xs font-bold text-white/70">{entry.step}</span>
+                  <p className="mt-3 text-sm font-semibold text-white">{entry.title}</p>
+                  <p className="mt-1 text-xs leading-relaxed text-white/45">{entry.body}</p>
+                </div>
+              ))}
             </div>
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="max-w-[100px] truncate text-[10px] font-bold uppercase tracking-widest text-white/60 sm:max-w-[140px]">
-                {username || 'Anonymous'}
-              </span>
-              <span className="shrink-0 rounded-md border border-neon-blue/30 bg-neon-blue/10 px-1.5 py-0.5 font-mono text-[9px] font-black uppercase tracking-wider text-neon-blue">
-                Lvl {progress.level}
-              </span>
-              <span className="hidden truncate text-[9px] font-bold uppercase tracking-[0.14em] text-neon-purple md:inline">
-                {getSeasonTier(progress)}
-              </span>
-            </div>
-            <button
-              onClick={() => handleMainTabChange('SOCIAL')}
-              aria-label="Open Social"
-              className={`ml-auto flex shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1.5 font-display text-[9px] font-bold uppercase tracking-wider transition-all sm:px-3 ${
-                activeTab === 'SOCIAL'
-                  ? 'border-neon-purple bg-neon-purple text-black shadow-[0_0_14px_rgba(168,85,247,0.28)]'
-                  : 'border-neon-purple/30 bg-neon-purple/10 text-neon-purple hover:border-neon-purple/60 hover:bg-neon-purple/20'
-              }`}
-            >
-              <Users className="h-3.5 w-3.5" />
-              <span>Social</span>
-            </button>
-          </div>
-          {isAdminPage ? (
-            <button
-              onClick={handleBackToMainPage}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl border bg-white/5 text-white border-white/10 hover:bg-white/10 transition-all font-display font-bold text-xs uppercase tracking-widest"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              Back
-            </button>
-          ) : (
-            <div className="flex shrink-0 gap-2 sm:gap-3">
-              <button 
-                onClick={handleOpenAdminPage}
-                aria-label="Open admin panel"
-                className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-3 py-2 font-display text-xs font-bold uppercase tracking-widest text-white/40 transition-all hover:border-white/20 hover:bg-white/10 hover:text-white sm:px-4"
-              >
-                <Lock className="w-4 h-4" />
-                <span className="hidden sm:inline">Admin</span>
-              </button>
-              <button 
-                onClick={() => handleMainTabChange('SETTINGS')}
-                aria-label="Open player settings"
-                className={`flex items-center gap-2 rounded-xl border px-3 py-2 font-display text-xs font-bold uppercase tracking-widest transition-all sm:px-4 ${
-                  activeTab === 'SETTINGS' 
-                    ? 'bg-neon-blue text-black border-neon-blue shadow-[0_0_15px_rgba(0,243,255,0.3)]' 
-                    : 'bg-white/5 text-white/40 border-white/10 hover:bg-white/10 hover:text-white hover:border-white/20'
-                }`}
-              >
-                <SettingsIcon className="w-4 h-4" />
-                <span className="hidden sm:inline">Settings</span>
-              </button>
-            </div>
-          )}
-        </div>
-
-        <div className={`grid gap-6 w-full ${isAdminPage ? 'grid-cols-1' : 'grid-cols-1 md:grid-cols-2'}`}>
-          {!isAdminPage && activeTab === 'LOCAL' && (
-            <>
-          {/* Upload Card */}
-          <div className="relative">
-            {!readySong ? (
-              <label className="group relative overflow-hidden rounded-3xl bg-white/5 border border-white/10 p-8 flex flex-col items-center justify-center cursor-pointer transition-all hover:bg-white/10 hover:border-neon-blue/50 h-full min-h-[240px]">
-                <input 
-                  type="file" 
-                  accept="audio/*" 
-                  className="hidden" 
-                  onChange={handleFileUpload}
-                  disabled={isUploading}
-                />
-                
-                <div className="mb-4 p-4 rounded-2xl bg-neon-blue/10 text-neon-blue group-hover:scale-110 transition-transform">
-                  <Upload className="w-8 h-8" />
-                </div>
-                
-                <h3 className="text-xl font-display font-bold mb-1">Upload Song</h3>
-                <p className="text-white/40 text-sm text-center">
-                  MP3, WAV, or OGG. We'll auto-generate the beats.
-                </p>
-
-                {isUploading && (
-                  <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center backdrop-blur-sm">
-                    <div className="w-12 h-12 border-4 border-neon-blue border-t-transparent rounded-full animate-spin mb-4" />
-                    <p className="font-display font-bold text-neon-blue animate-pulse">ANALYZING BEATS...</p>
-                  </div>
-                )}
-              </label>
-            ) : (
-              <motion.div 
-                initial={{ scale: 0.9, opacity: 0 }}
-                animate={{ scale: 1, opacity: 1 }}
-                className="rounded-3xl bg-neon-blue/10 border border-neon-blue/50 p-8 flex flex-col items-center justify-center h-full min-h-[240px]"
-              >
-                <div className="mb-4 p-4 rounded-2xl bg-neon-blue text-black">
-                  <Music className="w-8 h-8" />
-                </div>
-                <h3 className="text-xl font-display font-bold mb-1 text-neon-blue truncate w-full text-center">
-                  {metadata.name}
-                </h3>
-                <p className="text-white/40 text-sm mb-6">
-                  {isRegenerating ? 'Recalculating beats...' : 'Ready to play!'}
-                </p>
-
-                <div className="w-full space-y-3 mb-6">
-                  <input 
-                    type="text"
-                    value={metadata.name}
-                    onChange={(e) => setMetadata(prev => ({ ...prev, name: e.target.value }))}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white text-sm focus:border-neon-blue outline-none"
-                    placeholder="Song Name"
-                  />
-                  <input 
-                    type="text"
-                    value={metadata.artist}
-                    onChange={(e) => setMetadata(prev => ({ ...prev, artist: e.target.value }))}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white text-sm focus:border-neon-blue outline-none"
-                    placeholder="Artist"
-                  />
-                  <label className="block rounded-xl border border-dashed border-white/15 bg-black/15 px-3 py-2.5 text-left text-[10px] font-bold uppercase tracking-wider text-white/40 transition hover:border-neon-purple/45 hover:text-neon-purple">
-                    <span>{lastUploadedCover ? `Cover ready: ${lastUploadedCover.name}` : 'Optional cover art (PNG, JPG, WebP)'}</span>
-                    <input type="file" accept="image/png,image/jpeg,image/webp" className="mt-2 block w-full text-xs normal-case tracking-normal text-white/55 file:mr-3 file:rounded-lg file:border-0 file:bg-neon-purple/15 file:px-2 file:py-1.5 file:text-[10px] file:font-bold file:text-neon-purple" onChange={(event) => setLastUploadedCover(event.target.files?.[0] || null)} />
-                  </label>
-                  <input
-                    type="text"
-                    value={mapTags}
-                    onChange={(event) => setMapTags(event.target.value)}
-                    className="w-full bg-white/5 border border-white/10 rounded-xl p-3 text-white text-sm focus:border-neon-blue outline-none"
-                    placeholder="Tags (e.g. pop, fast, practice)"
-                  />
-                </div>
-                
-                <div className="mb-4 grid grid-cols-4 gap-1.5" role="radiogroup" aria-label="Difficulty">
-                  {DIFFICULTY_PRESETS.map((preset) => {
-                    const selected = !advancedChartMode && difficultyPreset.id === preset.id;
-                    const record = songRecords.find((entry) => entry.preset.id === preset.id)?.record;
-                    const hasOfficial = !readySong.id || Boolean(readySong.charts?.[preset.id]?.length);
-                    return (
-                      <button
-                        key={preset.id}
-                        type="button"
-                        role="radio"
-                        aria-checked={selected}
-                        onClick={() => selectDifficultyPreset(preset.value)}
-                        title={readySong.id && !hasOfficial ? 'No official chart yet: this difficulty is generated locally and unranked' : preset.description}
-                        className={`rounded-xl border px-2 py-2 text-center transition ${selected ? 'border-neon-blue bg-neon-blue/15 text-white' : 'border-white/10 bg-white/[0.03] text-white/55 hover:border-white/25 hover:text-white'}`}
-                      >
-                        <span className="block text-[10px] font-black uppercase tracking-wider">{preset.label}</span>
-                        <span className="mt-0.5 block text-[9px] font-bold text-white/40">{record ? `${record.bestRank}${record.fullCombo ? ' · FC' : ''}` : hasOfficial ? '—' : 'local'}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <p className="text-neon-blue/60 text-[10px] font-bold uppercase tracking-widest mb-6">
-                  {isRegenerating ? '---' : `${readySong.notes.length} Notes Detected`}
-                  {readySong.id && !isRegenerating && (
-                    <span className={readySong.officialChart ? 'text-neon-green/70' : 'text-neon-orange/80'}>
-                      {readySong.officialChart ? ' · Ranked chart' : ' · Unranked custom chart'}
-                    </span>
-                  )}
-                </p>
-                
-                <button 
-                  onClick={handleStart}
-                  disabled={isRegenerating}
-                  className={`w-full py-4 rounded-2xl font-display font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(0,243,255,0.3)] ${
-                    isRegenerating 
-                      ? 'bg-white/10 text-white/20 cursor-not-allowed shadow-none' 
-                      : 'bg-neon-blue text-black hover:bg-white'
-                  }`}
-                >
-                  {isRegenerating ? (
-                    <div className="w-5 h-5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    <Play className="w-5 h-5 fill-current" />
-                  )}
-                  {isRegenerating ? 'Updating...' : 'Start Game'}
-                </button>
-
-                <button
-                  onClick={() => setIsEditingChart(true)}
-                  disabled={isRegenerating}
-                  className="mt-3 w-full rounded-xl border border-neon-orange/30 bg-neon-orange/10 py-3 font-display text-xs font-bold uppercase tracking-widest text-neon-orange transition hover:bg-neon-orange hover:text-black disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <span className="flex items-center justify-center gap-2"><Edit2 className="h-4 w-4" /> Edit beatmap</span>
-                </button>
-
-                {lastUploadedFile && (
-                  <button 
-                    onClick={handleSaveToCommunity}
-                    disabled={isSaving || isRegenerating}
-                    className="mt-3 w-full py-3 rounded-xl border border-neon-purple/30 text-neon-purple font-display font-bold uppercase tracking-widest text-xs hover:bg-neon-purple/10 transition-all flex items-center justify-center gap-2"
-                  >
-                    {isSaving ? (
-                      <div className="w-4 h-4 border-2 border-neon-purple/20 border-t-neon-purple rounded-full animate-spin" />
+          </>
+        ) : (
+          <>
+            <Card>
+              <div className="flex items-start gap-4">
+                <span className="shrink-0 rounded-2xl bg-neon-blue p-3 text-black"><Music className="h-7 w-7" /></span>
+                <div className="min-w-0 flex-1">
+                  <h2 className="truncate font-display text-2xl font-bold text-white">{readySong.id ? readySong.name : metadata.name || readySong.name}</h2>
+                  <p className="truncate text-sm text-white/50">{readySong.id ? readySong.artist : metadata.artist || readySong.artist}</p>
+                  <div className="mt-2 flex flex-wrap gap-1.5 text-[11px] font-semibold">
+                    {readySong.id ? (
+                      <span className={`rounded-full px-2 py-0.5 ${readySong.officialChart ? 'bg-neon-green/10 text-neon-green' : 'bg-neon-orange/10 text-neon-orange'}`}>
+                        {readySong.officialChart ? 'Ranked chart' : 'Unranked custom chart'}
+                      </span>
                     ) : (
-                      <Save className="w-4 h-4" />
+                      <span className="rounded-full bg-white/10 px-2 py-0.5 text-white/60">Your upload</span>
                     )}
+                    <span className="rounded-full bg-white/10 px-2 py-0.5 text-white/60">{isRegenerating ? 'Charting…' : `${readySong.notes.length} notes`}</span>
+                    <span className="rounded-full bg-white/10 px-2 py-0.5 text-white/60">{Math.floor(readySong.audioBuffer.duration / 60)}:{String(Math.round(readySong.audioBuffer.duration % 60)).padStart(2, '0')}</span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-6">
+                <div className="mb-2 flex items-baseline justify-between gap-3">
+                  <h3 className="text-sm font-semibold text-white/80">Difficulty</h3>
+                  {advancedChartMode
+                    ? <button type="button" onClick={() => handleMainTabChange('SETTINGS')} className="text-xs font-semibold text-neon-orange hover:text-white">Custom chart settings on</button>
+                    : <span className="text-xs text-white/40">{difficultyPreset.description}</span>}
+                </div>
+                <DifficultyPicker
+                  presets={DIFFICULTY_PRESETS}
+                  selectedId={advancedChartMode ? null : difficultyPreset.id}
+                  records={songRecords}
+                  officialIds={officialChartIds}
+                  onSelect={selectDifficultyPreset}
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={handleStart}
+                disabled={isRegenerating}
+                className="mt-6 flex w-full items-center justify-center gap-2 rounded-2xl bg-neon-blue py-4 font-display text-lg font-black uppercase tracking-wider text-black shadow-[0_0_24px_rgba(0,243,255,0.25)] transition hover:bg-white disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/30 disabled:shadow-none"
+              >
+                {isRegenerating ? <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/20 border-t-white" /> : <Play className="h-5 w-5 fill-current" />}
+                {isRegenerating ? 'Updating chart…' : 'Start'}
+              </button>
+              <div className={`mt-3 grid gap-2 ${isPublishableUpload ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`}>
+                <button type="button" onClick={() => setIsEditingChart(true)} disabled={isRegenerating} className="flex items-center justify-center gap-2 rounded-xl border border-white/10 py-2.5 text-sm font-semibold text-white/70 transition hover:border-white/25 hover:text-white disabled:opacity-40">
+                  <Edit2 className="h-4 w-4" /> Edit chart
+                </button>
+                {isPublishableUpload && (
+                  <button type="button" onClick={handleSaveToCommunity} disabled={isSaving || isRegenerating} className="flex items-center justify-center gap-2 rounded-xl border border-neon-purple/35 py-2.5 text-sm font-semibold text-neon-purple transition hover:bg-neon-purple/10 disabled:opacity-40">
+                    {isSaving ? <span className="h-4 w-4 animate-spin rounded-full border-2 border-neon-purple/20 border-t-neon-purple" /> : <Save className="h-4 w-4" />}
                     {isSaving ? 'Saving...' : 'Save to Community'}
                   </button>
                 )}
-                
-                <button 
-                  onClick={() => setReadySong(null)}
-                  className="mt-4 text-xs font-bold text-white/30 hover:text-white transition-colors uppercase tracking-widest"
-                >
-                  Choose Different Song
+                <button type="button" onClick={() => setReadySong(null)} className="flex items-center justify-center gap-2 rounded-xl border border-white/10 py-2.5 text-sm font-semibold text-white/70 transition hover:border-white/25 hover:text-white">
+                  <X className="h-4 w-4" /> Change song
                 </button>
-              </motion.div>
+              </div>
+            </Card>
+
+            {isPublishableUpload && (
+              <Card title="Song details" icon={Edit2}>
+                <p className="-mt-2 mb-4 text-xs text-white/40">Used when you publish to the library.</p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <label className="text-xs font-medium text-white/55">Title
+                    <input type="text" value={metadata.name} onChange={(e) => setMetadata(prev => ({ ...prev, name: e.target.value }))} className="mt-1.5 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white outline-none focus:border-neon-blue" placeholder="Song name" />
+                  </label>
+                  <label className="text-xs font-medium text-white/55">Artist
+                    <input type="text" value={metadata.artist} onChange={(e) => setMetadata(prev => ({ ...prev, artist: e.target.value }))} className="mt-1.5 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white outline-none focus:border-neon-blue" placeholder="Artist" />
+                  </label>
+                  <label className="text-xs font-medium text-white/55">Tags
+                    <input type="text" value={mapTags} onChange={(event) => setMapTags(event.target.value)} className="mt-1.5 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5 text-sm text-white outline-none focus:border-neon-blue" placeholder="pop, fast, practice" />
+                  </label>
+                  <label className="text-xs font-medium text-white/55">Cover art (optional)
+                    <input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => setLastUploadedCover(event.target.files?.[0] || null)} className="mt-1.5 block w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2 text-xs text-white/60 file:mr-3 file:rounded-lg file:border-0 file:bg-neon-purple/15 file:px-2 file:py-1 file:text-xs file:font-semibold file:text-neon-purple" />
+                  </label>
+                </div>
+              </Card>
             )}
-          </div>
+          </>
+        )}
+      </div>
 
-          {/* Info Card */}
-          <div className="rounded-3xl bg-white/5 border border-white/10 p-8 flex flex-col justify-between">
-            <div>
-              <DailyChallengeCard songs={communitySongs} onPlay={handleLoadCommunitySong} />
-              <h3 className="text-xl font-display font-bold mb-4 flex items-center gap-2">
-                <Trophy className="w-5 h-5 text-neon-pink" />
-                How to Play
-              </h3>
-              <ul className="space-y-3 text-white/60 text-sm font-medium">
-                <li className="flex items-center gap-3">
-                  <span className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-white font-bold">D</span>
-                  Lane 1
-                </li>
-                <li className="flex items-center gap-3">
-                  <span className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-white font-bold">F</span>
-                  Lane 2
-                </li>
-                <li className="flex items-center gap-3">
-                  <span className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-white font-bold">J</span>
-                  Lane 3
-                </li>
-                <li className="flex items-center gap-3">
-                  <span className="w-8 h-8 rounded-lg bg-white/10 flex items-center justify-center text-white font-bold">K</span>
-                  Lane 4
-                </li>
-              </ul>
-            </div>
-            
-            <div className="mt-6 pt-6 border-t border-white/5">
-              <p className="text-xs text-white/30 italic">
-                {movingSlidersEnabled
-                  ? 'Tap at the line. Hold trails, follow curved slides across lanes, and release on the tail.'
-                  : 'Tap at the line. Hold straight trails in their lane and release on the tail.'}
-              </p>
-            </div>
-          </div>
-            </>
-          )}
+      <aside className="space-y-6" aria-label="Play extras">
+        <DailyChallengeCard songs={communitySongs} onPlay={handleLoadCommunitySong} />
+        <ControlsCard keybindings={localSettings.keybindings} movingSliders={movingSlidersEnabled} onRebind={() => handleMainTabChange('SETTINGS')} />
+        <RecentRunsCard runs={progress.recentRuns} />
+      </aside>
+    </div>
+  );
 
-          {/* Community Library Card */}
-          <div className="md:col-span-2 rounded-[2rem] bg-black/40 backdrop-blur-xl border border-white/10 p-4 md:p-8 flex flex-col shadow-2xl relative overflow-hidden">
-            <div className={`absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent ${isAdminPage ? 'via-neon-pink/50' : 'via-neon-blue/50'} to-transparent`} />
-            
-            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 mb-8">
-              <div className="flex items-center gap-4">
-                <div className="relative">
-                  <div className={`absolute inset-0 ${isAdminPage ? 'bg-neon-pink' : 'bg-neon-blue'} blur-lg opacity-20 animate-pulse`} />
-                  <div className={`relative p-3 rounded-2xl border ${isAdminPage ? 'bg-neon-pink/10 border-neon-pink/20 text-neon-pink' : 'bg-neon-blue/10 border-neon-blue/20 text-neon-blue'}`}>
-                    {isAdminPage ? <Lock className="w-6 h-6" /> : <SectionIcon className="w-6 h-6" />}
-                  </div>
-                </div>
-                <div>
-                  {isAdminPage ? (
-                    <>
-                      <h3 className="text-2xl font-display font-black uppercase tracking-tight italic">
-                        Admin <span className="text-neon-pink">Panel</span>
-                      </h3>
-                      <p className="text-[10px] text-white/30 uppercase tracking-[0.2em] font-bold">Restricted Control Surface</p>
-                    </>
-                  ) : (
-                    <>
-                      <h3 className="text-2xl font-display font-black uppercase tracking-tight italic">
-                        {sectionMeta.lead} <span className={sectionMeta.color}>{sectionMeta.accent}</span>
-                      </h3>
-                      <p className="text-[10px] text-white/30 uppercase tracking-[0.2em] font-bold">{sectionMeta.subtitle}</p>
-                    </>
-                  )}
-                </div>
-              </div>
+  return (
+    <>
+    <AppShell
+      activeTab={activeTab}
+      onNavigate={handleShellNavigate}
+      player={{ username, level: progress.level, xp: progress.xp, tier: getSeasonTier(progress) }}
+      theme={localSettings.menuTheme}
+    >
+      <PageHeader title={pageCopy[activeTab].title} subtitle={pageCopy[activeTab].subtitle} />
 
-              {!isAdminPage && (
-              <div className="flex max-w-full overflow-x-auto no-scrollbar bg-white/5 backdrop-blur-md rounded-2xl p-1.5 border border-white/5 self-start lg:self-center">
-                {[
-                  { id: 'LOCAL', label: 'Local', icon: <Activity className="w-3.5 h-3.5" /> },
-                  { id: 'COMMUNITY', label: 'Community', icon: <Cloud className="w-3.5 h-3.5" /> },
-                  { id: 'SOCIAL', label: 'Social', icon: <Users className="w-3.5 h-3.5" /> },
-                  { id: 'PROGRESS', label: 'Progress', icon: <Trophy className="w-3.5 h-3.5" /> },
-                  { id: 'GLOBAL', label: 'Global Scores', icon: <Trophy className="w-3.5 h-3.5" /> },
-                  { id: 'REPLAYS', label: 'Replays', icon: <Play className="w-3.5 h-3.5" /> }
-                ].map((tab) => (
-                  <button 
-                    key={tab.id}
-                    onClick={() => handleMainTabChange(tab.id as MainTab)}
-                    className={`relative px-4 py-2.5 rounded-xl text-[11px] font-black uppercase tracking-widest transition-all flex items-center gap-2 group ${
-                      activeTab === tab.id ? 'text-black' : 'text-white/40 hover:text-white/70'
-                    }`}
-                  >
-                    {activeTab === tab.id && (
-                      <motion.div 
-                        layoutId="activeTab"
-                        className="absolute inset-0 bg-white rounded-xl shadow-[0_0_20px_rgba(255,255,255,0.3)]"
-                        transition={{ type: "spring", bounce: 0.2, duration: 0.6 }}
-                      />
-                    )}
-                    <span className="relative z-10">{tab.icon}</span>
-                    <span className="relative z-10 whitespace-nowrap">{tab.label}</span>
-                  </button>
-                ))}
-              </div>
-              )}
-            </div>
-            
-            <Suspense fallback={<PanelFallback />}>
+      {error && (
+        <div role="alert" className="mb-6 flex items-start justify-between gap-3 rounded-2xl border border-neon-pink/30 bg-neon-pink/10 px-4 py-3 text-sm text-neon-pink">
+          <span>{error}</span>
+          <button type="button" onClick={() => setError(null)} aria-label="Dismiss message" className="shrink-0 rounded-lg p-0.5 hover:bg-white/10"><X className="h-4 w-4" /></button>
+        </div>
+      )}
+
+      <Suspense fallback={<PanelFallback />}>
+        {activeTab === 'LOCAL' ? playPage : (
+          <div className={activeTab === 'GLOBAL' || activeTab === 'REPLAYS' ? 'rounded-3xl border border-white/[0.08] bg-white/[0.03] p-4 sm:p-6' : ''}>
             {activeTab === 'SOCIAL' ? (
               <SocialHub
                 identity={playerIdentity}
@@ -1554,7 +1326,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
               ) : (
                 <div 
                   onScroll={handleGlobalScoresScroll}
-                  className="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar touch-pan-y"
+                  className="space-y-2 max-h-[70vh] overflow-y-auto pr-2 custom-scrollbar touch-pan-y"
                 >
                   {globalScores.map((score, idx) => (
                     <div 
@@ -1580,6 +1352,11 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                       <div className="w-6 h-6 border-2 border-white/10 border-t-white/40 rounded-full animate-spin" />
                     </div>
                   )}
+                  {hasMoreScores && !isLoadingMoreScores && (
+                    <button type="button" onClick={() => void fetchMoreGlobalScores()} className="w-full rounded-2xl border border-white/10 py-3 text-sm font-semibold text-white/60 transition hover:border-white/20 hover:text-white">
+                      Load more scores
+                    </button>
+                  )}
                 </div>
               )
             ) : activeTab === 'REPLAYS' ? (
@@ -1590,7 +1367,7 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                   <p className="text-xs mt-1">Play a community song and save your replay at the end!</p>
                 </div>
               ) : (
-                <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar touch-pan-y">
+                <div className="space-y-2 max-h-[70vh] overflow-y-auto pr-2 custom-scrollbar touch-pan-y">
                   {savedReplays.map((replay, idx) => (
                     <div 
                       key={replay.id || idx} 
@@ -1687,51 +1464,11 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
                 updateGameplayOptions={updateGameplayOptions}
                 username={username}
               />
-            ) : (
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-2xl border border-neon-blue/15 bg-neon-blue/[0.05] p-5">
-                  <span className="font-mono text-xs font-bold text-neon-blue">01</span>
-                  <h4 className="mt-3 font-display font-bold">Bring your music</h4>
-                  <p className="mt-2 text-xs leading-relaxed text-white/40">Drop an audio file into the Play Studio above. BeatPulse builds the chart locally in your browser.</p>
-                </div>
-                <button onClick={() => handleMainTabChange('COMMUNITY')} className="rounded-2xl border border-neon-purple/15 bg-neon-purple/[0.05] p-5 text-left transition hover:border-neon-purple/35 hover:bg-neon-purple/10">
-                  <span className="font-mono text-xs font-bold text-neon-purple">02</span>
-                  <h4 className="mt-3 font-display font-bold">Explore charts</h4>
-                  <p className="mt-2 text-xs leading-relaxed text-white/40">Load a community song, preview its audio, and chase the top five scores.</p>
-                </button>
-                <button onClick={() => handleMainTabChange('SOCIAL')} className="rounded-2xl border border-neon-green/15 bg-neon-green/[0.05] p-5 text-left transition hover:border-neon-green/35 hover:bg-neon-green/10">
-                  <span className="font-mono text-xs font-bold text-neon-green">03</span>
-                  <h4 className="mt-3 font-display font-bold">Race your crew</h4>
-                  <p className="mt-2 text-xs leading-relaxed text-white/40">Add friends, open a live room, ready up, and watch standings move in real time.</p>
-                </button>
-              </div>
-            )}
-            </Suspense>
+            ) : null}
           </div>
-        </div>
-
-        {error && (
-          <motion.p 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="mt-6 text-neon-pink font-display font-bold text-sm"
-          >
-            {error}
-          </motion.p>
         )}
-
-        <div className="mt-16 flex items-center gap-8 text-white/20">
-          <div className="flex items-center gap-2">
-            <Music className="w-4 h-4" />
-            <span className="text-xs font-bold uppercase tracking-widest">HTML5 AUDIO</span>
-          </div>
-          <div className="w-1 h-1 bg-white/20 rounded-full" />
-          <div className="flex items-center gap-2">
-            <Play className="w-4 h-4" />
-            <span className="text-xs font-bold uppercase tracking-widest">REALTIME SYNC</span>
-          </div>
-        </div>
-      </motion.div>
+      </Suspense>
+    </AppShell>
 
       {isEditingChart && readySong && (
         <Suspense fallback={null}>
@@ -1850,6 +1587,6 @@ export const Menu: React.FC<MenuProps> = ({ onStartGame, audioContext, settings,
         )}
       </AnimatePresence>
 
-    </div>
+    </>
   );
 };

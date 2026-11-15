@@ -54,7 +54,7 @@ export const DailyChallengeCard: React.FC<DailyChallengeCardProps> = ({ songs, o
   const preset = getDifficultyPreset(DIFFICULTY_VALUES[challenge.difficulty]);
 
   return (
-    <section className="mb-6 rounded-2xl border border-neon-orange/30 bg-neon-orange/[0.07] p-4" aria-label="Daily challenge">
+    <section className="rounded-3xl border border-neon-orange/30 bg-neon-orange/[0.07] p-5" aria-label="Daily challenge">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="flex items-center gap-1.5 text-[10px] font-black uppercase tracking-[0.2em] text-neon-orange">
